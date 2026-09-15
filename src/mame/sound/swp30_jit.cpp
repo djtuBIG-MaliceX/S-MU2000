@@ -512,7 +512,7 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 			a.store32(M(o_ram_index), RCX);
 			a.patch(j3);
 			// 2 つ目の index
-			a.loadu8(RAX, mem{SWP, NOREG, 1, o_ix2_act + s});
+			a.loadu8(RAX, mem{SWP, NOREG, 1, s32(o_ix2_act + s)});
 			a.test32(RAX, RAX);
 			size_t j4 = a.jz_fwd();
 			a.load32(RCX, mem{SWP, NOREG, 1, o_ix2_value + 4 * s32(s)});

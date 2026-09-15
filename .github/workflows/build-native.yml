@@ -1,0 +1,143 @@
+name: Build Native
+
+on:
+  push:
+  workflow_dispatch:
+
+env:
+  PROJECT_NAME: SMU2000_VST2
+
+# CMake pipeline (Phase 6 of the iPlug2 port — see VST2_LEDGER.md §Phase 6), adapted from
+# ../sw10_plug build-native.yml. Deltas here: NO app target, NO VST3 target (so no vst3sdk
+# checkout and no download-prebuilt-libs.sh — the default NanoVG backend needs no prebuilt
+# libs), GUI OFF by default (hard rule #6: a default build links no IGraphics/GL/Skia).
+# Never cache/upload roms/, aeffect*.h or the VST2 SDK here (ledger ROM policy + hard rules).
+jobs:
+  build-windows:
+    name: Windows CMake (${{ matrix.arch }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            preset: ci-win64
+          - arch: Win32
+            preset: ci-win32
+
+    steps:
+    - name: Check out repository (with iPlug2 submodule)
+      uses: actions/checkout@v4
+      with:
+        submodules: true
+        fetch-depth: 1
+
+    - name: Download CLAP SDK + helpers
+      # Tracked readme.txt stubs live in iPlug2/Dependencies/IPlug/CLAP_{SDK,HELPERS},
+      # so the script runs standalone on a clean submodule checkout (Git-Bash, network).
+      working-directory: iPlug2/Dependencies/IPlug
+      run: ./download-clap-sdks.sh
+      shell: bash
+
+    - name: Configure (${{ matrix.arch }})
+      # VST2 is deliberately OFF on CI: vstsdk2.4 is proprietary and cannot be downloaded
+      # here (the cmake/iplug2_paths.cmake D:/opt/vst fallback is this-box only). To build
+      # VST2 on CI later: stage the SDK (private action artifact / self-hosted runner or a
+      # repo-internal release), export VST2_SDK_DIR=<staged root> before this step (the
+      # ci-* presets already map it onto SMU2000_VST2_SDK_DIR) and drop -DSMU2000_BUILD_VST2=OFF.
+      # The ci-win32/ci-win64 presets already set SMU2000_COPY_ROMS=OFF (no ROMs on CI).
+      run: cmake --preset ${{ matrix.preset }} -DSMU2000_BUILD_VST2=OFF
+      shell: pwsh
+
+    - name: Build Release (${{ matrix.arch }})
+      run: cmake --build --preset ${{ matrix.preset }}-release
+      shell: pwsh
+
+    - name: "Gate: CLAP artifact exists (${{ matrix.arch }})"
+      # Replaces sw10's app-launch smoke: this project has no app target.
+      run: |
+        $clap = "build-cmake/clap/${{ matrix.arch }}/Release/SMU2000_VST2.clap"
+        if (-not (Test-Path $clap)) { throw "missing CLAP artifact: $clap" }
+        Get-Item $clap | Select-Object FullName, Length
+      shell: pwsh
+
+    - name: Stage ROM-REQUIRED stub (paths only — ROMs are not redistributable)
+      run: |
+        # Consumers must supply their own dumped MU2000 ROMs (find_roms() probes
+        # <dllDir>\roms, then env S_MU2000_ROMS). CI cannot ship them (copyrighted);
+        # drop a stub into each artifact Release dir instead. Anchored under build-cmake
+        # only — never touches the repo roms/ tree (hard rule #1/#3).
+        Get-ChildItem build-cmake -Recurse -Directory -Filter Release | ForEach-Object {
+          Set-Content -Path (Join-Path $_.FullName "ROM-REQUIRED.txt") -Value 'This build has no Yamaha MU2000 ROMs (not redistributable). Place the dumped `roms/` folder (mu2000_flash.bin + dump/ + standin/) next to the plugin binary, or set env `S_MU2000_ROMS`, before use.'
+        }
+      shell: pwsh
+
+    - name: Upload artifacts (${{ matrix.arch }})
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ env.PROJECT_NAME }}-win-${{ matrix.arch }}
+        # clap only: no app/vst2/vst3 paths — those targets never exist on CI (no app/vst3
+        # target at all; VST2 gated OFF above), so anything else would trip
+        # if-no-files-found: error. Precise path so no glob can ever sweep up roms/.
+        path: build-cmake/clap/${{ matrix.arch }}/Release/
+        if-no-files-found: error
+
+  build-mingw:
+    name: MinGW-w64 x64 (MSYS2 GCC)
+    runs-on: windows-latest
+    continue-on-error: false
+    steps:
+    - name: Setup MSYS2 (MINGW64)
+      uses: msys2/setup-msys2@v2
+      with:
+        msystem: MINGW64
+        update: true
+        install: >-
+          git
+          make
+          mingw-w64-x86_64-gcc
+          mingw-w64-x86_64-ninja
+          mingw-w64-x86_64-cmake
+
+    - name: Check out repository (with iPlug2 submodule)
+      uses: actions/checkout@v4
+      with:
+        submodules: true
+        fetch-depth: 1
+
+    - name: Download CLAP SDK + helpers
+      run: cd iPlug2/Dependencies/IPlug && ./download-clap-sdks.sh
+      shell: msys2 {0}
+
+    - name: Configure (x64 MinGW GCC)
+      # VST2 OFF for the same proprietary-SDK reason as the MSVC job (see note there);
+      # mingw-ci-x64 already sets SMU2000_COPY_ROMS=OFF. Win32 MinGW is intentionally
+      # not built (x64-only on CI; interpreter JIT path is covered by the MSVC Win32 job).
+      run: cmake --preset mingw-ci-x64 -DSMU2000_BUILD_VST2=OFF
+      shell: msys2 {0}
+
+    - name: Build Release (x64 MinGW GCC)
+      run: cmake --build --preset mingw-ci-x64-release
+      shell: msys2 {0}
+
+    - name: "Gate: CLAP artifact exists (x64-mingw)"
+      run: |
+        clap="build-cmake/clap/x64-mingw/Release/SMU2000_VST2.clap"
+        test -f "$clap" || { echo "missing CLAP artifact: $clap" >&2; exit 1; }
+        ls -la "$clap"
+      shell: msys2 {0}
+
+    - name: Stage ROM-REQUIRED stub (paths only — ROMs are not redistributable)
+      run: |
+        Get-ChildItem build-cmake -Recurse -Directory -Filter Release | ForEach-Object {
+          Set-Content -Path (Join-Path $_.FullName "ROM-REQUIRED.txt") -Value 'This build has no Yamaha MU2000 ROMs (not redistributable). Place the dumped `roms/` folder (mu2000_flash.bin + dump/ + standin/) next to the plugin binary, or set env `S_MU2000_ROMS`, before use.'
+        }
+      shell: pwsh
+
+    - name: Upload artifacts (x64-mingw)
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ env.PROJECT_NAME }}-win-x64-mingw
+        # clap only (see MSVC upload note).
+        path: build-cmake/clap/x64-mingw/Release/
+        if-no-files-found: error
