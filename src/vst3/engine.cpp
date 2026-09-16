@@ -385,9 +385,9 @@ void cache_store(const mu2000 &mu, const std::string &path, const std::string &r
 	if (blob.empty())
 		return;
 #if defined(_WIN32)
-	const unsigned long long pid = unsigned long long(GetCurrentProcessId());
+	const unsigned long long pid = (unsigned long long)GetCurrentProcessId();
 #else
-	const unsigned long long pid = unsigned long long(getpid());
+	const unsigned long long pid = (unsigned long long)getpid();
 #endif
 	char tail[32];
 	std::snprintf(tail, sizeof(tail), ".%llu.tmp", pid);
