@@ -1,5 +1,10 @@
 #include "SMU2000_VST2.h"
 
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <utility>
+
 #if defined(CLAP_API) && (defined(__GNUC__) || defined(__clang__))
 // MinGW/Clang portability fix (no iPlug2 submodule edit; mirrors ../sw10_plug). GCC/Clang
 // reject __attribute__((dllexport)) on a namespace-scope `const` definition even with a
@@ -62,24 +67,75 @@ void SMU2000_VST2::OnReset()
 void SMU2000_VST2::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
 {
   (void) inputs;  // PLUG_CHANNEL_IO "0-2": no audio inputs
-  m_engine->fill(outputs[0], outputs[1], nFrames, nullptr, nullptr);
+
+  // No MIDI this block: render it in one call (the common, lowest-overhead case).
+  if (m_midi_q.empty())
+  {
+    m_engine->fill(outputs[0], outputs[1], nFrames, nullptr, nullptr);
+    return;
+  }
+
+  // Hosts deliver events unordered within effProcessEvents / in_events; the engine
+  // consumes its serial queue sample-sequentially, so order by sample offset first.
+  // stable_sort keeps host ordering for events sharing an offset.
+  std::stable_sort(m_midi_q.begin(), m_midi_q.end(),
+                   [](const midi_event& a, const midi_event& b) { return a.offset < b.offset; });
+
+  // Walk the block in segments: render up to each event's offset, then clock that
+  // event's bytes onto the serial line, so note on/off lands at the right sample
+  // instead of the block start. Each fill() releases m_machine on return, so calling
+  // midi() between fill() calls is lock-safe; the 31250 bps model then spaces bytes.
+  int produced = 0;
+  size_t i = 0;
+  while (i < m_midi_q.size())
+  {
+    int off = m_midi_q[i].offset;
+    if (off < 0) off = 0;
+    if (off > nFrames) off = nFrames;  // clamp past-the-end to the block tail
+
+    if (off > produced)
+    {
+      m_engine->fill(outputs[0] + produced, outputs[1] + produced, off - produced, nullptr, nullptr);
+      produced = off;
+    }
+
+    // All events landing on this sample go onto the line before the next run_sample().
+    while (i < m_midi_q.size() && m_midi_q[i].offset <= off)
+    {
+      m_engine->midi(m_midi_q[i].bytes.data(), m_midi_q[i].bytes.size(), m_midi_q[i].port);
+      ++i;
+    }
+  }
+
+  if (produced < nFrames)
+    m_engine->fill(outputs[0] + produced, outputs[1] + produced, nFrames - produced, nullptr, nullptr);
+
+  m_midi_q.clear();
 }
 
 void SMU2000_VST2::ProcessMidiMsg(const IMidiMsg& msg)
 {
-  uint8_t bytes[3];
-  bytes[0] = msg.mStatus;
+  midi_event ev;
+  ev.offset = msg.mOffset;  // sample offset into the coming ProcessBlock()
+  ev.port = 0;              // port 0 = parts 1-16; channel lives in the status byte
   const int nibble = msg.mStatus & 0xF0;
   const int n = (nibble == 0xC0 || nibble == 0xD0) ? 2 : 3;  // ProgramChange/ChannelAT are 2 bytes
-  bytes[1] = msg.mData1;
+  ev.bytes.reserve(n);
+  ev.bytes.push_back(msg.mStatus);
+  ev.bytes.push_back(msg.mData1);
   if (n == 3)
-    bytes[2] = msg.mData2;
-  m_engine->midi(bytes, n, 0);  // port 0 = parts 1-16; channel lives in the status byte
+    ev.bytes.push_back(msg.mData2);
+  m_midi_q.push_back(std::move(ev));
 }
 
 void SMU2000_VST2::ProcessSysEx(const ISysEx& msg)
 {
-  m_engine->midi(reinterpret_cast<const uint8_t*>(msg.mData), msg.mSize, 0);
+  midi_event ev;
+  ev.offset = msg.mOffset;
+  ev.port = 0;
+  const uint8_t* p = reinterpret_cast<const uint8_t*>(msg.mData);
+  ev.bytes.assign(p, p + msg.mSize);
+  m_midi_q.push_back(std::move(ev));
 }
 
 bool SMU2000_VST2::SerializeState(IByteChunk& chunk) const

@@ -254,7 +254,22 @@ MinGW appends `-mingw`/`-mingw-clang`). Static `/MT` CRT everywhere.
   GOTCHA for probes: this SDK's aeffect.h has NO `index` field — effOpen=0/effClose=1,
   effGetChunk=23/effSetChunk=24 (calling the 34/35 slots = effGetVendorString writes 64 bytes
   through your `void**` — instant AV). Engine boots async (~2-4 s with staged ROMs); poll
-  `state()==ready` before chunk/audio calls. Sound-out unverifiable: no DAW/host installed.
+   `state()==ready` before chunk/audio calls. Sound-out unverifiable: no DAW/host installed.
+- **P2-FIX (2026-09-16) — sample-accurate MIDI (was block-boundary quantised).** The original
+  `ProcessMidiMsg` → `m_engine->midi(bytes, n, 0)` applied *every* event in a block at its start
+  (the `0` is the engine **port**, not a time). `m_engine->midi()` has no time arg — it just
+  clock-queues bytes onto the emulated 31250 bps serial line — so note on/off onset was jittered
+  by up to one host block (≈23 ms @1024/44.1k), worse at large buffers while audio stayed steady.
+  Hosts *do* pass the intra-block offset (`IMidiMsg::mOffset`/`ISysEx::mOffset`, set from VST2
+  `deltaFrames` / CLAP `time`); we were dropping it. Fix: park stamped events in an audio-thread
+  `m_midi_q` in `ProcessMidiMsg`/`ProcessSysEx`, `stable_sort` by offset in `ProcessBlock`, then
+  interleave — `fill()` up to each offset (writing `outputs+produced`), inject that event's bytes
+  via `midi()`, continue. Each `fill()` releases `m_machine` on return so `midi()` between calls
+  is lock-safe; the serial model then spaces bytes to the right sample. Empty-block fast path kept.
+  Resampler path (`m_pos`/`m_written`/ring are member state) and `driver` pumps (`apply_buttons`
+  state-based, `pump_midi`/`wheel`/`out` drain-while, `publish`/`advance_clock` sum to nFrames) all
+  verified safe across split `fill()` calls. No latency change: `engine::latency_samples()` is
+  intentionally 0 (resampler synthesises lookahead). Rebuilt VST2+CLAP Win32+x64 clean (MSVC).
 
 ### Phase 3 — CLAP wrapper (`P3-clap-wrapper`, Wave 3b) — subagent (parallel with P2)
 - Reuse the **same** `SMU2000_VST2.{h,cpp}` plugin class + `smu2000_engine`. Add CLAP target in
