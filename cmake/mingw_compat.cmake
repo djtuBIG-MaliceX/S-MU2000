@@ -4,13 +4,19 @@
 # Included from the root CMakeLists.txt AFTER find_package(iPlug2) when the compiler is
 # the Windows GNU/Clang (MinGW) toolchain. The MSVC path is untouched by everything here.
 #
-# Scope (see VST2_LEDGER.md Phase 5):
+# Scope (see VST2_LEDGER.md Phase 5; JIT status updated 2026-09-16, CPU32_LEDGER.md Phases 1-8):
 #   - Both x86_64 (MSYS2 MINGW64 shell, preset mingw-x64/mingw-clang-x64) and x86
 #     (MSYS2 MINGW32 shell, preset mingw-win32) are supported: the SMU2000 engine is
-#     arch-clean — both JITs are guarded `#if defined(_WIN32) && defined(__x86_64__)`
-#     (swp30_jit.cpp / sh2_jit.cpp), so 32-bit simply compiles the interpreter path
-#     (same as MSVC-Win32) while MinGW-x64 gets the JIT on. Only a mingw-w64-i686
-#     toolchain needs to be installed for the win32 leg.
+#     arch-clean. Both JITs are now DUAL-MODE (sh2_jit.cpp / swp30_jit.cpp: x64 under
+#     __x86_64__||_M_X64 — MSVC x64 included — and x86-32 under __i386__||_M_IX86 via
+#     SMU_JIT32_PORT_SH2/MEG self-defines), so win32 MinGW compiles the JIT path too, in
+#     principle: the 32-bit emitter is validated (tools/x64asm32_test.cpp + MSVC x86 A/B,
+#     bit-exact) and the x64 path is GCC+Clang-proven here. No SSE is emitted in either
+#     mode, so no win32 stack-alignment/SSE flags are needed or set anywhere below.
+#   - DEV-BOX CAVEAT: the mingw-w64-i686 gcc on this machine is INOPERABLE (cc1plus loads
+#     and silently exits; modifying anything under C:\msys64 is forbidden), so the win32
+#     MinGW leg cannot be executed here — vs-win32 (MSVC amd64_x86, tools/msvc32_build.ps1
+#     for native tools) is the supported Win32 plugin build. Never attempt mingw32 repairs.
 #   - Default build is GRAPHICS-FREE (SMU2000_ENABLE_GUI=OFF): no IGraphics/NanoVG.
 #     The GUI-ON path keeps the sw10 NanoVG/GL2 notes (nanovg.c+glad.c unity-built
 #     inside IGraphicsWin.cpp; glad LoadLibrary()s opengl32.dll; no prebuilt MSVC

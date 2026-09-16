@@ -111,6 +111,10 @@ originally-sketched IGraphics rewrite — see §Phase 7.)
   - *Optional x64-only perf follow-on:* the JITs emit the Microsoft x64 ABI (rcx/rdx/r8/r9),
     so widening the guard to `(defined(__x86_64__) || defined(_M_X64))` could re-enable JIT on
     MSVC-x64. **Default OFF** for pass 1; gate behind `SMU2000_ENABLE_JIT` (x64-only) once sound is proven.
+  - **SUPERSEDED 2026-09-16 (CPU32_LEDGER.md Phases 1–8):** both JITs are now dual-mode —
+    `__x86_64__ || _M_X64` (MSVC-x64 gets the JIT) **and** `__i386__ || _M_IX86`
+    (x86-32, self-defined `SMU_JIT32_PORT_SH2/MEG`). Win32 is **no longer interpreter-only**;
+    MSVC-win32/x64 both run the JIT by default (`SMU2000_{MEG,SH2}_JIT=0` kill-switches).
 
 - **MSVC portability looks low-risk.** Scan of all 71 core files found **no** `__attribute__`,
   `__builtin`, `typeof`, `__int128`, GCC statement-exprs, or SIMD intrinsics. Known MSVC items:
@@ -219,7 +223,8 @@ MinGW appends `-mingw`/`-mingw-clang`). Static `/MT` CRT everywhere.
   include dirs `src` + `src/compat`. `/std:c++20 /utf-8 /MT`, defs
   `_USE_MATH_DEFINES;NOMINMAX;_CRT_SECURE_NO_WARNINGS;WIN32`.
 - Confirm `x64asm.h` is NOT compiled (guarded out on win32) and `sh2_jit`/`swp30_jit` compile to
-  interpreter-only stubs.
+  interpreter-only stubs. *(Historic as of 2026-09-16: x86-32 JIT port landed — win32 now
+  compiles `x64asm.h` in 32-bit mode with real JITs; see `CPU32_LEDGER.md` Phases 1–8.)*
 - **Accept:** `smu2000_engine.lib` builds on Win32 **and** x64 MSVC with sound code intact
   (link a throwaway that calls `engine::start()`+`fill()` if needed to prove symbols).
 
@@ -295,6 +300,8 @@ MinGW appends `-mingw`/`-mingw-clang`). Static `/MT` CRT everywhere.
 - Add presets `mingw-win32`, `mingw-x64`, `mingw-clang-x64`, `mingw-ci-*` (Ninja + gcc/clang, MSYS2 MINGW32/MINGW64 shell).
 - On MinGW **win64**, `__x86_64__` IS defined → JIT path turns ON; verify `x64asm.h` assembles under
   GCC **and** Clang. On MinGW **win32** JIT stays off (interpreter), like MSVC-win32.
+  *(2026-09-16: JIT support is now compiled-in for MinGW-win32 too (dual-mode JITs), but the
+  i686 toolchain is broken on this box — use `vs-win32`; see `CPU32_LEDGER.md`.)*
 - Import-lib name remaps + static runtime handled in `mingw_compat.cmake` (submodule untouched).
 - **Accept:** VST2 + CLAP build under **MSYS2 GCC and Clang** (x64, and win32 where the toolchain exists),
   self-contained (system DLL imports only), entry exports present.
@@ -411,7 +418,14 @@ MinGW appends `-mingw`/`-mingw-clang`). Static `/MT` CRT everywhere.
       Host-probed (native C++ hosts in `tools/`): x64 VST2 + CLAP + Win32 VST2 all attach/paint/
       detach the 1250×500 panel through the real message loop; GUI-OFF default stays editor-free/
       graphics-free. See §Phase 7 for the full write-up + ABI/opcode gotchas. Tree left configured
-      GUI-OFF (x64 rebuilt last). Nothing committed.
+       GUI-OFF (x64 rebuilt last). Nothing committed.
+- [x] CPU32 x86-32 JIT port — **DONE 2026-09-16** (full record: `CPU32_LEDGER.md` Phases 1–8).
+      Dual-mode `x64asm.h` + SH-2 + MEG JITs ported to x86-32; guards widened so **MSVC-x64 also
+      gets the JIT**; Win32 JIT default-ON, bit-exact (35/35 render matrix + soak + traces). Host
+      win32 CPU win 2.06x (native 4.74x); win32-JIT 1.60xRT vs interpreter 0.78xRT. Tooling:
+      `tools/msvc32_build.ps1` (MSVC amd64_x86 harness — mingw32 cc1plus broken on this box, do
+      not repair), `tools/x64asm32_test.cpp` (encoding gate). Supersedes every "Win32 =
+      interpreter-only" note above (Findings §32-bit JIT, P1, P5, P0-P7 status entries).
 
 ### Wave schedule — COMPLETE (P0–P7 green)
 

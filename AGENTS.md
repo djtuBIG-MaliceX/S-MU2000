@@ -78,10 +78,18 @@ Legacy native exes (unchanged, MSYS2 g++): `make`, `make test`, `make vst3`.
 - **MSVC is this session.** Expect first-time MSVC compile of the g++-only engine (`/std:c++20`,
   `_USE_MATH_DEFINES` for `M_PI`, `/utf-8` for Japanese comments). Keep fixes in the engine
   CMake target only.
-- **Win32 = interpreter-only.** Both JITs are `#if defined(_WIN32) && defined(__x86_64__)`
-  (`swp30_jit.cpp`, `sh2_jit.cpp`); MSVC never defines `__x86_64__`, so win32 (and MSVC-x64) run
-  the interpreter with `x64asm.h` never compiled. MinGW-x64 turns the JIT back on. Verify in P1.
+- **Both JITs are dual-mode (2026-09-16, `CPU32_LEDGER.md` Phases 1–8).** Guards are now
+  `__x86_64__ || _M_X64` (x64 — **MSVC x64 now gets the JIT too**) and `__i386__ || _M_IX86`
+  (x86-32) in `sh2_jit.cpp`/`swp30_jit.cpp`; 32-bit builds self-define `SMU_JIT32_PORT_SH2`/
+  `SMU_JIT32_PORT_MEG` (opt out: `SMU_JIT32_NO_SH2`/`SMU_JIT32_NO_MEG`) → **Win32 JIT default-ON**,
+  bit-exact vs interpreter. Runtime kill-switches: `SMU2000_{MEG,SH2}_JIT=0`, `SMU2000_MEG_BAKE=0`,
+  `SMU2000_MEG_EARLY=0`. Native win32 tool harness = `tools/msvc32_build.ps1` (MSVC `amd64_x86`);
+  `tools/x64asm32_test.cpp` = the 32-bit encoding gate. **On THIS box the MinGW-w64 Win32 toolchain
+  is broken (cc1plus loads and silently no-ops) — use the `vs-win32` preset and NEVER attempt
+  mingw32 repairs or any write under `C:\msys64`.**
 - MinGW GCC **and** Clang compatibility is its own phase (see ledger P5); zero submodule edits.
+  (x64 legs work; the win32 MinGW leg is compiled-in in principle but the i686 toolchain is broken
+  on this box — see the Win32 bullet above.)
 
 ## Status
 

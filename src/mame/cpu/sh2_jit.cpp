@@ -19,17 +19,42 @@
 // ROM は書き換わらないので、訳した物は捨て直さない（リセットのときだけ捨てる）。
 // 訳した物はどこにも保存しない（firmware 由来のものを配らない。実行時に作って捨てる）。
 //
-// Windows の x86-64 だけ。ほかの環境と SMU2000_SH2_JIT=0 では使わない。
+// Windows の x86（x86-64 と x86-32 の両方。Phase 3 で 32bit 対応）。ほかの環境と SMU2000_SH2_JIT=0 では使わない。
 // SMU2000_SH2_JIT=1 では命令を機械語で書かず、全部 execute_one を呼ぶ（食い違いを探すとき用）。
 
 #include "sh2.h"
 
-#if defined(_WIN32) && defined(__x86_64__)
+// JIT を使うか:
+//   第一段階 = x86-64（MinGW の __x86_64__ と MSVC の _M_X64 の両方。これで MSVC x64 も JIT を使う）
+//   第二段階 = x86-32 の移植（Phase 3 で完了）。32bit では SMU_JIT32_PORT_SH2 を自分で define して
+//              JIT を自動で有効にする（SMU2000_SH2_JIT32 が建つ）。止めるには SMU_JIT32_NO_SH2 を定義。
+//              実行時の SMU2000_SH2_JIT=0 は引き続く解釈実行専用の逃げ道（A/B 検証用）
+#if defined(_WIN32) && (defined(__i386__) || defined(_M_IX86)) && !defined(SMU_JIT32_NO_SH2)
+#define SMU_JIT32_PORT_SH2
+#endif
+#if defined(_WIN32) && (defined(__x86_64__) || defined(_M_X64))
 #define SMU2000_SH2_JIT 1
-#include <windows.h>
-#include "x64asm.h"
+#elif defined(_WIN32) && (defined(__i386__) || defined(_M_IX86)) && defined(SMU_JIT32_PORT_SH2)
+#define SMU2000_SH2_JIT 1
+#define SMU2000_SH2_JIT32 1
 #else
 #define SMU2000_SH2_JIT 0
+#endif
+
+#if SMU2000_SH2_JIT
+#include <windows.h>
+#include "x64asm.h"
+#if SMU_X64ASM_MODE == 32
+	// x86-32 の割当: ebx=cpu rsi=状態 ebp=ROM edi=RAM（全部 callee 保存＝ヘルパ呼び出しを跨ぐ）
+	// 傷物（scratch）は eax/ecx/edx。ecx は mwrite の書き込み値を兼務（x64 の r8 の役）
+	#define JIT_ROM RBP
+	#define JIT_RAM RDI
+	#define JIT_VAL RCX
+#else
+	#define JIT_ROM R12
+	#define JIT_RAM R13
+	#define JIT_VAL R8
+#endif
 #endif
 
 #include <array>
@@ -38,7 +63,8 @@
 #include <memory>
 
 struct sh2_device::jit {
-	// 入口の関数（Windows x64: rcx = cpu、rdx = 状態、r8 = ROM、r9 = RAM）。entry のブロックから回し始め、
+	// 入口の関数（x64: rcx = cpu、rdx = 状態、r8 = ROM、r9 = RAM ／ x86-32: cdecl で [esp+4,8,12,16]）。
+	// entry のブロックから回し始め、
 	// ブロックの終わりで次のブロックへ直に飛ぶ。icount が尽きるか、訳していない所・m_delay・割り込みの印に当たると戻る
 	using enter_t = void (*)(sh2_device *, internal_sh2_state *, const u8 *rom, u8 *ram);
 	using code_t = void *;
@@ -239,6 +265,9 @@ kind classify(u16 op)
 
 } // namespace
 
+// JIT を切った所（SMU2000_SH2_JIT=0 の環境）は解釈実行専用。
+// ここから下が命令生成（x86-64 と x86-32 は SMU_X64ASM_MODE で #if で分ける。出す機械語だけ違い、
+// ブロックを組み立てる流れは共通）
 #if !SMU2000_SH2_JIT
 
 bool sh2_device::jit::init(sh2_device &)
@@ -260,14 +289,29 @@ bool sh2_device::jit::init(sh2_device &cpu)
 	buf = VirtualAlloc(nullptr, BUF_SIZE, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
 	if (!buf)
 		return false;
+#if SMU_X64ASM_MODE == 32
+	if (sizeof(pages[0]) != 4)
+#else
 	if (sizeof(pages[0]) != 8)
+#endif
 		return false;
 	const internal_sh2_state *st = cpu.m_sh2_state;
 	const auto S = [st](const void *f) { return mem{ RSI, NOREG, 1, s32(intptr_t(f) - intptr_t(st)) }; };
 	const mem C_test { RBX, NOREG, 1, s32(intptr_t(&cpu.m_test_irq) - intptr_t(&cpu)) };
 
 	assembler a;
-	// enter: rbx rsi r12 r13 を保って、entry へ飛ぶ
+	// enter: ebx rsi + ROM/RAM 基を保存して entry へ飛ぶ
+#if SMU_X64ASM_MODE == 32
+	// x86-32 cdecl: 呼び出し側が積んだ引数 cpu/ROM... は [esp+4,8,12,16]。4 積んだ後は +16 ずれる
+	a.push(RBX); a.push(RSI); a.push(RBP); a.push(RDI);
+	a.load32(RBX, mem{ RSP, NOREG, 1, 20 });   // cpu
+	a.load32(RSI, mem{ RSP, NOREG, 1, 24 });   // 状態
+	a.load32(RBP, mem{ RSP, NOREG, 1, 28 });   // ROM
+	a.load32(RDI, mem{ RSP, NOREG, 1, 32 });   // RAM
+	a.imm32(RAX, u32(uintptr_t(&entry)));
+	a.load32(RAX, mem{ RAX, NOREG, 1, 0 });
+	a.rr(0, {0xff}, 4, RAX);             // jmp eax
+#else
 	a.push(RBX); a.push(RSI); a.push(R12); a.push(R13);
 	a.subrsp(40);                        // 影 32 + 詰め物 8。rsp は 16 の倍数になる
 	a.mov64(RBX, RCX);
@@ -277,6 +321,7 @@ bool sh2_device::jit::init(sh2_device &cpu)
 	a.imm64(RAX, u64(uintptr_t(&entry)));
 	a.load64(RAX, mem{ RAX, NOREG, 1, 0 });
 	a.rr(0, false, {0xff}, 4, RAX);      // jmp rax
+#endif
 
 	// next_block: jit_run が見ることを見て、次のブロックが訳してあればそこへ飛ぶ。無ければ戻る
 	const size_t next = a.code.size();
@@ -296,6 +341,18 @@ bool sh2_device::jit::init(sh2_device &cpu)
 	to_exit.push_back(a.jcc_fwd(0x85));
 	a.mov32(RCX, RAX);
 	a.shr32(RCX, 12);
+#if SMU_X64ASM_MODE == 32
+	a.imm32(RDX, u32(uintptr_t(pages.data())));
+	a.load32(RDX, mem{ RDX, RCX, 4, 0 });
+	a.test32(RDX, RDX);
+	to_exit.push_back(a.jcc_fwd(0x84));
+	a.and32i(RAX, 0xfff);
+	a.shr32(RAX, 1);
+	a.load32(RAX, mem{ RDX, RAX, 4, 0 });
+	a.test32(RAX, RAX);
+	to_exit.push_back(a.jcc_fwd(0x84));
+	a.rr(0, {0xff}, 4, RAX);             // jmp eax
+#else
 	a.imm64(RDX, u64(uintptr_t(pages.data())));
 	a.load64(RDX, mem{ RDX, RCX, 8, 0 });
 	a.test64(RDX, RDX);
@@ -306,12 +363,22 @@ bool sh2_device::jit::init(sh2_device &cpu)
 	a.test64(RAX, RAX);
 	to_exit.push_back(a.jcc_fwd(0x84));
 	a.rr(0, false, {0xff}, 4, RAX);      // jmp rax
+#endif
 	for (size_t p : to_exit)
 		a.patch(p);
+#if SMU_X64ASM_MODE == 32
+	a.pop(RDI); a.pop(RBP); a.pop(RSI); a.pop(RBX);   // 引き数は呼び出し側が取る（cdecl）
+#else
 	a.addrsp(40);
 	a.pop(R13); a.pop(R12); a.pop(RSI); a.pop(RBX);
+#endif
 	a.ret();
 
+#if SMU_X64ASM_MODE == 32
+	// x86-32 ポートが生きている証明用: SMU2000_SH2_JIT32_LOG=1 で 1 回だけ印を書く
+	if (std::getenv("SMU2000_SH2_JIT32_LOG"))
+		std::fprintf(stderr, "sh2-jit32: x86-32 prologue emitted (%zu bytes, enter=%p)\n", a.code.size(), (void *)buf);
+#endif
 	std::memcpy(buf, a.code.data(), a.code.size());
 	enter = reinterpret_cast<enter_t>(buf);
 	next_block = static_cast<u8 *>(buf) + next;
@@ -346,7 +413,7 @@ sh2_device::jit::code_t sh2_device::jit::compile(sh2_device &cpu, u32 pc)
 		return nullptr;
 
 	assembler a;
-	// ブロックの中では rbx = cpu、rsi = 状態、r12 = ROM、r13 = RAM（enter が入れる）
+	// ブロックの中では rbx = cpu、rsi = 状態、ROM/RAM 基 = JIT_ROM/JIT_RAM（enter が入れる）
 
 	std::vector<size_t> to_finish, to_ret;
 
@@ -365,7 +432,7 @@ sh2_device::jit::code_t sh2_device::jit::compile(sh2_device &cpu, u32 pc)
 		}
 		a.cmp32ri(RDX, rom_end + 1 - u32(sz));
 		const size_t not_rom = a.jcc_fwd(0x87);                // ja
-		const mem mr{ R12, RDX, 1, 0 };
+		const mem mr{ JIT_ROM, RDX, 1, 0 };
 		if (sz == 1) a.loadu8(RAX, mr);
 		else if (sz == 2) { a.loadu16(RAX, mr); a.bswap32(RAX); a.shr32(RAX, 16); }
 		else { a.load32(RAX, mr); a.bswap32(RAX); }
@@ -374,20 +441,48 @@ sh2_device::jit::code_t sh2_device::jit::compile(sh2_device &cpu, u32 pc)
 		a.lea32(RAX, mem{ RDX, NOREG, 1, -s32(ram_start) });
 		a.cmp32ri(RAX, ram_len + 1 - u32(sz));
 		to_slow.push_back(a.jcc_fwd(0x87));
-		const mem mw{ R13, RAX, 1, 0 };
+		const mem mw{ JIT_RAM, RAX, 1, 0 };
 		if (sz == 1) a.loadu8(RAX, mw);
 		else if (sz == 2) { a.loadu16(RAX, mw); a.bswap32(RAX); a.shr32(RAX, 16); }
 		else { a.load32(RAX, mw); a.bswap32(RAX); }
 		to_done.push_back(a.jmp_fwd());
 		for (size_t p : to_slow) a.patch(p);
+#if SMU_X64ASM_MODE == 32
+		a.push(RDX); a.push(RBX);        // cdecl: jit_r?(c, a)
+		call(sz == 1 ? reinterpret_cast<void *>(&sh2_device::jit_rb) :
+		     sz == 2 ? reinterpret_cast<void *>(&sh2_device::jit_rw) : reinterpret_cast<void *>(&sh2_device::jit_rl));
+		a.addrsp(8);
+#else
 		a.mov64(RCX, RBX);
 		call(sz == 1 ? reinterpret_cast<void *>(&sh2_device::jit_rb) :
 		     sz == 2 ? reinterpret_cast<void *>(&sh2_device::jit_rw) : reinterpret_cast<void *>(&sh2_device::jit_rl));
+#endif
 		for (size_t p : to_done) a.patch(p);
 	};
 	// 書く。番地は edx、値は r8d
+	// 書く。番地は edx、値は r8d（x86-32 では ecx。速い道で edx を潰したので遅い道は先に積む）
 	const auto mwrite = [&](int sz) {
 		std::vector<size_t> to_slow;
+#if SMU_X64ASM_MODE == 32
+		if (sz > 1) {
+			a.test32ri(RDX, 1);
+			to_slow.push_back(a.jcc_fwd(0x85));
+		}
+		a.lea32(RAX, mem{ RDX, NOREG, 1, -s32(ram_start) });
+		a.cmp32ri(RAX, ram_len + 1 - u32(sz));
+		to_slow.push_back(a.jcc_fwd(0x87));
+		const mem mw{ JIT_RAM, RAX, 1, 0 };
+		if (sz == 1) a.store8(mw, JIT_VAL);
+		else if (sz == 2) { a.mov32(RDX, JIT_VAL); a.bswap32(RDX); a.shr32(RDX, 16); a.store16(mw, RDX); }
+		else { a.mov32(RDX, JIT_VAL); a.bswap32(RDX); a.store32(mw, RDX); }
+		const size_t done = a.jmp_fwd();
+		for (size_t p : to_slow) a.patch(p);
+		a.push(JIT_VAL); a.push(RDX); a.push(RBX);   // cdecl: jit_w?(c, a, v)
+		call(sz == 1 ? reinterpret_cast<void *>(&sh2_device::jit_wb) :
+		     sz == 2 ? reinterpret_cast<void *>(&sh2_device::jit_ww) : reinterpret_cast<void *>(&sh2_device::jit_wl));
+		a.addrsp(12);
+		a.patch(done);
+#else
 		if (sz > 1) {
 			a.test32ri(RDX, 1);
 			to_slow.push_back(a.jcc_fwd(0x85));
@@ -405,6 +500,7 @@ sh2_device::jit::code_t sh2_device::jit::compile(sh2_device &cpu, u32 pc)
 		call(sz == 1 ? reinterpret_cast<void *>(&sh2_device::jit_wb) :
 		     sz == 2 ? reinterpret_cast<void *>(&sh2_device::jit_ww) : reinterpret_cast<void *>(&sh2_device::jit_wl));
 		a.patch(done);
+#endif
 	};
 	const auto sext8 = [](u32 v) { return u32(s32(s8(v))); };
 
@@ -423,7 +519,7 @@ sh2_device::jit::code_t sh2_device::jit::compile(sh2_device &cpu, u32 pc)
 			a.load32(RDX, R(base));
 			if (disp) a.add32ri(RDX, disp);
 			a.store32(S_ea, RDX);
-			a.load32(R8, R(src));
+			a.load32(JIT_VAL, R(src));
 			mwrite(sz);
 		};
 		const auto to_r = [&](int d, int sz) {                  // eax を符号拡張して r[d] へ
@@ -446,7 +542,7 @@ sh2_device::jit::code_t sh2_device::jit::compile(sh2_device &cpu, u32 pc)
 			case 0x06: case 0x16: case 0x26: case 0x36: {       // MOV.x Rm,@(R0,Rn)
 				const int sz = 1 << ((op & 15) - 4);
 				a.load32(RDX, R(n)); a.add32rm(RDX, R(0)); a.store32(S_ea, RDX);
-				a.load32(R8, R(m));
+				a.load32(JIT_VAL, R(m));
 				mwrite(sz);
 				return memop;
 			}
@@ -494,7 +590,7 @@ sh2_device::jit::code_t sh2_device::jit::compile(sh2_device &cpu, u32 pc)
 			}
 			case 4: case 5: case 6: {                                                // MOV.x Rm,@-Rn
 				const int sz = 1 << ((op & 15) - 4);
-				a.load32(R8, R(m));
+				a.load32(JIT_VAL, R(m));
 				a.sub32i_mem(R(n), sz);
 				a.load32(RDX, R(n));
 				mwrite(sz);
@@ -548,7 +644,7 @@ sh2_device::jit::code_t sh2_device::jit::compile(sh2_device &cpu, u32 pc)
 			case 0x02: case 0x12: case 0x22: {                                       // STS.L x,@-Rn
 				const mem src = (op & 0x3f) == 0x02 ? S_mach : (op & 0x3f) == 0x12 ? S_macl : S_pr;
 				a.sub32i_mem(R(n), 4); a.load32(RDX, R(n)); a.store32(S_ea, RDX);
-				a.load32(R8, src);
+				a.load32(JIT_VAL, src);
 				mwrite(4);
 				return memop;
 			}
@@ -639,7 +735,7 @@ sh2_device::jit::code_t sh2_device::jit::compile(sh2_device &cpu, u32 pc)
 			case 0: case 1: case 2: {                                                // MOV.x R0,@(disp,GBR)
 				const int sz = 1 << n;
 				a.load32(RDX, S_gbr); a.add32ri(RDX, d * sz); a.store32(S_ea, RDX);
-				a.load32(R8, R(0));
+				a.load32(JIT_VAL, R(0));
 				mwrite(sz);
 				return memop;
 			}
@@ -700,8 +796,14 @@ sh2_device::jit::code_t sh2_device::jit::compile(sh2_device &cpu, u32 pc)
 
 		if (jit_trace_on()) {
 			if (pc_stale) { a.store32i(S_pc, stale_pc); pc_stale = false; }
+#if SMU_X64ASM_MODE == 32
+			a.push(RBX);                 // cdecl: jit_trace(c)
+			call(reinterpret_cast<void *>(&sh2_device::jit_trace));
+			a.addrsp(4);
+#else
 			a.mov64(RCX, RBX);
 			call(reinterpret_cast<void *>(&sh2_device::jit_trace));
+#endif
 		}
 
 		// 1. pc を進める
@@ -733,9 +835,16 @@ sh2_device::jit::code_t sh2_device::jit::compile(sh2_device &cpu, u32 pc)
 		if (r == none) {
 			if (!slot && lazy_pc && !jit_trace_on())
 				a.store32i(S_pc, at + 2);
+#if SMU_X64ASM_MODE == 32
+			a.imm32(RDX, op);
+			a.push(RDX); a.push(RBX);    // cdecl: jit_exec(c, op)
+			call(reinterpret_cast<void *>(&sh2_device::jit_exec));
+			a.addrsp(8);
+#else
 			a.mov64(RCX, RBX);
 			a.imm32(RDX, op);
 			call(reinterpret_cast<void *>(&sh2_device::jit_exec));
+#endif
 			r = k == kind::delayed ? delayed : k == kind::ends ? ends : memop;
 			pc_stale = false;
 		} else if (!slot && lazy_pc && !jit_trace_on()) {
@@ -787,8 +896,14 @@ sh2_device::jit::code_t sh2_device::jit::compile(sh2_device &cpu, u32 pc)
 	a.load32(RAX, S_delay);
 	a.test32(RAX, RAX);
 	const size_t no_irq2 = a.jcc_fwd(0x85);
+#if SMU_X64ASM_MODE == 32
+	a.push(RBX);                     // cdecl: jit_irq(c)
+	call(reinterpret_cast<void *>(&sh2_device::jit_irq));
+	a.addrsp(4);
+#else
 	a.mov64(RCX, RBX);
 	call(reinterpret_cast<void *>(&sh2_device::jit_irq));
+#endif
 	a.patch(no_irq1);
 	a.patch(no_irq2);
 	a.sub32i_mem(S_icount, 1);
@@ -796,8 +911,13 @@ sh2_device::jit::code_t sh2_device::jit::compile(sh2_device &cpu, u32 pc)
 	const size_t ret = a.code.size();
 	for (size_t p : to_ret)
 		a.patch_to(p, ret);
+#if SMU_X64ASM_MODE == 32
+	a.imm32(RAX, u32(uintptr_t(next_block)));
+	a.rr(0, {0xff}, 4, RAX);             // jmp eax
+#else
 	a.imm64(RAX, u64(uintptr_t(next_block)));
 	a.rr(0, false, {0xff}, 4, RAX);      // jmp rax
+#endif
 	// pc が古いまま抜ける所: 書いてから ret へ
 	for (const auto &[pos, v] : stale_rets) {
 		a.patch_to(pos, a.code.size());

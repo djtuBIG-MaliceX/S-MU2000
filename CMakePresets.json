@@ -79,7 +79,7 @@
     {
       "name": "mingw-win32",
       "displayName": "MinGW-w64 Win32 (GCC, Release)",
-      "description": "MSYS2 MINGW32 shell required (mingw-w64-i686 toolchain). Ninja + gcc. JIT off (interpreter-only, like MSVC-Win32). Artifacts in build-cmake/<api>/Win32-mingw/Release/.",
+      "description": "MSYS2 MINGW32 shell required (mingw-w64-i686 toolchain). Ninja + gcc. JIT compiled-in since 2026-09-16 (dual-mode JITs; see CPU32_LEDGER.md). (toolchain broken on this box — use vs-win32). Artifacts in build-cmake/<api>/Win32-mingw/Release/.",
       "inherits": "mingw-base",
       "cacheVariables": {
         "CMAKE_C_COMPILER": "gcc",
