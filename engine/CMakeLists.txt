@@ -11,6 +11,7 @@ add_library(smu2000_engine STATIC)
 
 target_sources(smu2000_engine PRIVATE
   ${CMAKE_SOURCE_DIR}/src/compat/compat.cpp
+  ${CMAKE_SOURCE_DIR}/src/compat/a64asm.cpp   # x86 では selftest の空スタブのみ（Makefile OBJS と同期）
   ${CMAKE_SOURCE_DIR}/src/smartmedia.cpp
   ${CMAKE_SOURCE_DIR}/src/mame/sound/swp30.cpp
   ${CMAKE_SOURCE_DIR}/src/mame/sound/swp30_jit.cpp

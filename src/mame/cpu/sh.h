@@ -220,6 +220,9 @@ public:
 		m_sh2_state->icount = 0;
 	}
 
+	// S-MU2000: 命令を進めずに時間だけ進める（バスの WAIT で CPU が止まっている間）。走行中には呼ばない
+	void skip_cycles(u64 n) { m_total_cycles += n; }
+
 	// 走行中に呼ばれても正しい値になる（MAME の total_cycles と同じ勘定）
 	u64 total_cycles() const
 	{

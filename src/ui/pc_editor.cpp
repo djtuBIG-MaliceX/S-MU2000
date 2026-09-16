@@ -77,7 +77,10 @@ bool pc_editor::knob(const xg::param &p, int part, int &v, bool known, float wid
 		const int range = p.max - p.min;
 		// ドラッグ。全域を 200px ほどで動かす（Shift で 4 倍細かく）
 		if (active && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0f)) {
-			float &acc = *ImGui::GetStateStorage()->GetFloatRef(id, 0.0f);
+			// a Get*Ref reference goes stale when an insert grows the storage,
+			// so take a value and write it back
+			ImGuiStorage *st = ImGui::GetStateStorage();
+			float acc = st->GetFloat(id, 0.0f);
 			const float per_px = float(range) / (io.KeyShift ? 800.0f : 200.0f);
 			acc -= io.MouseDelta.y * per_px;
 			const int step = int(acc);
@@ -85,6 +88,7 @@ bool pc_editor::knob(const xg::param &p, int part, int &v, bool known, float wid
 				nv = std::clamp(nv + step, p.min, p.max);
 				acc -= float(step);
 			}
+			st->SetFloat(id, acc);
 		}
 		if (ImGui::IsItemDeactivated())
 			ImGui::GetStateStorage()->SetFloat(id, 0.0f);
@@ -146,7 +150,9 @@ bool pc_editor::knob(const xg::param &p, int part, int &v, bool known, float wid
 	// 数を打つ
 	if (ImGui::BeginPopup("##type")) {
 		ImGui::TextDisabled("%s（%d-%d）", p.label, p.min, p.max);
-		int &typed = *ImGui::GetStateStorage()->GetIntRef(ImGui::GetID("typed"), v);
+		const ImGuiID typed_id = ImGui::GetID("typed");
+		ImGuiStorage *st = ImGui::GetStateStorage();
+		int typed = st->GetInt(typed_id, v);
 		if (ImGui::IsWindowAppearing()) {
 			typed = v;
 			ImGui::SetKeyboardFocusHere();
@@ -156,6 +162,7 @@ bool pc_editor::knob(const xg::param &p, int part, int &v, bool known, float wid
 			nv = std::clamp(typed, p.min, p.max);
 			ImGui::CloseCurrentPopup();
 		}
+		st->SetInt(typed_id, typed);
 		ImGui::EndPopup();
 	}
 

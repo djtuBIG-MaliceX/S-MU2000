@@ -56,6 +56,9 @@ public:
 	u8 scmr_r();
 
 	void do_rx_w(int state);
+	bool rx_can_accept() const;
+	bool rx_byte_pending() const;
+	void receive_byte(u8 data);
 
 	// S-MU2000: firmware が MIDI の受信を有効にしたか。
 	// 起動が終わるまで送りつけないための目印に使う

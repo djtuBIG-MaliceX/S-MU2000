@@ -19,10 +19,53 @@
 
 #include <atomic>
 #include <string>
-#include <thread>
 #include <vector>
 
+#if defined(__APPLE__)
+#include <memory>
+#else
+#include <thread>
+#endif
+
 namespace ui {
+
+#if defined(__APPLE__)
+
+// macOS: the same contract as the WASAPI class below -- list the inputs, open
+// one, and hand the machine 44100Hz 16bit 2ch frames one at a time -- but the
+// device is a HAL input AudioUnit, which calls the input callback on its own
+// real-time thread. So unlike the Windows side there is no worker thread here,
+// and the ring the audio thread reads is filled straight from that callback.
+// A pimpl for the same reason audio_out has one: nothing in here should have
+// to know about CoreAudio.
+class audio_in
+{
+public:
+	audio_in();
+	~audio_in();
+
+	// 使える録音デバイスの名前
+	static std::vector<std::string> list();
+
+	// device is a name (exact match; empty is the system default input)
+	bool start(const std::string &device, std::string &err);
+	void stop();
+	bool running() const;
+
+	// One frame (44100Hz, 16bit scale). 0 while the ring is empty
+	void pop(s32 &l, s32 &r);
+
+	std::string device_name() const;
+	std::string format_line() const;
+	u64 empty_count() const;
+	u64 dropped_count() const;
+
+private:
+	struct impl;
+	std::unique_ptr<impl> m_impl;
+};
+
+#else
 
 class audio_in
 {
@@ -85,6 +128,8 @@ private:
 	std::atomic<u32>  m_w{0}, m_r{0};
 	std::atomic<u64>  m_empty{0}, m_dropped{0};
 };
+
+#endif // __APPLE__
 
 } // namespace ui
 

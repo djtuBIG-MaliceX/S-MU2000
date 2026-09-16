@@ -97,7 +97,7 @@ private:
 	static void jit_exec(sh2_device *c, u32 opcode);
 	static void jit_irq(sh2_device *c);
 	static bool jit_trace_on();
-	static void jit_trace(sh2_device *c);
+	static void jit_trace(sh2_device *c, u32 at = 0xffffffffu);
 	static u32 jit_rb(sh2_device *c, u32 a);
 	static u32 jit_rw(sh2_device *c, u32 a);
 	static u32 jit_rl(sh2_device *c, u32 a);

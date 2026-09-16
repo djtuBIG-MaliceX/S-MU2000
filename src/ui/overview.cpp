@@ -101,6 +101,9 @@ void draw_keys(ImDrawList *dl, ImVec2 pos, float w, float h, F color)
 
 } // namespace
 
+// 小さなマスの説明に足す一言
+constexpr const char *BIG_HINT = "\nダブルクリックで大きな窓に出す";
+
 struct overview::column {
 	const char *title;
 	src from;
@@ -148,16 +151,23 @@ void overview::cell(const column &c, int part, xg::model &m, const xg_snapshot &
 	if (wide(c.from) || c.from == src::ins) {
 		if (part < 0)
 			ImGui::Dummy(ImVec2(w, h));
-		else if (c.from == src::eg)
-			eg_cell(part, m, br, w, h);
-		else if (c.from == src::filter)
-			filter_cell(part, m, br, w, h);
-		else if (c.from == src::eq)
-			eq_cell(part, m, br, w, h);
-		else if (c.from == src::vib)
-			vib_cell(part, m, br, w, h);
-		else
+		else if (c.from == src::ins)
 			ins_cell(part, m, br, h);
+		else {
+			if (c.from == src::eg)
+				eg_cell(part, m, br, w, h, true);
+			else if (c.from == src::filter)
+				filter_cell(part, m, br, w, h, true);
+			else if (c.from == src::eq)
+				eq_cell(part, m, br, w, h, true);
+			else
+				vib_cell(part, m, br, w, h, true);
+			// 小さなマスでは点をつまみにくいので、ダブルクリックでパートの音色の窓に大きく出す
+			if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+				m_part = part;
+				request_part(part);
+			}
+		}
 		return;
 	}
 
@@ -220,10 +230,14 @@ void overview::cell(const column &c, int part, xg::model &m, const xg_snapshot &
 	if (editable) {
 		if (active && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0f)) {
 			// 横にも縦にも効く。全域を 200px ほどで（Shift で細かく）
-			float &acc = *ImGui::GetStateStorage()->GetFloatRef(id, 0.0f);
+			// a Get*Ref reference goes stale when an insert grows the storage,
+			// so take a value and write it back
+			ImGuiStorage *st = ImGui::GetStateStorage();
+			float acc = st->GetFloat(id, 0.0f);
 			acc += (io.MouseDelta.x - io.MouseDelta.y) * float(hi - lo) / (io.KeyShift ? 800.0f : 200.0f);
 			const int step = int(acc);
 			if (step) { nv = std::clamp(nv + step, lo, hi); acc -= float(step); }
+			st->SetFloat(id, acc);
 		}
 		if (ImGui::IsItemDeactivated())
 			ImGui::GetStateStorage()->SetFloat(id, 0.0f);
@@ -238,13 +252,16 @@ void overview::cell(const column &c, int part, xg::model &m, const xg_snapshot &
 			ImGui::OpenPopup("##type");
 		if (ImGui::BeginPopup("##type")) {
 			ImGui::TextDisabled("%s %s（%d-%d）", master ? "MASTER" : part_name(part).c_str(), p->label, lo, hi);
-			int &typed = *ImGui::GetStateStorage()->GetIntRef(ImGui::GetID("typed"), v);
+			const ImGuiID typed_id = ImGui::GetID("typed");
+			ImGuiStorage *st = ImGui::GetStateStorage();
+			int typed = st->GetInt(typed_id, v);
 			if (ImGui::IsWindowAppearing()) { typed = v; ImGui::SetKeyboardFocusHere(); }
 			ImGui::SetNextItemWidth(fs * 6);
 			if (ImGui::InputInt("##n", &typed, 1, 10, ImGuiInputTextFlags_EnterReturnsTrue)) {
 				nv = std::clamp(typed, lo, hi);
 				ImGui::CloseCurrentPopup();
 			}
+			st->SetInt(typed_id, typed);
 			ImGui::EndPopup();
 		}
 		if (nv != v) {
@@ -450,7 +467,7 @@ void overview::ins_cell(int part, xg::model &m, bridge &br, float h)
 // 3 つの点をつまんで横に動かすと、アタック・ディケイ・リリースが変わる。
 // XG の値は音色の元の値に対する増減（64 が音色のまま）。形の長さは 2 の (値 - 64) / 24 乗で伸び縮みさせ、
 // 真ん中の値で各区間が同じくらいの長さになるようにした（見た目だけ。実際の秒数ではない）
-void overview::eg_cell(int part, xg::model &m, bridge &br, float w, float h)
+void overview::eg_cell(int part, xg::model &m, bridge &br, float w, float h, bool compact)
 {
 	ImGuiIO &io = ImGui::GetIO();
 	const float fs = ImGui::GetFontSize();
@@ -484,7 +501,8 @@ void overview::eg_cell(int part, xg::model &m, bridge &br, float w, float h)
 	const float xr = xs + lr * squeeze;
 
 	// つかむ点。押した瞬間に一番近い点を選び、離すまで同じ点を動かす
-	int &grab = *ImGui::GetStateStorage()->GetIntRef(id, -1);
+	ImGuiStorage *st = ImGui::GetStateStorage();
+	int grab = st->GetInt(id, -1);
 	if (ImGui::IsItemActivated() && known) {
 		const float mx = io.MousePos.x;
 		const float dists[3] = { std::fabs(mx - xa), std::fabs(mx - xd), std::fabs(mx - xr) };
@@ -492,6 +510,7 @@ void overview::eg_cell(int part, xg::model &m, bridge &br, float w, float h)
 	}
 	if (!active)
 		grab = -1;
+	st->SetInt(id, grab);
 	if (active && known && grab >= 0 && io.MouseDelta.x != 0.0f) {
 		// 動かした幅を値に直す。2 倍の長さが 24 目盛り
 		auto apply = [&](const xg::param &p, int v, float from, float to_len) {
@@ -528,8 +547,9 @@ void overview::eg_cell(int part, xg::model &m, bridge &br, float w, float h)
 	}
 
 	if ((hovered || active) && known)
-		ImGui::SetItemTooltip("Attack %s   Decay %s   Release %s\n点を横につまんで動かす（右へ長く、左へ短く）",
-		                      xg::format(pa, va).c_str(), xg::format(pd, vd).c_str(), xg::format(pr, vr).c_str());
+		ImGui::SetItemTooltip("Attack %s   Decay %s   Release %s\n点を横につまんで動かす（右へ長く、左へ短く）%s",
+		                      xg::format(pa, va).c_str(), xg::format(pd, vd).c_str(), xg::format(pr, vr).c_str(),
+		                      compact ? BIG_HINT : "");
 	ImGui::PopID();
 }
 
@@ -538,7 +558,7 @@ void overview::eg_cell(int part, xg::model &m, bridge &br, float w, float h)
 // 横軸は値に比例（64 が真ん中 = 音色のまま）で、1 マスの幅が 8 オクターブ。
 // 点の高さは、カットオフでの持ち上がり 20log10(Q) dB。Q = 2 の (値 - 64) / 16 乗なので、
 // 高さも値に比例する。どちらも見た目だけで、実際の周波数や Q ではない
-void overview::filter_cell(int part, xg::model &m, bridge &br, float w, float h)
+void overview::filter_cell(int part, xg::model &m, bridge &br, float w, float h, bool compact)
 {
 	ImGuiIO &io = ImGui::GetIO();
 	const float fs = ImGui::GetFontSize();
@@ -565,11 +585,15 @@ void overview::filter_cell(int part, xg::model &m, bridge &br, float w, float h)
 	const float yq = y_of(db_of_value(vq));
 
 	// つかんだときの、点とマウスのずれを覚えておき、点が指に飛ばないようにする
-	float &gx = *ImGui::GetStateStorage()->GetFloatRef(id, 0.0f);
-	float &gy = *ImGui::GetStateStorage()->GetFloatRef(id + 1, 0.0f);
+	// a Get*Ref reference goes stale when an insert grows the storage, so take
+	// a value and write it back
+	ImGuiStorage *st = ImGui::GetStateStorage();
+	float gx = st->GetFloat(id, 0.0f), gy = st->GetFloat(id + 1, 0.0f);
 	if (ImGui::IsItemActivated() && known) {
 		gx = xc - io.MousePos.x;
 		gy = yq - io.MousePos.y;
+		st->SetFloat(id, gx);
+		st->SetFloat(id + 1, gy);
 	}
 	if (active && known && (io.MouseDelta.x != 0.0f || io.MouseDelta.y != 0.0f)) {
 		const float fx = io.MousePos.x + gx, fy = io.MousePos.y + gy;
@@ -619,8 +643,8 @@ void overview::filter_cell(int part, xg::model &m, bridge &br, float w, float h)
 	}
 
 	if ((hovered || active) && known)
-		ImGui::SetItemTooltip("Cutoff %s   Resonance %s\n点をつまんで、横でカットオフ（右へ明るく）、縦でレゾナンス（上へ強く）",
-		                      xg::format(pc, vc).c_str(), xg::format(pq, vq).c_str());
+		ImGui::SetItemTooltip("Cutoff %s   Resonance %s\n点をつまんで、横でカットオフ（右へ明るく）、縦でレゾナンス（上へ強く）%s",
+		                      xg::format(pc, vc).c_str(), xg::format(pq, vq).c_str(), compact ? BIG_HINT : "");
 	ImGui::PopID();
 }
 
@@ -672,9 +696,9 @@ int eq_plot(const char *id, eq_band *bands, int n, xg::model &m, bridge &br, flo
 	auto handle = [&](const eq_band &b) { return ImVec2(x_of(float(HZ[b.vf])), y_of(float(b.vg - 64))); };
 
 	// 押した瞬間に一番近い点を選ぶ。ずれを覚えて、点が指に飛ばないようにする
-	int &grab = *ImGui::GetStateStorage()->GetIntRef(iid, -1);
-	float &gx = *ImGui::GetStateStorage()->GetFloatRef(iid + 1, 0.0f);
-	float &gy = *ImGui::GetStateStorage()->GetFloatRef(iid + 2, 0.0f);
+	ImGuiStorage *st = ImGui::GetStateStorage();
+	int grab = st->GetInt(iid, -1);
+	float gx = st->GetFloat(iid + 1, 0.0f), gy = st->GetFloat(iid + 2, 0.0f);
 	auto nearest = [&]() {
 		int best = -1; float bd = 1e9f;
 		for (int i = 0; i < n; i++) {
@@ -695,6 +719,9 @@ int eq_plot(const char *id, eq_band *bands, int n, xg::model &m, bridge &br, flo
 	}
 	if (!active)
 		grab = -1;
+	st->SetInt(iid, grab);
+	st->SetFloat(iid + 1, gx);
+	st->SetFloat(iid + 2, gy);
 	if (active && grab >= 0 && (io.MouseDelta.x != 0.0f || io.MouseDelta.y != 0.0f)) {
 		const eq_band &b = bands[grab];
 		const float t = (io.MousePos.x + gx - x0) / (x1 - x0);
@@ -773,13 +800,14 @@ int eq_plot(const char *id, eq_band *bands, int n, xg::model &m, bridge &br, flo
 
 
 // パートの EQ の 1 マス。低音（シェルフ）と高音（シェルフ）の 2 つの点
-void overview::eq_cell(int part, xg::model &m, bridge &br, float w, float h)
+void overview::eq_cell(int part, xg::model &m, bridge &br, float w, float h, bool compact)
 {
 	eq_band bands[] = {
 		{ band_shape::low_shelf,  &P("part.eq_bass_gain"),   &P("part.eq_bass_freq"),   nullptr, part, 64, 12, 0, false },
 		{ band_shape::high_shelf, &P("part.eq_treble_gain"), &P("part.eq_treble_freq"), nullptr, part, 64, 54, 0, false },
 	};
-	eq_plot("eq", bands, 2, m, br, w, h, "点をつまんで、横で周波数、縦でゲイン（1 が低音、2 が高音）");
+	eq_plot("eq", bands, 2, m, br, w, h, compact ? "点をつまんで、横で周波数、縦でゲイン（1 が低音、2 が高音）\nダブルクリックで大きな窓に出す"
+	                                            : "点をつまんで、横で周波数、縦でゲイン（1 が低音、2 が高音）");
 }
 
 
@@ -824,7 +852,7 @@ void overview::master_eq_cell(xg::model &m, bridge &br, float h)
 // そのあとの波の山の点をつまんで、横で速さ（山が近いほど速い）、縦で深さ。
 // 平らな所の終わりの点を横に動かすと Delay。どれも音色の元の値に対する増減（64 が音色のまま）で、
 // 形は 2 の (値 - 64) / 24 乗で伸び縮みさせた見た目だけのもの
-void overview::vib_cell(int part, xg::model &m, bridge &br, float w, float h)
+void overview::vib_cell(int part, xg::model &m, bridge &br, float w, float h, bool compact)
 {
 	ImGuiIO &io = ImGui::GetIO();
 	const float fs = ImGui::GetFontSize();
@@ -852,9 +880,9 @@ void overview::vib_cell(int part, xg::model &m, bridge &br, float w, float h)
 	const float xd = x0 + delay;
 	const ImVec2 crest(xd + period * 0.25f, mid - amp);
 
-	int &grab = *ImGui::GetStateStorage()->GetIntRef(id, -1);
-	float &gx = *ImGui::GetStateStorage()->GetFloatRef(id + 1, 0.0f);
-	float &gy = *ImGui::GetStateStorage()->GetFloatRef(id + 2, 0.0f);
+	ImGuiStorage *st = ImGui::GetStateStorage();
+	int grab = st->GetInt(id, -1);
+	float gx = st->GetFloat(id + 1, 0.0f), gy = st->GetFloat(id + 2, 0.0f);
 	if (ImGui::IsItemActivated() && known) {
 		const float dd = std::fabs(io.MousePos.x - xd) + std::fabs(io.MousePos.y - mid);
 		const float dc = std::fabs(io.MousePos.x - crest.x) + std::fabs(io.MousePos.y - crest.y);
@@ -864,6 +892,9 @@ void overview::vib_cell(int part, xg::model &m, bridge &br, float w, float h)
 	}
 	if (!active)
 		grab = -1;
+	st->SetInt(id, grab);
+	st->SetFloat(id + 1, gx);
+	st->SetFloat(id + 2, gy);
 	if (active && known && grab >= 0 && (io.MouseDelta.x != 0.0f || io.MouseDelta.y != 0.0f)) {
 		auto value = [](float ratio, const xg::param &p) {
 			return std::clamp(int(std::lround(64 + 24 * std::log2(std::max(ratio, 1e-3f)))), p.min, p.max);
@@ -900,8 +931,9 @@ void overview::vib_cell(int part, xg::model &m, bridge &br, float w, float h)
 		dl->AddText(ImVec2(pos.x + (w - ts.x) * 0.5f, pos.y + (h - ts.y) * 0.5f), col(ImGuiCol_TextDisabled), "--");
 	}
 	if ((hovered || active) && known)
-		ImGui::SetItemTooltip("Rate %s   Depth %s   Delay %s\n波の山の点: 横で速さ、縦で深さ\n平らな所の終わりの点: 横で掛かり始めるまでの時間",
-		                      xg::format(pr, vr).c_str(), xg::format(pd, vd).c_str(), xg::format(pl, vl).c_str());
+		ImGui::SetItemTooltip("Rate %s   Depth %s   Delay %s\n波の山の点: 横で速さ、縦で深さ\n平らな所の終わりの点: 横で掛かり始めるまでの時間%s",
+		                      xg::format(pr, vr).c_str(), xg::format(pd, vd).c_str(), xg::format(pl, vl).c_str(),
+		                      compact ? BIG_HINT : "");
 	ImGui::PopID();
 }
 
@@ -1409,10 +1441,26 @@ void overview::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 	ImGui::Begin("overview", nullptr, wf);
 	ImGui::PopStyleVar();
 
+	// 表示の大きさ。32 パートを見渡すための窓なので、既定は小さめ（文字 10px）。
+	// 棒や絵も文字の大きさから決まるので、全部が一緒に縮む
+	float &zoom = overview_zoom();
+	help_checkbox();
+	ImGui::SameLine();
+	ImGui::TextDisabled("|");
+	ImGui::SameLine();
+	if (ImGui::SmallButton("-"))
+		set_overview_zoom(zoom - 0.125f);
+	ImGui::SameLine();
+	ImGui::Text("%d%%", int(std::lround(zoom * 100)));
+	ImGui::SameLine();
+	if (ImGui::SmallButton("+"))
+		set_overview_zoom(zoom + 0.125f);
+	ImGui::SameLine();
+	ImGui::TextDisabled("表示の大きさ（小さな絵はダブルクリックで大きな窓に出る）");
+
+	ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * zoom);
 	const float fs = ImGui::GetFontSize();
 	const float h = fs * 2.3f;
-
-	help_checkbox();
 
 	// マスターの表（見出しは別）。インサーションとバリエーションの設定もここ
 	master_pane(m, ram, br);
@@ -1438,6 +1486,7 @@ void overview::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 		ImGui::EndTable();
 	}
 	ImGui::PopStyleVar();
+	ImGui::PopFont();
 	ImGui::End();
 
 	if (ImGui::GetIO().MouseWheel != 0.0f && !m_wheel_taken)

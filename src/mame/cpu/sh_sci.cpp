@@ -124,6 +124,28 @@ bool sh_sci_device::has_recv_error() const
 	return m_ssr & (SSR_ORER|SSR_PER|SSR_FER);
 }
 
+bool sh_sci_device::rx_can_accept() const
+{
+	return (m_scr & SCR_RE) && !(m_ssr & SSR_RDRF) && !has_recv_error();
+}
+
+bool sh_sci_device::rx_byte_pending() const
+{
+	return (m_ssr & SSR_RDRF) != 0;
+}
+
+void sh_sci_device::receive_byte(u8 data)
+{
+	if (!rx_can_accept())
+		return;
+	m_rdr = data;
+	m_ssr |= SSR_RDRF;
+	LOGMASKED(LOG_DATA, "Received direct %02x '%c'\n", data,
+	          data >= 32 && data < 127 ? data : '.');
+	if (m_scr & SCR_RIE)
+		m_intc->internal_interrupt(m_rxi_int);
+}
+
 void sh_sci_device::scr_w(u8 data)
 {
 	LOGMASKED(LOG_REGS, "scr_w %02x%s%s%s%s%s%s clk=%d (%06x)\n", data,

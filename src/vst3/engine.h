@@ -35,6 +35,22 @@ namespace vst3 {
 // MU2000 が動く唯一の周波数
 constexpr double NATIVE_RATE = 44100.0;
 
+// MIDI の 1 メッセージの長さ。先頭のバイトで決まる。
+// システムエクスクルーシブ（0xf0）は終わりのバイトまで数えないと分からないので 1 を返す
+inline int midi_length(uint8_t status)
+{
+	switch (status & 0xf0) {
+	case 0xc0: case 0xd0: return 2;
+	case 0xf0:
+		switch (status) {
+		case 0xf1: case 0xf3: return 2;
+		case 0xf2:            return 3;
+		default:              return 1;
+		}
+	default: return 3;
+	}
+}
+
 enum class status {
 	loading,   // ROM を読んで起動している最中。音は出ない
 	ready,
@@ -81,11 +97,18 @@ public:
 
 	// ---- 状態の保存と復元（DAW のプロジェクトに音色を覚えさせる）
 	//
-	// 音を作っている最中は、機械に触れるのは音声スレッドだけ。だから
-	// **頼んでおいて音声スレッドに作らせる**。止まっていればその場でやる。
-	// 音声スレッドを待たせない（doc/design.md）
+	// 機械（m_mu）に触るところは全部 m_machine で守る。音声スレッドは待たない:
+	// 取れなければその区間は無音を返し、MIDI は溜めておく。保存・復元・カードの
+	// 差し替えは、呼んだスレッドで取れるまで待ってその場でやる。
+	//
+	// 前は「音を作っている最中は音声スレッドに頼む、止まっていればその場でやる」と
+	// していたが、FL Studio の「Reset plugin when FL Studio resets」は保存の途中で
+	// setProcessing(false) や setActive(false) を呼び、そのあとも process() を呼び続ける。
+	// 「止まっている」と見てその場で書き出す間に音声スレッドが機械を回し、落ちたり、
+	// 壊れた状態がプロジェクトに入ったりした（issue #9）
 	void set_processing(bool on) { m_processing.store(on, std::memory_order_release); }
 	std::vector<uint8_t> save_state();
+	// 起動が終わっていなければ、終わってから最初の区間で戻す
 	bool load_state(const uint8_t *p, size_t n);
 
 	// ---- SmartMedia（前面のカードの差し込み口）
@@ -98,24 +121,20 @@ public:
 	std::string card_path() const;
 
 private:
-	// 機械に触る仕事を、音を作っていれば音声スレッドに頼み、止まっていればその場でやる
+	// 機械に触る仕事を、m_machine を取ってその場でやる
 	bool on_machine(const std::function<void(mu2000 &)> &fn);
-	std::atomic<int> m_fn_req{0};           // 0 なし / 1 頼んだ / 3 やっている / 2 できた
-	const std::function<void(mu2000 &)> *m_fn = nullptr;
+	std::mutex m_machine;                   // m_mu と、音を作る途中の入れ物を守る
 	mutable std::mutex m_card_mutex;        // m_card_path を守る
 	std::string m_card_path;
 
 	void boot();
-	void serve_state();          // 音声スレッドで頼み事を片づける
+	void apply_deferred_state();   // 起動前に来た状態を戻す（m_machine を持って呼ぶ）
 	void one_sample(float &l, float &r);
 	void build_table();
 
 	std::atomic<status> m_state{status::loading};
 	std::atomic<bool> m_processing{false};
-	std::atomic<int>  m_save_req{0};        // 0 なし / 1 頼んだ / 2 できた
-	std::atomic<int>  m_load_req{0};
-	std::vector<uint8_t> m_save_buf, m_load_buf;
-	std::atomic<uint64_t> m_fill_tick{0};   // fill() が回っているかを見る
+	std::vector<uint8_t> m_deferred_state;  // 起動が終わる前に来た状態（m_machine で守る）
 	std::thread         m_thread;
 	std::atomic<bool>   m_abort{false};
 
@@ -155,7 +174,7 @@ private:
 	ui::bridge m_bridge;
 	ui::driver m_drv;
 
-	// 起動前に来た MIDI。口ごとに持つ。音声スレッドしか触らない
+	// 起動前や、機械を他が使っている間に来た MIDI。口ごとに持つ。音声スレッドしか触らない
 	std::vector<uint8_t> m_pending[2];
 };
 

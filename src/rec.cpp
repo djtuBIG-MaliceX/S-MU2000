@@ -26,9 +26,13 @@
 #include <mmsystem.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
-#include <functiondiscoverykeys_devpkey.h>
 
 namespace {
+
+// MinGW's libuuid does not always provide PKEY_Device_FriendlyName. Keep the
+// value local, as the newer WASAPI input/output implementation does.
+const PROPERTYKEY kFriendlyName = {
+	{ 0xa45c254e, 0xdf1c, 0x4efd, { 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0 } }, 14 };
 
 std::string wide_to_utf8(const wchar_t *w)
 {
@@ -61,7 +65,7 @@ bool collect(std::vector<IMMDevice *> &devs, std::vector<std::string> &names)
 		if (SUCCEEDED(d->OpenPropertyStore(STGM_READ, &props))) {
 			PROPVARIANT v;
 			PropVariantInit(&v);
-			if (SUCCEEDED(props->GetValue(PKEY_Device_FriendlyName, &v)) && v.vt == VT_LPWSTR)
+			if (SUCCEEDED(props->GetValue(kFriendlyName, &v)) && v.vt == VT_LPWSTR)
 				name = wide_to_utf8(v.pwszVal);
 			PropVariantClear(&v);
 			props->Release();

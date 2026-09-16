@@ -2,3 +2,4 @@
 100 サンプル実行  最後の出力 L=0 R=0
 乱数 1〜3 個目: 574a3af2 de214fbe 610c06da
 MEG の JIT のリバーブ RAM の詰め方と戻し方・係数の広げ方: 食い違い 0
+a64 emitter selftest: 0 mismatch(es)

@@ -10,8 +10,7 @@
 #include <cstdlib>
 #include <cstring>
 
-#include <immintrin.h>
-#include <windows.h>
+#include "compat/platform.h"
 
 
 namespace {
@@ -138,7 +137,7 @@ void mu2000::slave_loop(u64 seen)
 			if (m_slave_quit.load(std::memory_order_relaxed))
 				return;
 			if (SLAVE_SPINS <= 0 || ++spins < SLAVE_SPINS)
-				_mm_pause();
+				smu2000::cpu_pause();
 			else
 				m_slave_go.wait(seen, std::memory_order_acquire);
 		}
@@ -417,6 +416,27 @@ void mu2000::build_bus()
 	// 800000-801fff: SWP30 マスタ / 802000-803fff: スレーブ。
 	// レジスタは 16bit 単位なので、番地を 2 で割って渡す
 	auto swp = [this](swp30_device &dev, u32 base) {
+		// 実機のマスタの SWP30 は、書き込みを 1 サンプルに 1 回しか受け取れないらしく、書くたびに CPU は
+		// 次のサンプルの区切りまで待たされる（BSC の WAIT）。遅れて鳴る層（firmware が 2.5ms ごとに数を
+		// 減らして鍵を押す）の遅れが、これで実機と音ごとに ±10 サンプルで合う。待たせないと、音の設定の
+		// 書き込み百回ほどが一瞬で終わり、実機より約 64 サンプル長くなっていた。
+		// スレーブは待たせない（2.4kHz の割り込みが毎回ミキサを 7 つ書くので、待たせると CPU の 4 割が
+		// 止まる。待たせると遅れが実機より 10 サンプル余計に長くなり、SLICE の位相も遠ざかる）。
+		// 制御の 2 つ（0x0e / 0x0f）は、中身を書くもの（MEG のプログラムの中身 = チャンネル 0x11・0x12、
+		// リバーブ RAM へ直に書く中身 = 0x26）だけ待たせ、番地・合図・状態は待たせない。エフェクトの種類を
+		// 替えたときの読み込みの時間が、これで実機と合う（SLICE は表を 2052 項目書くので実機で 62ms 長い。
+		// 刻みの位相もこれで合う。doc/upstream.md の 36）
+		const bool waits = base == 0x800000;
+		auto hold = [this, waits](offs_t reg) {
+			const u32 slot = reg & 0x3f;
+			const u32 chan = (reg >> 6) & 0x3f;
+			const bool control = slot == 0x0e || slot == 0x0f;
+			const bool data = chan == 0x11 || chan == 0x12 || chan == 0x26;
+			if (waits && (!control || data)) {
+				m_swp_hold = true;
+				m_cpu->abort_timeslice();
+			}
+		};
 		mem_bus::device d;
 		d.start = base;
 		d.end   = base + 0x1fff;
@@ -428,18 +448,19 @@ void mu2000::build_bus()
 		};
 		// 幅の内訳を数える。MAME は 16bit ハンドラに mem_mask を渡せるが
 		// こちらは渡せないので、byte 幅の書き込みがあると片側が壊れる
-		d.w8 = [this, &dev, base](offs_t a, u8 v) {
+		d.w8 = [this, &dev, base, hold](offs_t a, u8 v) {
 			m_swp_w8++;
 			const offs_t reg = (a - base) >> 1;
 			const u16 old = dev.read16(reg);
 			dev.write16(reg, (a & 1) ? u16((old & 0xff00) | v)
 			                         : u16((old & 0x00ff) | (u16(v) << 8)));
+			hold(reg);
 		};
 		d.r8 = [this, &dev, base](offs_t a) {
 			m_swp_r8++;
 			return u8(dev.read16((a - base) >> 1) >> ((a & 1) ? 0 : 8));
 		};
-		d.w32 = [this, &dev, base](offs_t a, u32 v) {
+		d.w32 = [this, &dev, base, hold](offs_t a, u32 v) {
 			m_swp_w32++;
 			const offs_t reg = (a - base) >> 1;
 			if (m_swp_trace) {
@@ -450,13 +471,15 @@ void mu2000::build_bus()
 			}
 			dev.write16(reg, u16(v >> 16));
 			dev.write16(reg + 1, u16(v));
+			hold(reg);
 		};
-		d.w16 = [this, &dev, base](offs_t a, u16 v) {
+		d.w16 = [this, &dev, base, hold](offs_t a, u16 v) {
 			m_swp_w16++;
 			if (m_swp_trace)
 				std::fprintf(m_swp_trace, "%s%08x %04x %04x  pc=%08x\n",
 				             m_swp_trace_reads ? "W " : "", base, (a - base) >> 1, v, m_cpu->pc());
 			dev.write16((a - base) >> 1, v);
+			hold((a - base) >> 1);
 		};
 		return d;
 	};
@@ -694,12 +717,20 @@ void mu2000::run_cycles(u64 n)
 			chunk = ev - now;
 		if (tmr != ~u64(0) && tmr - now < chunk)
 			chunk = tmr - now;
-		for (const midi_line &m : m_midi)
-			if (m.bit >= 0 || !m.queue.empty()) {
-				const u64 left = m.next > now ? m.next - now : 1;
-				if (left < chunk)
-					chunk = left;
-			}
+		if (!m_fast_midi)
+			for (const midi_line &m : m_midi)
+				if (m.bit >= 0 || !m.queue.empty()) {
+					const u64 left = m.next > now ? m.next - now : 1;
+					if (left < chunk)
+						chunk = left;
+				}
+		// SWP30 に書いた後は、このサンプルの残りを命令を進めずに過ごす（上の swp の説明）。
+		// 周辺のタイマや MIDI の送出は、区切りごとにここまでで進めている
+		if (m_swp_hold) {
+			m_cpu->skip_cycles(chunk);
+			n = chunk >= n ? 0 : n - chunk;
+			continue;
+		}
 
 		const int done = m_cpu->run_cycles(int(chunk));
 		if (done <= 0) {
@@ -715,6 +746,7 @@ void mu2000::run_cycles(u64 n)
 		} else
 			n -= u64(done);
 	}
+	m_swp_hold = false;
 }
 
 // ダイヤルを 1 位相ぶん進める。
@@ -752,6 +784,16 @@ void mu2000::midi_step(u64 now)
 	for (int port = 0; port < MIDI_PORTS; port++) {
 		midi_line &m = m_midi[port];
 		sh_sci_device *sci = m_cpu->sci(port);
+		if (m_fast_midi) {
+			if (!m.queue.empty() && sci->rx_can_accept()) {
+				const u8 byte = m.queue.front();
+				m.queue.pop_front();
+				logerror("midi in %c %02x @ %llu (fast)\n", 'A' + port, byte,
+				         (unsigned long long)now);
+				sci->receive_byte(byte);
+			}
+			continue;
+		}
 
 		if (m.bit < 0) {
 			// 直前のバイトのストップビットぶんは空けてから次を出す
@@ -794,15 +836,17 @@ void mu2000::run_sample(s32 &left, s32 &right)
 	m_cycle_debt -= cycles * 44100;
 
 	// 内訳を測る（set_profile(true) のときだけ）
-	LARGE_INTEGER pt0, pt1, pt2;
+	// (smu2000::perf_ticks() is QueryPerformanceCounter on Windows, so the
+	//  measurement is the same one on both platforms -- see compat/platform.h)
+	u64 pt0 = 0, pt1 = 0, pt2 = 0;
 	if (m_profile)
-		QueryPerformanceCounter(&pt0);
+		pt0 = smu2000::perf_ticks();
 
 	run_cycles(cycles);
 
 	if (m_profile) {
-		QueryPerformanceCounter(&pt1);
-		m_t_cpu += u64(pt1.QuadPart - pt0.QuadPart);
+		pt1 = smu2000::perf_ticks();
+		m_t_cpu += pt1 - pt0;
 	}
 
 	// マスタとスレーブを 1 サンプルずつ進める。
@@ -814,7 +858,7 @@ void mu2000::run_sample(s32 &left, s32 &right)
 		m_slave_go.notify_one();   // 眠っていたら起こす。起きていれば素通り
 		m_swpm.run_sample(lm, rm);
 		while (m_slave_done.load(std::memory_order_acquire) != tag)
-			_mm_pause();
+			smu2000::cpu_pause();
 		ls = m_slave_l;
 		rs = m_slave_r;
 	} else {
@@ -823,8 +867,8 @@ void mu2000::run_sample(s32 &left, s32 &right)
 	}
 
 	if (m_profile) {
-		QueryPerformanceCounter(&pt2);
-		m_t_swpm += u64(pt2.QuadPart - pt1.QuadPart);
+		pt2 = smu2000::perf_ticks();
+		m_t_swpm += pt2 - pt1;
 		m_t_n++;
 	}
 

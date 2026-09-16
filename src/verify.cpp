@@ -2,6 +2,7 @@
 //
 // 移植が成立しているかの最小確認
 #include "mame/sound/swp30.h"
+#include "compat/a64asm.h"
 #include <cstdio>
 
 int main()
@@ -34,5 +35,9 @@ int main()
 	// MEG の JIT が機械語で書いたリバーブ RAM の詰め方・戻し方と係数の広げ方（m1_expand）が、C++ の関数と全部の入力で同じか
 	std::printf("MEG の JIT のリバーブ RAM の詰め方と戻し方・係数の広げ方: 食い違い %llu\n",
 	            (unsigned long long)swp30_device::meg_jit_selftest());
+
+	// aarch64 emitter selftest: every primitive the arm64 JIT uses, executed
+	// on this CPU and compared against plain C++ (a64asm.cpp; 0 on x86-64 builds)
+	std::printf("a64 emitter selftest: %llu mismatch(es)\n", (unsigned long long)a64::selftest());
 	return 0;
 }

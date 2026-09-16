@@ -2,7 +2,7 @@
 //
 // 実機のフロントパネル風の画面で MU2000 を動かす。
 //
-//   gui <rom ディレクトリ> [--midi 番号] [--midi-b 番号]
+//   gui <rom ディレクトリ> [--midi 番号] [--midi-b 番号] [--fast-midi]
 //       [--midiout 番号] [--midiout-b 番号] [--midiout-mu 番号] [--latency ミリ秒]
 //   gui --list                             MIDI の入口と出口の一覧
 //   gui <rom ディレクトリ> --shot 絵.png    窓を出さずに絵だけ書き出す（見た目の確認用）
@@ -27,6 +27,7 @@
 #include "ui/audio_in.h"
 #include "ui/bridge.h"
 #include "ui/driver.h"
+#include "ui/engine.h"
 #include "ui/midi_in.h"
 #include "ui/midi_guard.h"
 #include "ui/midi_out.h"
@@ -34,6 +35,7 @@
 #include "ui/panel.h"
 #include "ui/fx_editor.h"
 #include "ui/overview.h"
+#include "ui/part_shapes.h"
 #include "ui/pc_editor.h"
 #include "ui/pc_window.h"
 #include "ui/player.h"
@@ -50,6 +52,7 @@
 
 #include <windows.h>
 #include <windowsx.h>
+#include <commdlg.h>
 #include <shellapi.h>
 
 namespace {
@@ -57,173 +60,24 @@ namespace {
 constexpr u32 RATE = ui::AUDIO_RATE;
 
 // ---- 音源側
+//
+// The engine itself now lives in ui/engine.h: the macOS front end needs the
+// same boot sequence and, more to the point, the same MIDI routing, and one
+// copy is the only way to keep the two from drifting. Only the name is pulled
+// in here, so the rest of this file reads as it always did.
 
-struct engine {
-	mu2000 mu;
-	ui::bridge   &br;
-	ui::midi_in  &midi;        // MIDI IN A（パート 1-16）
-	ui::midi_in  *midi_b = nullptr;   // MIDI IN B（パート 17-32）
-	ui::midi_out *mout = nullptr;     // MIDI THRU A（A で受けたものを外へ）
-	ui::midi_out *mout_b = nullptr;   // MIDI THRU B（B で受けたものを外へ）
-	// MIDI OUT。MU2000 が自分で送り出すもの（XG のダンプ要求への返事など）。
-	// これを loopMIDI 越しに外のエディタへ返すと、外から読み書きできる
-	ui::midi_out *mout_mu = nullptr;
-	ui::audio_in *ain = nullptr;      // A/D INPUT に入れる音（無ければ無音）
-
-	std::atomic<int> state{0};        // 0 起動中 / 1 準備完了 / 2 だめ
-	// THRU A / B の流量の上限。MIDI の輪で溢れたものを実機へ流さない（midi_guard.h）
-	ui::thru_guard guard_a, guard_b;
-	// fill() が機械に触っている最中か。起動し直すときはこれが落ちるのを待つ
-	std::atomic<bool> in_fill{false};
-	// SmartMedia を差す・抜く・書き戻す間は、音声の糸が機械を回さないようにする
-	std::mutex card_lock;
-	bool use_nvram = false;           // 覚えている設定で起動するか（窓を出すときだけ）
-	std::string      message = "起動中...";
-
-	ui::driver drv;
-
-	engine(ui::bridge &b, ui::midi_in &m) : br(b), midi(m) {}
-
-	bool load(const std::string &dir)
-	{
-		if (!mu.load_program(dir + "/mu2000_flash.bin")) { message = mu.error(); return false; }
-		if (!mu.load_wave(dir + "/dump"))                { message = mu.error(); return false; }
-		if (!mu.load_sintab(dir + "/standin/sin-table.bin"))
-			std::fprintf(stderr, "警告: %s\n", mu.error().c_str());
-		if (!mu.load_lcd_font(dir + "/hd44780u_b04.bin") &&
-		    !mu.load_lcd_font(dir + "/standin/hd44780u_b04.bin"))
-			std::fprintf(stderr, "警告: %s\n", mu.error().c_str());
-		return true;
-	}
-
-	// 起動（実機と同じ空回し）。窓を出したあと別スレッドで進める
-	bool boot()
-	{
-		mu.set_threaded(true);
-		if (use_nvram && smu2000::nvram::load(mu))
-			std::printf("設定: %s\n", smu2000::nvram::path(mu).c_str());
-		mu.reset();
-		const size_t limit = size_t(30.0 * RATE);
-		size_t i = 0;
-		s32 l, r;
-		for (; i < limit && !mu.midi_ready(); i++)
-			mu.run_sample(l, r);
-		if (i >= limit) {
-			message = "起動しなかった";
-			return false;
-		}
-		publish();
-		return true;
-	}
-
-	// 工場出荷状態に戻す。覚えている設定を捨てて電源を入れ直す。
-	// 音声の糸が機械から手を離すのを待ってから触る
-	void factory_reset()
-	{
-		state.store(0);
-		message = "工場出荷状態に戻している...";
-		publish();
-		while (in_fill.load())
-			Sleep(1);
-
-		const std::vector<u8> zero(mu.nvram().size(), 0);
-		mu.set_nvram(zero.data(), zero.size());
-		const bool keep = use_nvram;
-		use_nvram = false;
-		const bool ok = boot();
-		use_nvram = keep;
-		if (!ok) {
-			state.store(2);
-			publish();
-			return;
-		}
-		// すぐ残す。ここで落ちても前の設定に戻らないように
-		smu2000::nvram::save(mu);
-		std::printf("工場出荷状態に戻した\n");
-		std::fflush(stdout);
-		state.store(1);
-		publish();
-	}
-
-	void publish()
-	{
-		if (state.load() == 1)
-			ui::driver::publish_now(mu, br, true, nullptr);
-		else
-			ui::driver::publish_message(br, message.c_str());
-	}
-
-	// 音声デバイスに頼まれた分だけ進める
-	void fill(s16 *out, u32 n)
-	{
-		const std::lock_guard<std::mutex> hold(card_lock);
-		// 先に「触っている」を立ててから state を見る。逆にすると、見た直後に
-		// 起動し直しが始まって、両方が機械に触ってしまう
-		in_fill.store(true);
-		if (state.load() != 1) {
-			in_fill.store(false);
-			std::memset(out, 0, size_t(n) * 4);
-			return;
-		}
-
-		guard_a.refill(n, RATE);
-		guard_b.refill(n, RATE);
-
-		drv.apply_buttons(mu, br);
-		// 画面から出したものも、外の MIDI 出力へ流す（実機の THRU）
-		drv.pump_midi(mu, br, [this](u8 v) { if (mout && guard_a.pass(v)) mout->send(v); });
-		drv.pump_wheel(mu, br);
-
-		u8 b;
-		while (midi.pop(b)) {
-			mu.midi_in(b, 0);
-			drv.watch(b, 0);
-			if (mout && guard_a.pass(b)) mout->send(b);
-		}
-		// B は実機の 2 つめの DIN（内蔵 SCI ch1）。パート 17-32 に届く。
-		// THRU も口ごとに分ける。A で受けたものは MIDI OUT A、
-		// B で受けたものは MIDI OUT B へ。混ぜると、外に繋いだ音源で
-		// パートの割り振りが崩れる
-		if (midi_b)
-			while (midi_b->pop(b)) {
-				mu.midi_in(b, 1);
-				drv.watch(b, 1);
-				if (mout_b && guard_b.pass(b)) mout_b->send(b);
-			}
-
-		const float g = br.gain();
-
-		for (u32 i = 0; i < n; i++) {
-			s32 l = 0, r = 0;
-			if (ain) {
-				s32 a1, a2;
-				ain->pop(a1, a2);
-				mu.set_audio_input(a1, a2);
-			}
-			mu.run_sample(l, r);
-			l = s32(l * g) * 32768 / mu2000::DAC_FULL_SCALE;
-			r = s32(r * g) * 32768 / mu2000::DAC_FULL_SCALE;
-			out[i * 2 + 0] = s16(l < -32768 ? -32768 : l > 32767 ? 32767 : l);
-			out[i * 2 + 1] = s16(r < -32768 ? -32768 : r > 32767 ? 32767 : r);
-		}
-
-		// firmware が送り出したもの。画面（パラメータの層）と MIDI OUT の口へ。
-		// 出口が無くても取り出しておく（溜めを空ける）
-		drv.pump_out(mu, br, [this](u8 v) { if (mout_mu) mout_mu->send(v); });
-
-		drv.publish(mu, br, n, RATE, true, nullptr);
-		in_fill.store(false);
-	}
-};
+using ui::engine;
 
 
 // ---- 窓
 
 struct window_state {
 	ui::panel   panel;
+	bool lcd_only = false;
 	ui::pc_window pc{ std::make_unique<ui::pc_editor>() };    // PC エディタ（F2 か右クリック）
 	ui::pc_window list{ std::make_unique<ui::overview>() };   // 一覧（F3 か右クリック）
 	ui::pc_window fx{ std::make_unique<ui::fx_editor>() };    // インサーションの設定（一覧でダブルクリック）
+	ui::pc_window shapes{ std::make_unique<ui::part_shapes>() };   // パートの音色（一覧の絵をダブルクリック）
 	ui::bridge *br = nullptr;
 	engine     *eng = nullptr;
 	ui::audio_out *out = nullptr;
@@ -380,9 +234,13 @@ enum : UINT {
 	ID_OUT_NONE = 1900, ID_OUT_BASE = 1901,
 	ID_OUTB_NONE = 2400, ID_OUTB_BASE = 2401,
 	ID_OUTMU_NONE = 3100, ID_OUTMU_BASE = 3101,
-	ID_AIN_NONE = 3200, ID_AIN_BASE = 3201,
-	ID_CARD_NEW16 = 3300, ID_CARD_NEW32, ID_CARD_NEW64, ID_CARD_NEW128,
-	ID_CARD_OPEN = 3310, ID_CARD_EJECT = 3311,
+	// A/D INPUT and SmartMedia. Kept out of the ID_BASE..ID_BASE+255 ranges
+	// above, or the dispatch in the command handler takes them for that port:
+	// both used to sit inside ID_OUTMU_BASE's 256, so picking a recording
+	// device (or a card item) selected MIDI OUT instead
+	ID_AIN_NONE = 3400, ID_AIN_BASE = 3401,
+	ID_CARD_NEW16 = 3700, ID_CARD_NEW32, ID_CARD_NEW64, ID_CARD_NEW128,
+	ID_CARD_OPEN = 3710, ID_CARD_EJECT = 3711,
 	ID_PLAY_FILE = 2900, ID_STOP_FILE = 2901, ID_PORTS34_FOLD = 2902, ID_PORTS34_DROP = 2903,
 	ID_FACTORY = 3000,
 	ID_PC_EDITOR = 3001,
@@ -858,9 +716,13 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 			g_win.pc.frame(g_win.panel.xg(), g_win.panel.ram(), *g_win.br);
 			g_win.list.frame(g_win.panel.xg(), g_win.panel.ram(), *g_win.br);
 			g_win.fx.frame(g_win.panel.xg(), g_win.panel.ram(), *g_win.br);
+			g_win.shapes.frame(g_win.panel.xg(), g_win.panel.ram(), *g_win.br);
 			// 一覧でインサーションの欄をダブルクリックされたら、設定の窓を出す
 			if (ui::xgui::take_fx_request())
 				open_window(hwnd, g_win.fx);
+			// 一覧で VIB・FILTER・EG・EQ の絵をダブルクリックされたら、パートの音色の窓を出す
+			if (ui::xgui::take_part_request())
+				open_window(hwnd, g_win.shapes);
 		}
 		InvalidateRect(hwnd, nullptr, FALSE);
 		// SmartMedia に書いたものを 2 秒ごとにファイルへ書き戻す（抜いたとき・閉じたときも）
@@ -939,6 +801,8 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 	}
 
 	case WM_LBUTTONDOWN: {
+		if (g_win.lcd_only)
+			return 0;
 		const int mx = GET_X_LPARAM(lp), my = GET_Y_LPARAM(lp);
 		// パネルの MIDI IN A のジャックを押したら、口を選ぶ品書きを出す
 		if (g_win.panel.on_midi_jack(mx, my)) {
@@ -968,6 +832,8 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 	}
 
 	case WM_RBUTTONUP: {
+		if (g_win.lcd_only)
+			return 0;
 		const int mx = GET_X_LPARAM(lp), my = GET_Y_LPARAM(lp);
 		POINT pt{ mx, my };
 		ClientToScreen(hwnd, &pt);
@@ -1034,17 +900,23 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 	}
 
 	case WM_MOUSEMOVE:
+		if (g_win.lcd_only)
+			return 0;
 		if (g_win.panel.drag(GET_X_LPARAM(lp), GET_Y_LPARAM(lp), *g_win.br))
 			InvalidateRect(hwnd, nullptr, FALSE);
 		return 0;
 
 	case WM_LBUTTONUP:
+		if (g_win.lcd_only)
+			return 0;
 		g_win.panel.release(*g_win.br);
 		ReleaseCapture();
 		InvalidateRect(hwnd, nullptr, FALSE);
 		return 0;
 
 	case WM_MOUSEWHEEL: {
+		if (g_win.lcd_only)
+			return 0;
 		POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
 		ScreenToClient(hwnd, &pt);
 		const int delta = GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA;
@@ -1054,6 +926,8 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 	}
 
 	case WM_KEYDOWN: {
+		if (g_win.lcd_only)
+			return 0;
 		if (lp & (1 << 30))                     // 押しっぱなしの繰り返しは無視
 			return 0;
 		if (wp == VK_F2) {                      // PC エディタ
@@ -1097,7 +971,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 // ---- 窓を出さずに絵だけ書き出す。見た目を直すときに使う
 
 int shot(const std::string &path, int w, int h, ui::bridge &br, bool grid,
-         const std::string &layout_path)
+         bool lcd_only, const std::string &layout_path)
 {
 	ui::panel p;
 	std::string lerr;
@@ -1105,6 +979,7 @@ int shot(const std::string &path, int w, int h, ui::bridge &br, bool grid,
 		std::fprintf(stderr, "配置: %s を開けない\n", layout_path.c_str());
 	if (!lerr.empty())
 		std::fprintf(stderr, "%s", lerr.c_str());
+	p.set_lcd_only(lcd_only);
 	p.resize(w, h);
 	p.set_grid(grid);
 
@@ -1158,7 +1033,11 @@ int main(int argc, char **argv)
 	bool open_editor = false;          // 起動したら PC エディタも出す
 	bool open_list = false;            // 起動したら一覧も出す
 	bool open_fx = false;              // 起動したらインサーションの設定の窓も出す
+	bool open_shapes = false;          // 起動したらパートの音色の窓も出す
 	int win_w = 1000, win_h = 400;   // パネルの論理寸法（1000 × 400）と同じ比
+	bool size_given = false;
+	bool lcd_only = false;
+	bool fast_midi = false;
 	bool grid = false;
 	std::string layout_path, dump_layout, play_path;
 	bool boot_for_shot = false;
@@ -1203,6 +1082,9 @@ int main(int argc, char **argv)
 		else if (!std::strcmp(argv[i], "--editor")) open_editor = true;
 		else if (!std::strcmp(argv[i], "--list-window")) open_list = true;
 		else if (!std::strcmp(argv[i], "--fx-window")) open_fx = true;
+		else if (!std::strcmp(argv[i], "--shapes-window")) open_shapes = true;
+		else if (!std::strcmp(argv[i], "--lcd")) lcd_only = true;
+		else if (!std::strcmp(argv[i], "--fast-midi")) fast_midi = true;
 		else if (!std::strcmp(argv[i], "--shot") && i + 1 < argc) shot_path = argv[++i];
 		else if (!std::strcmp(argv[i], "--boot")) boot_for_shot = true;
 		else if (!std::strcmp(argv[i], "--grid")) grid = true;
@@ -1216,8 +1098,13 @@ int main(int argc, char **argv)
 		}
 		else if (!std::strcmp(argv[i], "--size") && i + 1 < argc) {
 			if (std::sscanf(argv[++i], "%dx%d", &win_w, &win_h) != 2) { win_w = 1000; win_h = 400; }
+			size_given = true;
 		}
 		else if (dir.empty()) dir = argv[i];
+	}
+	if (lcd_only && !size_given) {
+		win_w = 898;
+		win_h = 290;
 	}
 
 	// --layout が無ければ、決まった場所を順に探す
@@ -1247,18 +1134,19 @@ int main(int argc, char **argv)
 		ui::snapshot s;
 		std::snprintf(s.message, sizeof(s.message), "S-MU2000");
 		br.publish(s);
-		return shot(shot_path, win_w, win_h, br, grid, layout_path);
+		return shot(shot_path, win_w, win_h, br, grid, lcd_only, layout_path);
 	}
 
 	if (dir.empty()) {
 		std::fprintf(stderr,
 			"使い方: gui <rom ディレクトリ> [--midi 番号] [--midi-b 番号]"
 			" [--midiout 番号] [--midiout-b 番号] [--midiout-mu 番号]"
-			" [--latency ミリ秒] [--exclusive] [--layout panel.txt] [--play 曲.mid]\n"
+			" [--latency ミリ秒] [--exclusive] [--layout panel.txt] [--play 曲.mid] [--lcd] [--fast-midi]\n"
 			"        [--factory]   覚えている設定を捨てて工場出荷状態で起動する\n"
 			"        [--editor]    PC エディタも開く（窓では F2 か右クリック）\n"
 			"        [--list-window] 一覧の窓も開く（窓では F3 か右クリック）\n"
 			"        [--fx-window] インサーションの設定の窓も開く（一覧でインサーションの欄をダブルクリック）\n"
+			"        [--shapes-window] パートの音色の窓も開く（一覧で VIB などの絵をダブルクリック）\n"
 			"        gui --dump-layout panel.txt   いまの配置を書き出す\n"
 			"        gui --list\n"
 			"        gui [<rom ディレクトリ> --boot] --shot 絵.png [--size 1000x400]\n");
@@ -1266,6 +1154,7 @@ int main(int argc, char **argv)
 	}
 
 	static engine eng(br, midi);
+	eng.mu.set_fast_midi(fast_midi);
 	eng.midi_b = &midi_b;
 	eng.mout_b = &mout_b;
 	eng.mout_mu = &mout_mu;
@@ -1312,7 +1201,7 @@ int main(int argc, char **argv)
 		}
 
 		eng.publish();
-		return shot(shot_path, win_w, win_h, br, grid, layout_path);
+		return shot(shot_path, win_w, win_h, br, grid, lcd_only, layout_path);
 	}
 
 	// ---- 窓を出す
@@ -1343,6 +1232,8 @@ int main(int argc, char **argv)
 
 	g_win.br   = &br;
 	g_win.eng  = &eng;
+	g_win.lcd_only = lcd_only;
+	g_win.panel.set_lcd_only(lcd_only);
 	// 窓を出すときだけ、覚えている設定で起動する（--shot は毎回同じ絵にしたい）
 	eng.use_nvram = !factory;
 	if (factory)
@@ -1368,12 +1259,14 @@ int main(int argc, char **argv)
 
 	eng.publish();
 	ShowWindow(hwnd, SW_SHOW);
-	if (open_editor)
+	if (open_editor && !lcd_only)
 		open_window(hwnd, g_win.pc);
-	if (open_fx)
+	if (open_fx && !lcd_only)
 		open_window(hwnd, g_win.fx);
-	if (open_list)
+	if (open_list && !lcd_only)
 		open_window(hwnd, g_win.list);
+	if (open_shapes && !lcd_only)
+		open_window(hwnd, g_win.shapes);
 	UpdateWindow(hwnd);
 
 	// 起動は別スレッド。終わったら音を出し始める
@@ -1491,6 +1384,7 @@ int main(int argc, char **argv)
 		g_win.list.shutdown(*g_win.br);
 		g_win.pc.shutdown(*g_win.br);
 		g_win.fx.shutdown(*g_win.br);
+		g_win.shapes.shutdown(*g_win.br);
 		Sleep(100);
 	}
 

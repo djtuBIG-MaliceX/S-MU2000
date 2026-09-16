@@ -180,9 +180,18 @@ void panel::resize(int w, int h)
 	m_w = std::max(w, 200);
 	m_h = std::max(h, 60);
 
-	m_scale = std::min(double(m_w) / LOGICAL_W, double(m_h) / LOGICAL_H);
-	m_ox = int((m_w - LOGICAL_W * m_scale) / 2);
-	m_oy = int((m_h - LOGICAL_H * m_scale) / 2);
+	if (m_lcd_only) {
+		const double margin = 5.0;
+		const double view_w = m_lay.lcd[2] + margin * 2;
+		const double view_h = m_lay.lcd[3] + margin * 2;
+		m_scale = std::min(double(m_w) / view_w, double(m_h) / view_h);
+		m_ox = int((m_w - view_w * m_scale) / 2 - (m_lay.lcd[0] - margin) * m_scale);
+		m_oy = int((m_h - view_h * m_scale) / 2 - (m_lay.lcd[1] - margin) * m_scale);
+	} else {
+		m_scale = std::min(double(m_w) / LOGICAL_W, double(m_h) / LOGICAL_H);
+		m_ox = int((m_w - LOGICAL_W * m_scale) / 2);
+		m_oy = int((m_h - LOGICAL_H * m_scale) / 2);
+	}
 
 	m_lcd    = scale(m_lay.lcd[0], m_lay.lcd[1], m_lay.lcd[2], m_lay.lcd[3]);
 	m_volume = scale(m_lay.volume[0] - m_lay.volume[2], m_lay.volume[1] - m_lay.volume[2],
@@ -217,6 +226,8 @@ void panel::build_spots()
 {
 	m_held = nullptr;
 	m_spots.clear();
+	if (m_lcd_only)
+		return;
 
 	// 面を選ぶつまみ。本体の外（下の帯）
 	m_spots.push_back({ spot_kind::tab, mu2000::button::count, CTL_TAB_FRONT,
@@ -902,6 +913,12 @@ void panel::draw_grid(HDC dc) const
 
 void panel::paint(HDC dc, const snapshot &s, u64 pressed, const char *status) const
 {
+	if (m_lcd_only) {
+		RECT client{ 0, 0, m_w, m_h };
+		fill(dc, client, RGB(24, 25, 27));
+		draw_lcd(dc, s);
+		return;
+	}
 	if (m_page == page::editor)       paint_editor(dc, status);
 	else if (m_page == page::effects) paint_effects(dc, status);
 	else                              paint_front(dc, s, pressed, m_volume_now, status);

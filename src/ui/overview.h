@@ -21,13 +21,26 @@ class overview : public imgui_view
 {
 public:
 	const wchar_t *title() const override { return L"S-MU2000 一覧"; }
-	int default_width() const override  { return 1680; }
-	int default_height() const override { return 760; }
+	// 表示の大きさ（xgui::overview_zoom、既定 0.625）で描くので、窓もその分だけ小さく出す
+	int default_width() const override  { return 1200; }
+	int default_height() const override { return 500; }
 	void draw(xg::model &m, const xg_snapshot &ram, bridge &br) override;
 	// 閉じたら、鳴らしている鍵を離し、ミュートとソロを外す（受信チャンネルを戻す）
 	void hidden(bridge &br) override;
 
 	struct column;                   // 列の中身（overview.cpp）
+
+	// 絵の 1 マス。パートの音色の窓（part_shapes）も同じものを大きく描く。
+	// compact は一覧の中の小さなマスのとき。ダブルクリックでパートの音色の窓を頼む
+	//
+	// EG: アタック・ディケイ・リリースの形を描き、点をつまんで動かす
+	static void eg_cell(int part, xg::model &m, bridge &br, float w, float h, bool compact);
+	// フィルタ: 周波数特性の山を描き、山の頂をつまんで横でカットオフ、縦でレゾナンス
+	static void filter_cell(int part, xg::model &m, bridge &br, float w, float h, bool compact);
+	// パートの EQ: 低音と高音の点をつまんで、横で周波数、縦でゲイン
+	static void eq_cell(int part, xg::model &m, bridge &br, float w, float h, bool compact);
+	// ビブラート: 揺れの波の山をつまんで速さと深さ、平らな所の終わりで掛かり始め
+	static void vib_cell(int part, xg::model &m, bridge &br, float w, float h, bool compact);
 
 private:
 	void release_keys(bridge &br);          // マウスで鳴らしている鍵を全部離す
@@ -40,14 +53,6 @@ private:
 	void row(int part, xg::model &m, const xg_snapshot &ram, bridge &br, float h);
 	// INS 列の 1 マス。右クリックで掛ける・外す・種類、印のドラッグで別のパートへ
 	void ins_cell(int part, xg::model &m, bridge &br, float h);
-	// EG の 1 マス。アタック・ディケイ・リリースの形を描き、点をつまんで動かす
-	void eg_cell(int part, xg::model &m, bridge &br, float w, float h);
-	// フィルタの 1 マス。周波数特性の山を描き、山の頂をつまんで横でカットオフ、縦でレゾナンス
-	void filter_cell(int part, xg::model &m, bridge &br, float w, float h);
-	// パートの EQ の 1 マス。低音と高音の点をつまんで、横で周波数、縦でゲイン
-	void eq_cell(int part, xg::model &m, bridge &br, float w, float h);
-	// ビブラートの 1 マス。揺れの波の山をつまんで速さと深さ、平らな所の終わりで掛かり始め
-	void vib_cell(int part, xg::model &m, bridge &br, float w, float h);
 	// マスター EQ の 1 マス。5 つの帯の点、ホイールで Q、右クリックで種類
 	void master_eq_cell(xg::model &m, bridge &br, float h);
 	// 上のマスターの表。マスターボリューム、移調、リバーブ・コーラス・バリエーションの種類と戻り、

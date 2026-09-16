@@ -7,14 +7,18 @@
 make            gui.exe も一緒に作る
 build/gui.exe <rom ディレクトリ> [--midi 番号] [--midi-b 番号]
               [--midiout 番号] [--midiout-b 番号]
-              [--latency ミリ秒] [--size 1000x400]
+              [--latency ミリ秒] [--size 1000x400] [--lcd]
 build/gui.exe --list                      MIDI の入口と出口の一覧
 build/gui.exe <rom> --boot --shot 絵.png   窓を出さずに絵だけ書き出す
 build/gui.exe --shot 絵.png --grid        ROM 無しで絵だけ。方眼を重ねる
 build/gui.exe --dump-layout panel.txt    いまの配置を書き出す
 build/gui.exe <rom> --layout panel.txt   その配置で動かす（F5 で読み直し）
 build/gui.exe <rom> --play 曲.mid         MIDI ファイルを流しながら動かす
+build/gui.exe <rom> --lcd                 LCD だけを別窓いっぱいに表示する
 ```
+
+`--lcd` は本体パネル、ボタン、状態表示を隠し、LCD とその枠だけを表示する。
+既定の窓は 898x290。`--size 幅x高さ` と `--shot` も一緒に使える。
 
 **PC で触る窓は別**。一覧（F3、右クリック、`--list-window`）とエディタ（F2、右クリック、`--editor`）。[doc/pc-editor.md](pc-editor.md)。
 

@@ -6,6 +6,9 @@
 // **音声スレッドは待たせてはいけない**（doc/design.md）ので、
 // 音声スレッドは輪っかにバイトを積むだけにして、別のスレッドが送る。
 // 積むのは音声スレッド、取るのは送りスレッドの一本ずつなので錠は要らない。
+//
+// macOS uses CoreMIDI instead of WinMM. The class surface is identical and only
+// the wake-up differs: a Win32 event against a condition variable.
 
 #ifndef S_MU2000_UI_MIDI_OUT_H
 #define S_MU2000_UI_MIDI_OUT_H
@@ -19,7 +22,65 @@
 #include <thread>
 #include <vector>
 
+#if defined(__APPLE__)
+#include <condition_variable>
+#include <mutex>
+#endif
+
 namespace ui {
+
+#if defined(__APPLE__)
+
+// macOS: CoreMIDI. The shape matches the Windows class, and so does the
+// lock-free ring, because the audio thread must still be able to hand a byte
+// over without ever waiting. What differs is the wake-up: CoreMIDI has no event
+// object to signal, so a condition variable stands in for the Win32 one.
+class midi_out
+{
+public:
+	~midi_out();
+
+	static std::vector<std::string> list();
+
+	bool open(int device, std::string &err);
+	void close();
+
+	bool        is_open() const { return m_open.load(std::memory_order_acquire); }
+	std::string device_name() const { return m_name; }
+
+	// From the audio thread: push one byte at a time, drop it when not open
+	void send(u8 v);
+
+private:
+	void run();                       // the sender thread
+	void emit(const u8 *p, size_t n); // send one assembled message to CoreMIDI
+
+	static constexpr size_t SIZE = 8192, MASK = SIZE - 1;
+	u8 m_buf[SIZE] = {};
+	std::atomic<size_t> m_read{0}, m_write{0};
+
+	// The wake-up signal. **Closing does not destroy it**: the window thread
+	// closes while the audio thread pushes, and losing it in between would
+	// drop a wake-up
+	std::condition_variable m_wake;
+	std::mutex              m_wake_mutex;
+
+	struct ctx;                       // CoreMIDI client / port / destination
+	ctx        *m_ctx = nullptr;
+	std::atomic<bool> m_open{false};
+	std::string m_name;
+	std::thread m_thread;
+	std::atomic<bool> m_quit{false};
+
+	// Assemble one message from the byte stream. Only the sender thread touches this
+	u8     m_msg[3] = {};
+	int    m_have = 0, m_want = 0;
+	u8     m_status = 0;
+	bool   m_in_sysex = false;
+	std::vector<u8> m_sysex;
+};
+
+#else
 
 class midi_out
 {
@@ -72,6 +133,8 @@ private:
 	bool   m_in_sysex = false;
 	std::vector<u8> m_sysex;
 };
+
+#endif // __APPLE__
 
 } // namespace ui
 

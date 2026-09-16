@@ -59,6 +59,22 @@ MU2000 は電源を入れてから受信を始めるまでに、音にして約 
 その間に届いた MIDI は溜めておき、起動が済んでからまとめて流す。
 **DAW に挿してすぐ弾くと数秒間鳴らない**が、これは実機の電源投入と同じ。
 
+## 糸（スレッド）
+
+音を作るのは DAW の音声の糸だが、SWP30 のスレーブ（MU2000 の 2 つ目の音源チップ）だけは
+**プラグインが自分で作る糸**で回す（1 枚あたり 2 コアを使い、2 割ほど速い）。挿した枚数が論理コア数の
+1/4 を超えると、自動で 1 本に戻す。
+
+DAW が管理していない糸が増えるのを嫌う場合や、コアの割り振りを DAW に任せたい場合は、
+`%LOCALAPPDATA%\S-MU2000\plugin.ini`（macOS は `~/Library/Application Support/S-MU2000/plugin.ini`）に
+次の 1 行を書くと、スレーブも DAW の音声の糸の中で回す（出る音は同じ）。VST3・CLAP・AU で共通。
+
+```
+threaded=0
+```
+
+挿し直す（プロジェクトを開き直す）と効く。効いたときは記録（log.txt）に 1 行出る。
+
 ## MIDI の受け取り方
 
 VST3 は MIDI をそのままでは渡してこない。2 通りに分かれる。
@@ -78,6 +94,19 @@ VST3 は MIDI をそのままでは渡してこない。2 通りに分かれる�
 
 同じ時刻に複数届いたときは、パラメータ変化を先、イベントを後に流す。
 「音量を決めてから発音」の順になる。
+
+### 表に従わないホスト
+
+表のとおりに渡してこないホストがある。VSTHost 1.58 はプログラムチェンジを
+パラメータではなくイベント（`DataEvent`、システムエクスクルーシブ扱い）に入れ、
+しかも 2 byte の `C0 xx` を 3 byte の `C0 xx 00` に詰めて渡してくる。
+余分な `00` をそのまま音源へ流すと、走行状態（ランニングステータス）の
+データバイトになって続けてプログラム 0 が入り、音色がグランドピアノに戻る。
+
+そこで `DataEvent` の中身の頭がチャンネルのステータス（`80`-`EF`）なら、
+システムエクスクルーシブではないと見て、そのメッセージの決まった長さだけ取り出し、
+後ろの詰め物は捨てる。頭が `F0` か、途中の切れ端（データバイト）なら今までどおり
+バイト列のまま流す。`build/vst3probe.exe ... --data-midi` がこのホストのまねをする。
 
 ## 目に見えるつまみ
 
@@ -184,7 +213,34 @@ initialize/terminate を往復する、22050 から 192000 まで全部の周波
 
 ## まだ無いもの
 
-- 状態の保存。DAW に保存されるのは出力レベルだけで、音色設定は残らない。
-  曲を開き直すと、音色は MIDI トラックの頭から作り直しになる
 - 個別出力（実機の 6 系統）。今はステレオ 1 系統だけ
 - 64bit 浮動小数の処理（`kSample32` のみ）
+
+## macOS
+
+macOS 版も同じ中身で作れる。バンドルの形と口の名前だけが違う。
+
+```
+make vst3                    build/S-MU2000.vst3 を作る
+make probe                   ホストのふりをして読み込む
+make install-vst3            ~/Library/Audio/Plug-Ins/VST3 へ複製
+
+build/vst3probe build/S-MU2000.vst3                  素性を見る
+build/vst3probe build/S-MU2000.vst3 song.mid out.wav 鳴らす
+build/vst3probe build/S-MU2000.vst3 --torture        乱暴に扱う
+build/vst3probe build/S-MU2000.vst3 --view 20        画面を出す
+```
+
+バンドルは `Contents/MacOS/S-MU2000`（実行体）と `Contents/Info.plist`。
+ホストは `dlopen` ではなく `CFBundle` で開き、`bundleEntry` を呼ぶ。
+画面は `src/vst3/view_mac.mm`（`NSView`）で、ホストの親ビューの中に 1 枚
+足す。描画は gui と同じ `compat/gdi_mac.cpp` を通るので、**panel.cpp は
+Windows 版と同じソース**のまま。
+
+ROM は `S_MU2000_ROMS`、バンドルの隣の `roms.txt`、
+`~/Library/Application Support/S-MU2000/roms` の順に探す。
+
+同じ engine を使った Audio Unit（AUv2, `aumu`）も作れる（`make au`）。
+そちらは `src/au/plugin.cpp`。
+
+移植の全体は [porting-macos.md](porting-macos.md) にまとめてある。

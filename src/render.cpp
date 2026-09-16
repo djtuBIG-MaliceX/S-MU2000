@@ -21,8 +21,6 @@
 #include <string>
 #include <vector>
 
-#include <windows.h>
-
 namespace {
 
 void write_wav(const std::string &path, const std::vector<s16> &pcm, u32 rate)
@@ -79,6 +77,74 @@ bool read_wav16(const std::string &path, std::vector<s16> &l, std::vector<s16> &
 	return false;
 }
 
+const char *reset_name(const std::vector<u8> &bytes)
+{
+	if (bytes.size() == 6 && bytes[0] == 0xf0 && bytes[1] == 0x7e &&
+	    bytes[3] == 0x09 && bytes[5] == 0xf7) {
+		if (bytes[4] == 0x01) return "GM System On";
+		if (bytes[4] == 0x03) return "GM2 System On";
+	}
+	if (bytes.size() >= 11 && bytes[0] == 0xf0 && bytes[1] == 0x41 &&
+	    (bytes[2] & 0xf0) == 0x10 && bytes[3] == 0x42 && bytes[4] == 0x12 &&
+	    bytes[5] == 0x40 && bytes[6] == 0x00 && bytes[7] == 0x7f && bytes[8] == 0x00)
+		return "GS Reset";
+	if (bytes.size() == 9 && bytes[0] == 0xf0 && bytes[1] == 0x43 &&
+	    (bytes[2] & 0xf0) == 0x10 && bytes[3] == 0x4c && bytes[4] == 0x00 &&
+	    bytes[5] == 0x00 && bytes[6] == 0x7e && bytes[7] == 0x00 && bytes[8] == 0xf7)
+		return "XG System On";
+	return nullptr;
+}
+
+std::vector<u8> reset_bytes(const char *mode)
+{
+	if (!std::strcmp(mode, "gm"))
+		return { 0xf0, 0x7e, 0x7f, 0x09, 0x01, 0xf7 };
+	if (!std::strcmp(mode, "xg"))
+		return { 0xf0, 0x43, 0x10, 0x4c, 0x00, 0x00, 0x7e, 0x00, 0xf7 };
+	return { 0xf0, 0x41, 0x10, 0x42, 0x12, 0x40, 0x00, 0x7f, 0x00, 0x41, 0xf7 };
+}
+
+void insert_reset(std::vector<smf::event> &events, const char *mode)
+{
+	double first = events.empty() ? 0.05 : events.front().time;
+	for (const smf::event &event : events) {
+		if (!(event.bytes.size() == 2 && event.bytes[0] == 0xf5)) {
+			first = event.time;
+			break;
+		}
+	}
+	if (first < 0.05) {
+		const double shift = 0.05 - first;
+		for (smf::event &event : events)
+			event.time += shift;
+	}
+	events.insert(events.begin(), { 0.0, reset_bytes(mode), 0 });
+}
+
+const char *event_name(const std::vector<u8> &bytes)
+{
+	if (bytes.empty()) return "empty";
+	switch (bytes[0] & 0xf0) {
+	case 0x80: return "note-off";
+	case 0x90: return bytes.size() > 2 && bytes[2] ? "note-on" : "note-off";
+	case 0xa0: return "poly-pressure";
+	case 0xb0: return "control-change";
+	case 0xc0: return "program-change";
+	case 0xd0: return "channel-pressure";
+	case 0xe0: return "pitch-bend";
+	default: return bytes[0] == 0xf0 ? "sysex" : "system";
+	}
+}
+
+void trace_event(size_t index, const smf::event &event, int port)
+{
+	std::printf("MIDI event %zu: %.6f s, port %d, %s:", index, event.time,
+	            port + 1, event_name(event.bytes));
+	for (u8 byte : event.bytes)
+		std::printf(" %02X", unsigned(byte));
+	std::putchar('\n');
+}
+
 } // namespace
 
 
@@ -86,11 +152,15 @@ int main(int argc, char **argv)
 {
 	if (argc < 4) {
 		std::fprintf(stderr,
-			"使い方: render <rom ディレクトリ> <MIDI ファイル> <出力 wav> [秒数]\n");
+			"使い方: render <rom ディレクトリ> <MIDI ファイル> <出力 wav> [秒数] [--trace-midi] [--reset gm|gs|xg] [--fast-midi]\n");
 		return 1;
 	}
 	const std::string dir = argv[1], mid = argv[2], wav = argv[3];
 	double seconds = 0.0;
+	bool duration_given = false;
+	bool trace_midi = false;
+	bool fast_midi = false;
+	const char *forced_reset = nullptr;
 	const char *swptrace = nullptr;
 	bool single = false;   // スレーブを別スレッドにしない
 	double boot = -1.0;     // 負なら firmware が受信を有効にするまで待つ
@@ -126,15 +196,40 @@ int main(int argc, char **argv)
 			adc_path = argv[++i];
 		else if (!std::strcmp(argv[i], "--card") && i + 1 < argc)
 			card_path = argv[++i];
+		else if (!std::strcmp(argv[i], "--trace-midi"))
+			trace_midi = true;
+		else if (!std::strcmp(argv[i], "--fast-midi"))
+			fast_midi = true;
+		else if (!std::strcmp(argv[i], "--reset")) {
+			if (i + 1 >= argc) {
+				std::fprintf(stderr, "--reset requires gm, gs, or xg\n");
+				return 1;
+			}
+			forced_reset = argv[++i];
+			if (std::strcmp(forced_reset, "gm") && std::strcmp(forced_reset, "gs") &&
+			    std::strcmp(forced_reset, "xg")) {
+				std::fprintf(stderr, "unknown reset mode: %s (expected gm, gs, or xg)\n", forced_reset);
+				return 1;
+			}
+		}
 		else if (!std::strcmp(argv[i], "-v"))
 			smu2000::g_verbose = true;
-		else
+		else {
 			seconds = std::atof(argv[i]);
+			duration_given = true;
+		}
 	}
 
 	std::vector<smf::event> events;
 	std::string err;
 	if (!smf::load(mid, events, err)) { std::fprintf(stderr, "%s\n", err.c_str()); return 1; }
+	if (forced_reset) {
+		events.erase(std::remove_if(events.begin(), events.end(), [](const smf::event &event) {
+			return reset_name(event.bytes) != nullptr;
+		}), events.end());
+		insert_reset(events, forced_reset);
+		std::printf("MIDI reset forced: %s\n", reset_name(events.front().bytes));
+	}
 	std::printf("MIDI: %zu イベント、最後は %.2f 秒\n",
 	            events.size(), events.empty() ? 0.0 : events.back().time);
 
@@ -174,10 +269,8 @@ int main(int argc, char **argv)
 	}
 
 	mu.set_threaded(!single);
+	mu.set_fast_midi(fast_midi);
 	mu.reset();
-
-	if (seconds <= 0.0)
-		seconds = (events.empty() ? 0.0 : events.back().time) + 3.0;
 
 	const u32 rate = 44100;
 	std::vector<s16> pcm;
@@ -203,8 +296,9 @@ int main(int argc, char **argv)
 		std::printf("起動に %.2f 秒。ここから MIDI を流す\n", boot);
 	}
 
-	const size_t total = size_t((boot + seconds) * rate);
-	pcm.reserve(total * 2);
+	const double estimated_seconds = duration_given ? seconds :
+		(events.empty() ? 3.0 : events.back().time + 3.0);
+	pcm.reserve(size_t((boot + estimated_seconds) * rate) * 2);
 
 	// 出し先は SMF のポート指定（`FF 21`）に従う。口 0 = MIDI IN A、
 	// 口 1 = MIDI IN B。加えて、ファイルの中に `F5 nn`（1=A / 2=B）を
@@ -212,7 +306,21 @@ int main(int argc, char **argv)
 	// 実機の firmware は F5 を見ていないので、**振り分けるのはこちら側の役目**
 	int port = -1;                     // -1 なら SMF の指定に従う
 	size_t next = 0;
-	for (size_t i = pcm.size() / 2; i < total; i++) {
+	size_t scheduled_events = 0, scheduled_bytes = 0;
+	size_t tail_start = size_t(-1);
+	const size_t hard_stop = duration_given ? size_t((boot + seconds) * rate) : size_t(-1);
+	for (size_t i = pcm.size() / 2; ; i++) {
+		if (duration_given && i >= hard_stop)
+			break;
+		if (!duration_given && next == events.size() && mu.midi_idle()) {
+			if (tail_start == size_t(-1)) {
+				tail_start = i;
+				std::printf("MIDI queue drained at %.3f s; rendering 3.0 s tail\n",
+				            double(i) / rate - boot);
+			}
+			if (i >= tail_start + size_t(3.0 * rate))
+				break;
+		}
 		const double t = double(i) / rate - boot;
 		while (next < events.size() && events[next].time <= t) {
 			const std::vector<u8> &ev = events[next].bytes;
@@ -221,8 +329,14 @@ int main(int argc, char **argv)
 			else {
 				// ファイルの口 3・4 は gui の既定と同じく A・B に重ねる
 				const int to = port >= 0 ? port : smf::mu_port(events[next].port, true);
+				if (trace_midi)
+					trace_event(next, events[next], to);
+				if (const char *reset = reset_name(ev))
+					std::printf("MIDI reset: %.6f s, port %d, %s\n", events[next].time, to + 1, reset);
 				for (u8 b : ev)
 					mu.midi_in(b, to);
+				scheduled_events++;
+				scheduled_bytes += ev.size();
 			}
 			next++;
 		}
@@ -243,6 +357,14 @@ int main(int argc, char **argv)
 		if (!(i % (rate * 5)))
 			std::printf("  %5.1f 秒  PC=%08x\n", double(i) / rate - boot, mu.cpu().pc());
 	}
+
+	const size_t total = pcm.size() / 2;
+	std::printf("MIDI scheduled: %zu events, %zu bytes; pending: %zu; dropped: %llu\n",
+	            scheduled_events, scheduled_bytes, mu.midi_pending(),
+	            (unsigned long long)mu.midi_dropped());
+	if (next != events.size())
+		std::printf("MIDI unscheduled: %zu events (explicit render duration reached)\n",
+		            events.size() - next);
 
 	if (tf)
 		std::fclose(tf);

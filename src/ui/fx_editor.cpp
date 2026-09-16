@@ -74,10 +74,14 @@ bool fx_editor::knob(const char *id, int &v, int lo, int hi, float size, const c
 	int nv = v;
 	if (active && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0f)) {
 		// 全域を 200px ほどで回す。広い範囲（ディレイの時間など）も同じ手ざわりにする
-		float &acc = *ImGui::GetStateStorage()->GetFloatRef(iid, 0.0f);
+		// a Get*Ref reference goes stale when an insert grows the storage, so
+		// take a value and write it back
+		ImGuiStorage *st = ImGui::GetStateStorage();
+		float acc = st->GetFloat(iid, 0.0f);
 		acc -= io.MouseDelta.y * float(hi - lo) / (io.KeyShift ? 800.0f : 200.0f);
 		const int step = int(acc);
 		if (step) { nv = std::clamp(nv + step, lo, hi); acc -= float(step); }
+		st->SetFloat(iid, acc);
 	}
 	if (ImGui::IsItemDeactivated())
 		ImGui::GetStateStorage()->SetFloat(iid, 0.0f);
@@ -92,13 +96,16 @@ bool fx_editor::knob(const char *id, int &v, int lo, int hi, float size, const c
 		ImGui::OpenPopup("##typein");
 	if (ImGui::BeginPopup("##typein")) {
 		ImGui::TextDisabled("%s（%d-%d）", label, lo, hi);
-		int &typed = *ImGui::GetStateStorage()->GetIntRef(ImGui::GetID("typed"), v);
+		const ImGuiID typed_id = ImGui::GetID("typed");
+		ImGuiStorage *st = ImGui::GetStateStorage();
+		int typed = st->GetInt(typed_id, v);
 		if (ImGui::IsWindowAppearing()) { typed = v; ImGui::SetKeyboardFocusHere(); }
 		ImGui::SetNextItemWidth(fs * 6);
 		if (ImGui::InputInt("##n", &typed, 1, 10, ImGuiInputTextFlags_EnterReturnsTrue)) {
 			nv = std::clamp(typed, lo, hi);
 			ImGui::CloseCurrentPopup();
 		}
+		st->SetInt(typed_id, typed);
 		ImGui::EndPopup();
 	}
 
@@ -212,9 +219,9 @@ void fx_editor::eq_graph(const xg::fx_def &def, u8 blk, xg::model &m, bridge &br
 		return best;
 	};
 
-	int &grab = *ImGui::GetStateStorage()->GetIntRef(id, -1);
-	float &gx = *ImGui::GetStateStorage()->GetFloatRef(id + 1, 0.0f);
-	float &gy = *ImGui::GetStateStorage()->GetFloatRef(id + 2, 0.0f);
+	ImGuiStorage *st = ImGui::GetStateStorage();
+	int grab = st->GetInt(id, -1);
+	float gx = st->GetFloat(id + 1, 0.0f), gy = st->GetFloat(id + 2, 0.0f);
 	if (ImGui::IsItemActivated()) {
 		grab = nearest();
 		if (grab >= 0) {
@@ -225,6 +232,9 @@ void fx_editor::eq_graph(const xg::fx_def &def, u8 blk, xg::model &m, bridge &br
 	}
 	if (!active)
 		grab = -1;
+	st->SetInt(id, grab);
+	st->SetFloat(id + 1, gx);
+	st->SetFloat(id + 2, gy);
 	if (active && grab >= 0 && (io.MouseDelta.x != 0.0f || io.MouseDelta.y != 0.0f)) {
 		const band &b = *used[grab];
 		const xg::fx_param &pf = def.params[b.freq], &pg = def.params[b.gain];

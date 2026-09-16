@@ -320,6 +320,11 @@ public:
 	// 定義は running_machine の完成後（このファイル下部）：machine().make_timer は
 	// 非依存式なので Clang はクラス定義時点で running_machine の完成を要求する
 	// （GCC は遅延検査）。MSVC/GCC 動作は不変。
+	//
+	// The body is written below, once running_machine is a complete type. Putting
+	// it here makes **Clang reject it as member access into an incomplete type**:
+	// the machine() call does not depend on the template arguments, so unlike GCC
+	// it is checked at definition time rather than deferred to instantiation.
 	template <typename T, typename U>
 	emu_timer *timer_alloc(void (T::*cb)(s32), const char *, U *obj);
 

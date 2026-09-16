@@ -60,6 +60,24 @@ bool take_fx_request();                 // 頼みがあれば true（1 回だけ
 int  fx_window_slot();                         // 設定の窓で見ているインサーション（1-4）
 void set_fx_window_slot(int slot);
 
+// ---- パートの音色の窓（VIB・FILTER・EG・EQ を大きく）を開く頼み。一覧の絵のダブルクリックから
+void request_part(int part);            // part は 0-31
+bool take_part_request();               // 頼みがあれば true（1 回だけ）
+int  shape_window_part();               // パートの音色の窓で見ているパート
+void set_shape_window_part(int part);
+
+// ---- 一覧の表示の大きさ（文字の大きさの倍率、0.5〜1.5）。editor.ini に覚えておく
+float &overview_zoom();
+void set_overview_zoom(float zoom);
+
+// ---- パートの音色の窓の表示の大きさ（0.4〜1.5、既定 0.6）。editor.ini に覚えておく
+float &shapes_zoom();
+void set_shapes_zoom(float zoom);
+
+// 出しっぱなしで音色を選ぶ面。分類・音色・バンクの 3 つの並びを縦に出す。
+// 押すとその場でプログラムチェンジを送るので、続けて選べる（program_menu の常設版）
+void program_pane(int part, xg::model &m, const xg_snapshot *ram, bridge &br);
+
 // ---- 説明（ヘルプ）。見出しや名前にカーソルを当てると、何に効くのかを出す（日本語・英語）。
 // 邪魔な人もいるので、窓の上のチェックボックスで消せる。選んだ状態は
 // %LOCALAPPDATA%\S-MU2000\editor.ini に覚えておく（窓どうしで共通）

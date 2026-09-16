@@ -36,6 +36,23 @@ namespace x64asm {
 
 enum : u8 { RAX = 0, RCX, RDX, RBX, RSP, RBP, RSI, RDI, R8, R9, R10, R11, R12, R13, R14, R15, NOREG = 0xff };
 
+// Callee argument registers 1-4. Windows x64: rcx/rdx/r8/r9; SysV: rdi/rsi/rdx/rcx
+#ifdef _WIN32
+constexpr u8 ARG0 = RCX, ARG1 = RDX, ARG2 = R8, ARG3 = R9;
+constexpr bool sysv_abi = false;
+#else
+constexpr u8 ARG0 = RDI, ARG1 = RSI, ARG2 = RDX, ARG3 = RCX;
+constexpr bool sysv_abi = true;
+#endif
+
+// Type to receive the first argument on the C++ side (for the selftest's function
+// pointers; the return value is rax under either ABI, so it does not differ)
+#ifdef _WIN32
+using x64_arg0_t = u32;   // ecx; the caller knows the callee ignores the upper 32 bits
+#else
+using x64_arg0_t = u64;   // rdi
+#endif
+
 struct mem {
 	u8 base;
 	u8 index = NOREG;
@@ -201,6 +218,9 @@ public:
 enum : u8 { RAX = 0, RCX, RDX, RBX, RSP, RBP, RSI, RDI, NOREG = 0xff };
 // 同じ値の別名（Phase 3/5 で 32bit 名で書けるように）
 inline constexpr u8 EAX = RAX, ECX = RCX, EDX = RDX, EBX = RBX, ESP = RSP, EBP = RBP, ESI = RSI, EDI = RDI;
+
+// cdecl の 1 番目の引数はSTACK なので C++ 側の型はただの u32（x64 版と同じ名前でおける）
+using x64_arg0_t = u32;
 
 struct mem {
 	u8 base;

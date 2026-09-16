@@ -30,6 +30,7 @@ New-Item -ItemType Directory -Force -Path $objDir, $outDir | Out-Null
 # Makefile OBJS (engine/CMakeLists.txt:13-30)
 $engine = @(
   'src/compat/compat.cpp',
+  'src/compat/a64asm.cpp',
   'src/smartmedia.cpp',
   'src/mame/sound/swp30.cpp',
   'src/mame/sound/swp30_jit.cpp',

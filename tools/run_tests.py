@@ -12,6 +12,8 @@
   4. スレーブ別糸      threaded と --single で出る音が同じこと
   5. xgtest.exe      パラメータの層の定義表を firmware に読み返させる（doc/params.md）
   6. samptest.exe    パネルで録音して試聴し、録った音が返ってくるか
+  7. JIT 入切       同じ曲を JIT あり・なしで鳴らし、wav がバイト単位で同じか
+                    （JIT は解釈実行と同じことをするはずなので、ずれたら訳し方の間違い）
 
 **ROM が無い機械では 1 番だけ走る**（ROM は同梱できないので、それが正しい）。
 ROM の置き場は --roms、環境変数 SMU2000_ROMS、roms/、../MU2000/roms の順に探す。
@@ -39,6 +41,14 @@ RATE = 44100
 
 NEEDED = ("mu2000_flash.bin", "dump/xv364a0.ic49")
 
+# The same tools on both platforms; only the suffix differs (make test builds
+# with the same name on macOS, see the EXE variable in the Makefile)
+EXE = ".exe" if os.name == "nt" else ""
+
+
+def tool(name):
+    return BUILD / (name + EXE)
+
 
 def find_roms(given):
     cands = []
@@ -53,16 +63,20 @@ def find_roms(given):
     return None
 
 
-def run(cmd, out=None, err=None):
+def run(cmd, out=None, err=None, env=None):
     """out / err は書き出す先。同じ名前を渡せば 1 つの記録にまとめる。
+    env は足す環境変数（渡さなければ今の環境のまま）。
     **呼んだ形を記録の先頭に残す**（後で手で再現できるように）"""
     fo = open(out or os.devnull, "w", encoding="utf-8")
     fo.write("# " + " ".join('"%s"' % c if " " in str(c) else str(c)
                             for c in cmd) + chr(10))
+    if env:
+        fo.write("# " + " ".join("%s=%s" % kv for kv in env.items()) + chr(10))
     fo.flush()
+    ee = None if env is None else {**os.environ, **env}
     fe = fo if (err and err == out) else open(err or os.devnull, "w", encoding="utf-8")
     try:
-        return subprocess.run([str(c) for c in cmd], stdout=fo, stderr=fe).returncode
+        return subprocess.run([str(c) for c in cmd], stdout=fo, stderr=fe, env=ee).returncode
     finally:
         fe.close()
         if fe is not fo:
@@ -93,9 +107,9 @@ class Report:
 
 def step_verify(rep, update):
     """ROM 不要。swp30 を素で叩いて、レジスタと乱数が動いているか"""
-    exe = BUILD / "verify.exe"
+    exe = tool("verify")
     if not exe.exists():
-        rep.add("verify", False, "build/verify.exe が無い。make を先に")
+        rep.add("verify", False, "build/verify%s が無い。make を先に" % EXE)
         return
     got = subprocess.run([str(exe)], capture_output=True, text=True,
                          encoding="utf-8").stdout
@@ -116,9 +130,9 @@ def step_verify(rep, update):
 
 
 def step_statetest(rep, roms, midi):
-    exe = BUILD / "statetest.exe"
+    exe = tool("statetest")
     if not exe.exists():
-        rep.add("statetest", False, "build/statetest.exe が無い")
+        rep.add("statetest", False, "build/statetest%s が無い" % EXE)
         return
     log = WORK / "statetest.log"
     rc = run([exe, roms, midi, "--warm", "2.0", "--steps", "50"], out=log, err=log)
@@ -144,7 +158,7 @@ def render(roms, name, midi, seconds, extra=()):
     log = WORK / ("%s.log" % name)
     out = WORK / ("%s.out" % name)
     t0 = time.time()
-    rc = run([BUILD / "render.exe", roms, midi, wav, "%.3f" % seconds,
+    rc = run([tool("render"), roms, midi, wav, "%.3f" % seconds,
               "--boot", "%.3f" % BOOT_AT, "-v"] + list(extra), out=out, err=log)
     took = time.time() - t0
     if rc != 0 or not wav.exists():
@@ -185,6 +199,31 @@ def step_cases(rep, roms, cases, update):
     return first
 
 
+def step_jit_off(rep, roms, cases):
+    """Render every song twice, once with both JITs and once with neither, and
+    compare the wav files byte for byte. The JITs are supposed to do exactly
+    what the interpreter does, so any difference is a mis-translation (the same
+    check the MEG JIT's author asks for by hand). The reference carried by
+    tests/*.json cannot catch this on its own, because it is one number."""
+    names, bad = [], []
+    for name, (midi, seconds) in cases.items():
+        on = WORK / ("%s.wav" % name)                     # 3 番が焼いた（JIT あり）
+        off = WORK / ("%s_nojit.wav" % name)
+        rc = run([tool("render"), roms, midi, off, "%.3f" % seconds,
+                  "--boot", "%.3f" % BOOT_AT],
+                 out=WORK / ("%s_nojit.out" % name), err=WORK / ("%s_nojit.log" % name),
+                 env={"SMU2000_SH2_JIT": "0", "SMU2000_MEG_JIT": "0"})
+        if rc != 0 or not off.exists() or not on.exists():
+            bad.append(name)
+            continue
+        if on.read_bytes() != off.read_bytes():
+            bad.append(name)
+        else:
+            names.append(name)
+    note = "%d 件とも同じ" % len(names) if not bad else "違う: " + ", ".join(bad)
+    rep.add("JIT 入切", not bad, note)
+
+
 def step_threading(rep, roms, first):
     """1 サンプルの中で 2 個の SWP30 は独立——が崩れていないか"""
     if not first:
@@ -201,9 +240,9 @@ def step_threading(rep, roms, first):
 
 def step_xg(rep, roms):
     """定義表の番地・大きさ・範囲が firmware と合っているか。音は見ない"""
-    exe = BUILD / "xgtest.exe"
+    exe = tool("xgtest")
     if not exe.exists():
-        rep.add("xg", False, "build/xgtest.exe が無い")
+        rep.add("xg", False, "build/xgtest%s が無い" % EXE)
         return
     log = WORK / "xgtest.log"
     rc = run([exe, roms], out=log, err=log)
@@ -220,9 +259,10 @@ def step_xg(rep, roms):
 
 def step_sampling(rep, roms):
     """パネルで録音して試聴し、録った 440Hz が返ってくるか"""
-    exe = BUILD / "samptest.exe"
+    # The name the Makefile builds: samptest.exe on Windows, samptest on macOS
+    exe = BUILD / ("samptest" + EXE)
     if not exe.exists():
-        rep.add("sampling", False, "build/samptest.exe が無い")
+        rep.add("sampling", False, "%s が無い" % exe)
         return
     log = WORK / "samptest.log"
     rc = run([exe, roms], out=log, err=log)
@@ -281,16 +321,20 @@ def main():
     first = step_cases(rep, roms, cases, a.update)
 
     print()
-    print("== 4. スレーブを別の糸で回しても同じ音か")
+    print("== 4. JIT あり・なしで wav がバイト単位で同じか")
+    step_jit_off(rep, roms, cases)
+
+    print()
+    print("== 5. スレーブを別の糸で回しても同じ音か")
     step_threading(rep, roms, first)
 
     if not a.only:
         print()
-        print("== 5. パラメータの層を firmware に読み返させる")
+        print("== 6. パラメータの層を firmware に読み返させる")
         step_xg(rep, roms)
 
         print()
-        print("== 6. サンプリング（録音して試聴する）")
+        print("== 7. サンプリング（録音して試聴する）")
         step_sampling(rep, roms)
 
     rep.show()

@@ -167,6 +167,20 @@ def case_bend():
     return [track(seq(ev))], 5.5
 
 
+def case_lofi():
+    """分岐のある MEG プログラム（インサーションの LO-FI、種類 5E-00）。
+    飛ばされた命令の後始末が壊れると、ここで JIT と解釈実行の音が変わる"""
+    ev = head()
+    ev += [(1.0, b'\xc0\x00'),                       # GrandPno
+           (1.05, b'\xb0\x5e\x7f'),                   # CC94 バリエーション送り
+           (1.05, xg([0x02, 0x01, 0x40, 0x5e, 0x00])),  # 種類: LO-FI
+           (1.05, xg([0x02, 0x01, 0x5a, 0x00])),      # 接続: インサーション
+           (1.05, xg([0x02, 0x01, 0x5b, 0x00]))]      # パート 1
+    ev += note(0, 48, 110, 1.9, 2.0)
+    ev += note(0, 55, 110, 4.3, 2.0)
+    return [track(seq(ev))], 7.0
+
+
 CASES = {
     "piano":   case_piano,
     "chord":   case_chord,
@@ -175,6 +189,7 @@ CASES = {
     "dense":   case_dense,
     "port_b":  case_port_b,
     "bend":    case_bend,
+    "lofi":    case_lofi,
 }
 
 

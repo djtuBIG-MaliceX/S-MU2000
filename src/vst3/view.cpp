@@ -1,18 +1,32 @@
 // license:BSD-3-Clause
+//
+// The shared half of the VST3 view: the VST3 interface itself, the panel, and
+// the handling of mouse and key input. The window that holds it is per
+// platform (view_win.cpp, view_mac.mm), reached through plug_window.h.
+//
+// This file is plain C++ and includes compat/gdi.h, which is what paints the
+// panel on both platforms. On macOS that means CoreGraphics is fine to include
+// here too -- it is Cocoa, not CoreGraphics, that clashes with the GDI shim.
 
 #include "view.h"
+#include "plug_window.h"
 
+#include "compat/gdi.h"
+#include "compat/platform.h"
+#include "engine.h"
+#include "smartmedia.h"
 #include "ui/bridge.h"
 #include "ui/layout.h"
-#include "ui/text.h"
-#include "smartmedia.h"
+#include "ui/panel.h"
+
+#if !defined(_WIN32)
+#include <CoreGraphics/CoreGraphics.h>
+#endif
 
 #include <algorithm>
 #include <cstdio>
-#include <cwchar>
-
-#include <windowsx.h>
-#include <commdlg.h>
+#include <cstring>
+#include <string>
 
 using namespace Steinberg;
 
@@ -21,55 +35,30 @@ namespace vst3 {
 
 namespace {
 
-const char *kClassName = "SMU2000PlugView";
-
-// 窓のクラスはこの DLL で 1 度だけ登録する
-HINSTANCE this_module()
-{
-	HMODULE self = nullptr;
-	GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-	                   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-	                   reinterpret_cast<LPCSTR>(&this_module), &self);
-	return HINSTANCE(self);
-}
-
-void register_class(WNDPROC proc)
-{
-	static bool done = false;
-	if (done)
-		return;
-	WNDCLASSA wc{};
-	wc.lpfnWndProc   = proc;
-	wc.hInstance     = this_module();
-	wc.hCursor       = LoadCursor(nullptr, IDC_ARROW);
-	wc.lpszClassName = kClassName;
-	wc.hbrBackground = nullptr;
-	RegisterClassA(&wc);
-	done = true;
-}
-
-// ホストによってはキーがこちらに回ってくる。gui.exe と同じ割り当て
-mu2000::button key_to_button(WPARAM vk, bool &ok)
+// plug_key -> mu2000::button: the one place that decides. Each platform maps
+// its own key codes onto plug_key, so this stays the single answer to "what
+// does this key do", and it matches gui.cpp
+mu2000::button button_of(int code, bool &ok)
 {
 	ok = true;
-	switch (vk) {
-	case 'A': return mu2000::button::play;
-	case 'E': return mu2000::button::edit;
-	case 'U': return mu2000::button::util;
-	case 'F': return mu2000::button::effect;
-	case 'S': return mu2000::button::mute_solo;
-	case VK_OEM_6: return mu2000::button::part_plus;
-	case VK_OEM_4: return mu2000::button::part_minus;
-	case VK_OEM_PLUS:  return mu2000::button::value_plus;
-	case VK_OEM_MINUS: return mu2000::button::value_minus;
-	case VK_BACK:   return mu2000::button::exit;
-	case VK_RETURN: return mu2000::button::enter;
-	case VK_OEM_PERIOD: return mu2000::button::select_right;
-	case VK_OEM_COMMA:  return mu2000::button::select_left;
-	case 'Q': return mu2000::button::seq;
-	case 'Z': return mu2000::button::audition;
-	case 'X': return mu2000::button::select;
-	case 'M': return mu2000::button::sampling_mode;
+	switch (code) {
+	case PLUG_KEY_PLAY:          return mu2000::button::play;
+	case PLUG_KEY_EDIT:          return mu2000::button::edit;
+	case PLUG_KEY_UTIL:          return mu2000::button::util;
+	case PLUG_KEY_EFFECT:        return mu2000::button::effect;
+	case PLUG_KEY_MUTE_SOLO:     return mu2000::button::mute_solo;
+	case PLUG_KEY_PART_PLUS:     return mu2000::button::part_plus;
+	case PLUG_KEY_PART_MINUS:    return mu2000::button::part_minus;
+	case PLUG_KEY_VALUE_PLUS:    return mu2000::button::value_plus;
+	case PLUG_KEY_VALUE_MINUS:   return mu2000::button::value_minus;
+	case PLUG_KEY_ENTER:         return mu2000::button::enter;
+	case PLUG_KEY_EXIT:          return mu2000::button::exit;
+	case PLUG_KEY_SELECT_RIGHT:  return mu2000::button::select_right;
+	case PLUG_KEY_SELECT_LEFT:   return mu2000::button::select_left;
+	case PLUG_KEY_SEQ:           return mu2000::button::seq;
+	case PLUG_KEY_AUDITION:      return mu2000::button::audition;
+	case PLUG_KEY_SELECT:        return mu2000::button::select;
+	case PLUG_KEY_SAMPLING_MODE: return mu2000::button::sampling_mode;
 	default: break;
 	}
 	ok = false;
@@ -79,17 +68,59 @@ mu2000::button key_to_button(WPARAM vk, bool &ok)
 } // namespace
 
 
+// The panel lives here so that view.h can stay free of compat/gdi.h
+struct plug_view::impl
+{
+	engine  &eng;
+	ui::panel panel;
+
+#if defined(_WIN32)
+	// Double buffered: the host repaints at 30 frames a second and drawing
+	// straight into the window would flicker
+	HDC     mem_dc = nullptr;
+	HBITMAP mem_bmp = nullptr;
+	int     mem_w = 0, mem_h = 0;
+#endif
+
+	explicit impl(engine &e) : eng(e) {}
+
+	void paint_panel(HDC dc)
+	{
+		ui::snapshot s;
+		eng.panel().read(s);
+
+		char status[160];
+		std::snprintf(status, sizeof(status), "%s", eng.message().c_str());
+
+		panel.set_volume(eng.panel().gain());
+		panel.paint(dc, s, eng.panel().buttons(), status);
+	}
+
+	void forget_backing()
+	{
+#if defined(_WIN32)
+		if (mem_bmp) { DeleteObject(mem_bmp); mem_bmp = nullptr; }
+		if (mem_dc)  { DeleteDC(mem_dc); mem_dc = nullptr; }
+		mem_w = mem_h = 0;
+#endif
+	}
+};
+
+
 plug_view::plug_view(engine &eng)
-	: m_engine(eng)
+	: m_impl(new impl(eng)), m_engine(eng)
 {
 	// パネルの配置。%LOCALAPPDATA%\S-MU2000\panel.txt があれば読む
 	// （doc/panel-editing.md）。無ければ組み込みの配置のまま
+	//
+	// find_default() now searches the per-user settings directory on either
+	// platform (~/Library/Application Support/S-MU2000 on macOS)
 	const std::string lay = ui::layout::find_default();
 	if (!lay.empty()) {
 		std::string err;
-		m_panel.lay().load(lay, err);
+		m_impl->panel.lay().load(lay, err);
 	}
-	m_panel.resize(m_w, m_h);
+	m_impl->panel.resize(m_w, m_h);
 }
 
 plug_view::~plug_view()
@@ -119,40 +150,38 @@ uint32 PLUGIN_API plug_view::release()
 
 tresult PLUGIN_API plug_view::isPlatformTypeSupported(FIDString type)
 {
-	return (type && !std::strcmp(type, kPlatformTypeHWND)) ? kResultTrue : kResultFalse;
+	return (type && !std::strcmp(type, plug_window_type())) ? kResultTrue : kResultFalse;
 }
 
 tresult PLUGIN_API plug_view::attached(void *parent, FIDString type)
 {
 	if (isPlatformTypeSupported(type) != kResultTrue || !parent)
 		return kResultFalse;
-	if (m_hwnd)
+	if (m_window)
 		removed();
 
-	register_class(&plug_view::wnd_proc);
-	m_hwnd = CreateWindowExA(0, kClassName, "", WS_CHILD | WS_VISIBLE,
-	                         0, 0, m_w, m_h, HWND(parent), nullptr,
-	                         this_module(), nullptr);
-	if (!m_hwnd)
+	m_window = plug_window_create(*this);
+	if (!m_window || !m_window->attach(parent, m_w, m_h)) {
+		delete m_window;
+		m_window = nullptr;
 		return kResultFalse;
-
-	SetWindowLongPtrA(m_hwnd, GWLP_USERDATA, LONG_PTR(this));
-	SetTimer(m_hwnd, 1, 33, nullptr);        // 30 コマ／秒
-	m_panel.resize(m_w, m_h);
+	}
+	m_impl->panel.resize(m_w, m_h);
 	return kResultOk;
 }
 
 tresult PLUGIN_API plug_view::removed()
 {
-	if (m_hwnd) {
-		KillTimer(m_hwnd, 1);
-		SetWindowLongPtrA(m_hwnd, GWLP_USERDATA, 0);
-		DestroyWindow(m_hwnd);
-		m_hwnd = nullptr;
+	// The card file is the project's data, so the last of it is written back
+	// before the window goes: a host that closes the editor and never saves
+	// still keeps what the machine wrote
+	m_engine.card_flush();
+	if (m_window) {
+		m_window->detach();
+		delete m_window;
+		m_window = nullptr;
 	}
-	if (m_mem_bmp) { DeleteObject(m_mem_bmp); m_mem_bmp = nullptr; }
-	if (m_mem_dc)  { DeleteDC(m_mem_dc); m_mem_dc = nullptr; }
-	m_mem_w = m_mem_h = 0;
+	m_impl->forget_backing();
 	return kResultOk;
 }
 
@@ -177,9 +206,9 @@ tresult PLUGIN_API plug_view::onSize(ViewRect *r)
 		return kInvalidArgument;
 	m_w = std::max<int32>(r->getWidth(), 640);
 	m_h = std::max<int32>(r->getHeight(), 180);
-	if (m_hwnd)
-		MoveWindow(m_hwnd, 0, 0, m_w, m_h, TRUE);
-	m_panel.resize(m_w, m_h);
+	if (m_window)
+		m_window->set_size(m_w, m_h);
+	m_impl->panel.resize(m_w, m_h);
 	return kResultOk;
 }
 
@@ -204,224 +233,143 @@ tresult PLUGIN_API plug_view::checkSizeConstraint(ViewRect *rect)
 }
 
 
-LRESULT CALLBACK plug_view::wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+// ---- Called by the platform window
+
+void plug_view::repaint(void *native, int w, int h)
 {
-	plug_view *self = reinterpret_cast<plug_view *>(GetWindowLongPtrA(h, GWLP_USERDATA));
-	if (!self)
-		return DefWindowProcA(h, msg, wp, lp);
-	return self->handle(h, msg, wp, lp);
+	if (!native || w <= 0 || h <= 0)
+		return;
+
+	// パラメータの層: 音源の返事を読み、見えている面の読み返しを頼む
+	// (this is the GUI thread -- the Win32 timer and the macOS one both arrive
+	//  here, so the polling happens once per frame on either platform)
+	m_impl->panel.tick(m_engine.panel());
+
+#if defined(_WIN32)
+	HDC dst = static_cast<HDC>(native);
+	if (!m_impl->mem_dc || m_impl->mem_w != w || m_impl->mem_h != h) {
+		m_impl->forget_backing();
+		m_impl->mem_dc  = CreateCompatibleDC(dst);
+		m_impl->mem_bmp = CreateCompatibleBitmap(dst, w, h);
+		SelectObject(m_impl->mem_dc, m_impl->mem_bmp);
+		m_impl->mem_w = w;
+		m_impl->mem_h = h;
+	}
+	m_impl->paint_panel(m_impl->mem_dc);
+	BitBlt(dst, 0, 0, w, h, m_impl->mem_dc, 0, 0, SRCCOPY);
+#else
+	// The subview is flipped, so the context is already top-left with y down
+	// and only has to be wrapped -- no flipping, same as the GUI window
+	CGContextRef ctx = static_cast<CGContextRef>(native);
+	HDC dc = static_cast<HDC>(smu_gdi_wrap_view_context(ctx, w, h));
+	m_impl->paint_panel(dc);
+	DeleteDC(dc);
+#endif
+
+	card_tick();
 }
 
-void plug_view::paint(HWND h)
+void plug_view::mouse_down(int x, int y)
 {
-	PAINTSTRUCT ps;
-	HDC dc = BeginPaint(h, &ps);
-	RECT cr;
-	GetClientRect(h, &cr);
-	const int w = cr.right, hh = cr.bottom;
-
-	if (!m_mem_dc || m_mem_w != w || m_mem_h != hh) {
-		if (m_mem_bmp) DeleteObject(m_mem_bmp);
-		if (m_mem_dc)  DeleteDC(m_mem_dc);
-		m_mem_dc = CreateCompatibleDC(dc);
-		m_mem_bmp = CreateCompatibleBitmap(dc, w, hh);
-		SelectObject(m_mem_dc, m_mem_bmp);
-		m_mem_w = w;
-		m_mem_h = hh;
+	// The card slot is not a button but a menu: a click there is about the image
+	// in the slot, and the machine is told nothing
+	if (card_slot_at(x, y)) {
+		if (m_window)
+			m_window->card_menu(x, y);
+		return;
 	}
-
-	ui::snapshot s;
-	m_engine.panel().read(s);
-
-	char status[160];
-	std::snprintf(status, sizeof(status), "%s", m_engine.message().c_str());
-
-	m_panel.set_volume(m_engine.panel().gain());
-	m_panel.paint(m_mem_dc, s, m_engine.panel().buttons(), status);
-	BitBlt(dc, 0, 0, w, hh, m_mem_dc, 0, 0, SRCCOPY);
-	EndPaint(h, &ps);
+	m_impl->panel.press(x, y, m_engine.panel());
 }
 
-LRESULT plug_view::handle(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+void plug_view::mouse_right(int x, int y)
 {
-	ui::bridge &br = m_engine.panel();
-
-	switch (msg) {
-	case WM_TIMER:
-		// パラメータの層: 音源の返事を読み、見えている面の読み返しを頼む
-		m_panel.tick(br);
-		InvalidateRect(h, nullptr, FALSE);
-		// SmartMedia に書いたものを 2 秒ごとにファイルへ書き戻す（プロジェクトを保存するときと、閉じるときも）
-		if (GetTickCount() - m_last_flush > 2000) {
-			m_last_flush = GetTickCount();
-			m_engine.card_flush();
-		}
-		return 0;
-
-	case WM_RBUTTONUP:
-		if (m_panel.on_card_slot(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)))
-			card_menu(h, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
-		return 0;
-
-	case WM_COMMAND:
-		card_command(h, LOWORD(wp));
-		return 0;
-
-	case WM_ERASEBKGND:
-		return 1;
-
-	case WM_PAINT:
-		paint(h);
-		return 0;
-
-	case WM_SIZE:
-		m_panel.resize(LOWORD(lp), HIWORD(lp));
-		InvalidateRect(h, nullptr, FALSE);
-		return 0;
-
-	case WM_LBUTTONDOWN:
-		// カードの差し込み口は SmartMedia の品書き
-		if (m_panel.on_card_slot(GET_X_LPARAM(lp), GET_Y_LPARAM(lp))) {
-			card_menu(h, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
-			return 0;
-		}
-		SetCapture(h);
-		if (m_panel.press(GET_X_LPARAM(lp), GET_Y_LPARAM(lp), br))
-			InvalidateRect(h, nullptr, FALSE);
-		return 0;
-
-	case WM_MOUSEMOVE:
-		if (m_panel.drag(GET_X_LPARAM(lp), GET_Y_LPARAM(lp), br))
-			InvalidateRect(h, nullptr, FALSE);
-		return 0;
-
-	case WM_LBUTTONUP:
-		m_panel.release(br);
-		ReleaseCapture();
-		InvalidateRect(h, nullptr, FALSE);
-		return 0;
-
-	case WM_MOUSEWHEEL: {
-		POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
-		ScreenToClient(h, &pt);
-		const int delta = GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA;
-		if (delta && m_panel.wheel_at(pt.x, pt.y, delta, br))
-			InvalidateRect(h, nullptr, FALSE);
-		return 0;
-	}
-
-	case WM_KEYDOWN: {
-		if (lp & (1 << 30))
-			return 0;
-		bool ok = false;
-		const mu2000::button b = key_to_button(wp, ok);
-		if (ok) br.press(b, true);
-		return 0;
-	}
-
-	case WM_KEYUP: {
-		bool ok = false;
-		const mu2000::button b = key_to_button(wp, ok);
-		if (ok) br.press(b, false);
-		return 0;
-	}
-
-	case WM_KILLFOCUS:
-		br.release_all();
-		return 0;
-	}
-	return DefWindowProcA(h, msg, wp, lp);
+	// The same menu as a left click. A right click anywhere else is not this
+	// view's business (the GUI front end opens its own settings menu there)
+	if (card_slot_at(x, y) && m_window)
+		m_window->card_menu(x, y);
 }
 
+void plug_view::mouse_drag(int x, int y) { m_impl->panel.drag(x, y, m_engine.panel()); }
 
-// ---- SmartMedia（カードの差し込み口）。gui.exe の品書きと同じ
+void plug_view::mouse_up()               { m_impl->panel.release(m_engine.panel()); }
 
-namespace {
-
-enum : UINT { ID_CARD_NEW16 = 100, ID_CARD_NEW32, ID_CARD_NEW64, ID_CARD_NEW128, ID_CARD_OPEN = 110, ID_CARD_EJECT = 111 };
-
-void add_item(HMENU m, UINT flags, UINT_PTR id, const char *utf8)
+void plug_view::wheel(int x, int y, int steps)
 {
-	const std::wstring w = ui::to_wide(utf8);
-	AppendMenuW(m, flags, id, w.c_str());
+	if (steps)
+		m_impl->panel.wheel_at(x, y, steps, m_engine.panel());
 }
 
-std::string ask_card_path(HWND h, bool create)
+void plug_view::key(int code, bool down)
 {
-	wchar_t file[MAX_PATH] = {};
-	if (create)
-		wcscpy(file, L"smartmedia.img");
-	OPENFILENAMEW o{};
-	o.lStructSize = sizeof(o);
-	o.hwndOwner = h;
-	o.lpstrFilter = L"SmartMedia の中身 (*.img)\0*.img\0すべて (*.*)\0*.*\0";
-	o.lpstrFile = file;
-	o.nMaxFile = MAX_PATH;
-	o.lpstrDefExt = L"img";
-	if (create) {
-		o.lpstrTitle = L"新しい SmartMedia の保存先";
-		o.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
-		if (!GetSaveFileNameW(&o))
-			return {};
-	} else {
-		o.lpstrTitle = L"差す SmartMedia";
-		o.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
-		if (!GetOpenFileNameW(&o))
-			return {};
+	bool ok = false;
+	const mu2000::button b = button_of(code, ok);
+	if (ok)
+		m_engine.panel().press(b, down);
+}
+
+void plug_view::focus_lost() { m_engine.panel().release_all(); }
+
+
+// ---- SmartMedia (the card slot)
+
+bool plug_view::card_slot_at(int x, int y) const { return m_impl->panel.on_card_slot(x, y); }
+
+bool plug_view::card_ready() const { return m_engine.state() == status::ready; }
+
+std::string plug_view::card_path() const { return m_engine.card_path(); }
+
+// A failure has nowhere to go on the panel itself, so it goes to the log
+// (engine) and to the user (the window's alert)
+void plug_view::card_error(const std::string &err)
+{
+	m_engine.log_line(err.c_str());
+	if (m_window)
+		m_window->alert(err);
+}
+
+void plug_view::card_make(const std::string &path, int mb)
+{
+	// An empty card, in the physical layout a new one comes in: the machine
+	// still has to format it (UTIL -> CARD -> Format) before it stores anything
+	std::string err;
+	smartmedia card;
+	if (!card.create(u32(mb)) || !card.save(path, err)) {
+		card_error(err.empty() ? "SmartMedia を作れない" : err);
+		return;
 	}
-	return ui::to_utf8(file);
+	if (!m_engine.card_insert(path, err)) {
+		card_error(err);
+		return;
+	}
+	// A fresh card only carries the physical layout, so it has to be formatted
+	// on the machine before it holds anything. gui.cpp says the same thing when
+	// one is made there
+	if (m_window)
+		m_window->alert("空の SmartMedia を差しました。\n"
+		                "使う前に、本体の UTIL → CARD → Format で書式化してください。");
 }
 
-} // namespace
-
-void plug_view::card_menu(HWND h, int x, int y)
-{
-	const std::string path = m_engine.card_path();
-	HMENU m = CreatePopupMenu();
-	HMENU mnew = CreatePopupMenu();
-	add_item(mnew, MF_STRING, ID_CARD_NEW16, "16MB");
-	add_item(mnew, MF_STRING, ID_CARD_NEW32, "32MB");
-	add_item(mnew, MF_STRING, ID_CARD_NEW64, "64MB");
-	add_item(mnew, MF_STRING, ID_CARD_NEW128, "128MB");
-	const UINT ready = m_engine.state() == status::ready ? 0 : MF_GRAYED;
-	add_item(m, MF_POPUP | ready, UINT_PTR(mnew), "新しい SmartMedia を作って差す");
-	add_item(m, MF_STRING | ready, ID_CARD_OPEN, "SmartMedia を差す...");
-	std::string eject = "SmartMedia を抜く";
-	if (!path.empty())
-		eject += "（" + path.substr(path.find_last_of("\\/") + 1) + "）";
-	add_item(m, MF_STRING | (path.empty() ? MF_GRAYED : 0), ID_CARD_EJECT, eject.c_str());
-	POINT pt{ x, y };
-	ClientToScreen(h, &pt);
-	TrackPopupMenu(m, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON, pt.x, pt.y, 0, h, nullptr);
-	DestroyMenu(m);
-}
-
-void plug_view::card_command(HWND h, UINT id)
+void plug_view::card_insert_path(const std::string &path)
 {
 	std::string err;
-	if (id >= ID_CARD_NEW16 && id <= ID_CARD_NEW128) {
-		const std::string path = ask_card_path(h, true);
-		if (path.empty())
-			return;
-		smartmedia card;
-		card.create(16u << (id - ID_CARD_NEW16));
-		if (card.save(path, err) && m_engine.card_insert(path, err)) {
-			MessageBoxW(h, L"空の SmartMedia を差しました。\n"
-			               L"使う前に、本体の UTIL → CARD → Format で書式化してください。",
-			            L"S-MU2000", MB_OK | MB_ICONINFORMATION);
-			return;
-		}
-	} else if (id == ID_CARD_OPEN) {
-		const std::string path = ask_card_path(h, false);
-		if (path.empty() || m_engine.card_insert(path, err))
-			return;
-	} else if (id == ID_CARD_EJECT) {
-		m_engine.card_eject();
+	if (!m_engine.card_insert(path, err))
+		card_error(err);
+}
+
+void plug_view::card_eject() { m_engine.card_eject(); }
+
+// Called once a frame, by whichever platform is painting. The machine writes to
+// the card while it runs, so the file is brought up to date every couple of
+// seconds instead of only when a project is saved; that is what keeps a crash
+// from losing more than the last two seconds. Saving and closing flush as well
+// (the host interface on save, and removed() when the window goes)
+void plug_view::card_tick()
+{
+	const uint64_t now = smu2000::perf_ticks() * 1000 / smu2000::perf_freq();
+	if (now - m_last_flush < 2000)
 		return;
-	} else {
-		return;
-	}
-	MessageBoxW(h, ui::to_wide(err).c_str(), L"S-MU2000", MB_OK | MB_ICONWARNING);
+	m_last_flush = now;
+	m_engine.card_flush();
 }
 
 } // namespace vst3

@@ -423,7 +423,8 @@ void swp30_device::streaming_block::scale_and_clamp(s16 &val0, s16 &val1, s16 &v
 
 void swp30_device::streaming_block::read_16(memory_access<25, 2, -2, ENDIANNESS_LITTLE>::cache &wave, s16 &val0, s16 &val1, s16 &val2, s16 &val3)
 {
-	s32 spos = m_loop & 0x80000000 ? -m_pos : m_pos;
+	// S-MU2000: 逆向きのときは 1 つ手前から読み、step() で並びを裏返す（doc/upstream.md の 35）
+	s32 spos = m_loop & 0x80000000 ? -m_pos - 1 : m_pos;
 	offs_t base_address = m_address & 0x1ffffff;
 	offs_t adr = base_address + (spos >> 1);
 	switch(spos & 1) {
@@ -458,7 +459,8 @@ void swp30_device::streaming_block::read_16(memory_access<25, 2, -2, ENDIANNESS_
 
 void swp30_device::streaming_block::read_12(memory_access<25, 2, -2, ENDIANNESS_LITTLE>::cache &wave, s16 &val0, s16 &val1, s16 &val2, s16 &val3)
 {
-	s32 spos = m_loop & 0x80000000 ? -m_pos : m_pos;
+	// S-MU2000: 逆向きのときは 1 つ手前から読み、step() で並びを裏返す（doc/upstream.md の 35）
+	s32 spos = m_loop & 0x80000000 ? -m_pos - 1 : m_pos;
 	offs_t base_address = m_address & 0x1ffffff;
 	offs_t adr = base_address + (spos >> 3)*3;
 	switch(spos & 7) {
@@ -559,7 +561,8 @@ void swp30_device::streaming_block::read_12(memory_access<25, 2, -2, ENDIANNESS_
 
 void swp30_device::streaming_block::read_8(memory_access<25, 2, -2, ENDIANNESS_LITTLE>::cache &wave, s16 &val0, s16 &val1, s16 &val2, s16 &val3)
 {
-	s32 spos = m_loop & 0x80000000 ? -m_pos : m_pos;
+	// S-MU2000: 逆向きのときは 1 つ手前から読み、step() で並びを裏返す（doc/upstream.md の 35）
+	s32 spos = m_loop & 0x80000000 ? -m_pos - 1 : m_pos;
 	offs_t base_address = m_address & 0x1ffffff;
 	offs_t adr = base_address + (spos >> 2);
 	switch(spos & 3) {
@@ -620,58 +623,45 @@ void swp30_device::streaming_block::dpcm_step(u8 input)
 	m_dpcm_s1 = m_dpcm_s2;
 	m_dpcm_s2 = m_dpcm_s3;
 
-	// S-MU2000: 差分は下 8bit の端数を持つ（m_dpcm_delta は 24.8）。積算器へは下へ丸めて足す
-	s32 delta = m_dpcm_delta + dpcm_expand[input] * 256;
+	// S-MU2000: 展開のしかたを実機の出力そのものに合わせた（doc/upstream.md の 19）。
+	//
+	//   D   = 差分 + 展開表[入力]
+	//   積算器 = (積算器 + D) を上限と下限で切り詰めたもの。出力は 積算器 << scale
+	//   Deff = 実際に積算器に足せた量（切り詰めたときは D より小さい）
+	//   次の差分 = floor((k·Deff + r) / d)、r = 余りを負の側に取ったもの（-d < r <= 0）。k/d = 7/8, 3/4, 1/2
+	//   モード 3 は次の差分が 0
+	//
+	// 積算器は漏れず、差分の減り方の端数は捨てずに次のサンプルへ持ち越す。上限に当たったときは
+	// 差分を 0 にするのでも（MAME）そのままにするのでもなく、足せた量から次の差分を作る。
+	//
+	// 形は galibert さんが SWP00（MU50）と SWP20（MU80）の実機から取り出した出力で決めた
+	// （MAME のコミット b75872cb の議論。モード 2 の形は TaleTN さんが先に見つけていた）。
+	// SWP00 の出力はモード 2・スケール 4 の 7 万サンプルがすべて一致し、SWP20 は同じサンプルを
+	// 32 通りの形式で鳴らしたもののうちスケール 1〜7 の 28 通り、各 8 万サンプルが（上限に張り付くものも含めて）一致した。
+	//
+	// 前は k(差分 - 1)/d を 8bit の端数で丸め、積算器を 1/128 漏らしていた。倍音は合うが、
+	// 基音より下に実機に無い成分が +10〜30dB 出ていた（丸めの食い違いが積算器で積もったもの）。
+	//
+	// 余り r は、状態の並びを変えないよう m_dpcm_delta の下 8bit に -r として入れる（上は差分）
+	const s32 acc = m_dpcm_s3 >> scale;
+	const s32 rem = -(m_dpcm_delta & 7);
+	s32 delta = (m_dpcm_delta >> 8) + dpcm_expand[input];
 
-	// S-MU2000: **圧縮モード 0-2 の積算器は漏れる**（極が 1 ではない）。差分の減り方も MAME と違う。
-	//
-	// モード 0-2 のサンプルは差分が系統的に正へ偏っていて（トランペットの
-	// 上のキーレンジで 5086 バイトの総和が +3119、ループ 1 周あたり +960）、
-	// 漏れの無い積分器で積むと 0.2 秒で上限に張り付き、直流の塊になる。
-	// モード 3 のサンプルは**ループ 1 周の総和がぴったり 0** に作られていて、
-	// そちらは漏れの無い積分器で合う（モード 3 の音は下の変更で**1 ビットも変わらない**）。
-	//
-	// 前は漏れ 3/128 と、差分を 0 へ丸めて減らす形にしていた（トランペットの 1 音で合わせた。今の MAME も同じ形）。
-	// 実機を XG モードにして圧縮サンプルの音色を録ると、エミュレータだけ直流が
-	// 実効値の -0.07〜-0.34 ほど寄っていた（実機は ±0.03 以内）。
-	//
-	// 減り方の形は、実機でなく ROM のサンプルそのもので決めた。XG の 134 音色で音域全体を鳴らし、
-	// 使われた 84 本の圧縮サンプルを何百通りもの展開のしかたで同時に展開して、
-	// 直流/実効の中央値を比べた（元の楽器の録音に直流は無いので、正しい展開ほど 0 に近い）。
-	// 差分を k(差分 - 1)/d（k/d = 7/8, 3/4, 1/2）で減らすと、3 つのモードが同じ式で揃う:
-	//
-	//   展開のしかた                     モード 0  モード 1  モード 2
-	//   漏れ無し・0 へ丸め                0.923     0.845     0.814
-	//   漏れ 3/128・0 へ丸め（前、MAME）  0.223     0.146     0.061
-	//   k(差分 - 1)/d、漏れ 1/128         0.010     0.008     0.007
-	//
-	// 漏れの量は直流では決まらない（多いほど 0 に近い）ので、実機の録音で決めた。
-	// 1/128 より少ないと dense の試験曲の Trumpet で 30Hz 以下が実機より多く（1/256 で 7%、
-	// 実機 0.5%）、多いと AltoSax の低い音などで倍音の並びが実機から離れる（3/128 近くで
-	// 1〜8 倍音の食い違いが 0.15 → 0.29dB）。パフォーマンス 100 個の帯の食い違いの平均は
-	// 1.111 → 1.101dB（Stereo Grand 4.4 → 3.5、悪くなったものは無し）
-	s32 acc = m_dpcm_s3;
-	if(mode != 3)
-		acc -= acc >> 7;
-	s32 sample = acc + ((delta >> 8) << scale);
-
-	// S-MU2000: MAME は上限に当たると差分を 0 にしていた。そうすると次のサンプルから波形が崩れ、
-	// ループのたびに雑音が出る（XG の Flute の高い音、doc/upstream.md の 17）。上限で切り詰めるだけにする。
-	// 案は MUXG2K の hockinsk さん（issue #3）
+	s32 sample = (acc + delta) << scale;
 	if(sample < -0x8000)
 		sample = -0x8000;
 	else if(sample > limit)
 		sample = limit;
 	m_dpcm_s3 = sample;
+	delta = (sample >> scale) - acc;
 
-	// k(差分 - 1)/d を 8bit の端数で下へ丸める（+128 は端数の丸めの寄せ、上の表はこの形で測った）
+	s32 y;
 	switch(mode) {
-	case 0: delta = (delta * 7 - 7 * 256 + 128) >> 3; break;
-	case 1: delta = (delta * 3 - 3 * 256 + 128) >> 2; break;
-	case 2: delta = (delta     -     256 + 128) >> 1; break;
-	case 3: delta = 0; break;
+	case 0: y = delta * 7 + rem; m_dpcm_delta = (y >> 3) * 256 + ((y & 7) ? 8 - (y & 7) : 0); break;
+	case 1: y = delta * 3 + rem; m_dpcm_delta = (y >> 2) * 256 + ((y & 3) ? 4 - (y & 3) : 0); break;
+	case 2: y = delta     + rem; m_dpcm_delta = (y >> 1) * 256 + ((y & 1) ? 2 - (y & 1) : 0); break;
+	default: m_dpcm_delta = 0; break;
 	}
-	m_dpcm_delta = delta;
 }
 
 void swp30_device::streaming_block::read_8c(memory_access<25, 2, -2, ENDIANNESS_LITTLE>::cache &wave, s16 &val0, s16 &val1, s16 &val2, s16 &val3)
@@ -724,6 +714,14 @@ std::pair<s16, bool> swp30_device::streaming_block::step(memory_access<25, 2, -2
 	case 1: read_12(wave, val0, val1, val2, val3); break;
 	case 2: read_8 (wave, val0, val1, val2, val3); break;
 	case 3: read_8c(wave, val0, val1, val2, val3); break;
+	}
+	// S-MU2000: 逆向きに鳴らすサンプルは、読んだ 4 つが番地の順（再生の順とは逆）に並ぶ。
+	// MAME はそのまま補間していたので、端数が増えるほど 1 つ前の値へ寄っていき、ぎざぎざの雑音が
+	// 高い帯に出ていた（Electro Kit の 28 番で 10〜20kHz が実機より +14〜25dB）。1 つ手前から読んで
+	// 裏返すと、前・今・次・その次の順になる（doc/upstream.md の 35）
+	if((m_loop & 0x80000000) && (m_address >> 30) != 3) {
+		std::swap(val0, val3);
+		std::swap(val1, val2);
 	}
 	if(m_first)
 		val0 = 0;
@@ -2041,6 +2039,12 @@ void swp30_device::write16(offs_t addr, u16 data)
 	const u32 slot = addr & 0x3f;
 	const u32 chan = (addr >> 6) & 0x3f;
 
+	if(const char *e = getenv("WTRACE")) {
+		const u32 from = u32(atoi(e));
+		if(m_meg->m_sample_counter >= from && m_meg->m_sample_counter < from + 30000)
+			fprintf(stderr, "W %u ch%02x sl%02x = %04x\n", m_meg->m_sample_counter, chan, slot, data);
+	}
+
 	// --- チャンネルごとのレジスタ（全 64ch 共通、offset にチャンネル<<6 を渡す）
 	switch(slot) {
 	case 0x00: filter_1_a_w(chan << 6, data); return;
@@ -3318,6 +3322,15 @@ void swp30_device::meg_state::lfo_step()
 		m_lfo_counter[i] = (m_lfo_counter[i] + m_lfo_increment[i]) & 0x3fffff;
 }
 
+int swp30_device::meg_state::region_of(u16 pc) const
+{
+	const u16 key = (pc / 12) << 11;
+	for(int i=0; i != 8; i++)
+		if(i == 7 || m_map[i+1] <= m_map[i] || ((m_map[i+1] & 0xf800) > key))
+			return i;
+	return 7;
+}
+
 u32 swp30_device::meg_state::resolve_address(u16 pc, s32 offset)
 {
 	u16 key = (pc / 12) << 11;
@@ -3710,6 +3723,10 @@ void swp30_device::meg_state::step()
 	// Memory access
 	switch(d.memop) {
 	case 1: {
+		// S-MU2000: 区画が無効の間（エフェクトの種類を替えている最中など）は、
+		// 遅延メモリへの書き込みを落とす（doc/upstream.md の 33）
+		if(BIT(m_swp->m_revram_enable, region_of(m_pc)))
+			break;
 		u32 address = resolve_address(m_pc, m_offset[m_pc/3] + (d.mem_use_index ? m_ram_index : 0) + (d.mem_use_index2 ? m_swp->m_meg_ram_index2 : 0) - m_sample_counter);
 		if(address != 0xffffffff)
 			// S-MU2000: リバーブ RAM も実体は素の配列。18bit ぶんで折り返す
@@ -3722,6 +3739,12 @@ void swp30_device::meg_state::step()
 		if(d.mem_table) {
 			const u32 address = (u32(m_offset[m_pc/3]) + (d.mem_use_index ? m_ram_index : 0) + (d.mem_use_index2 ? m_swp->m_meg_ram_index2 : 0) + (d.memop == 3 ? 1 : 0)) & 0x3ffff;
 			m_memr_value[m_delay_2] = revram_decode(m_swp->m_reverb_ram[address]);
+			m_memr_active[m_delay_2] = true;
+			break;
+		}
+		// 区画が無効の間は 0 が返る（書き込みと同じく doc/upstream.md の 33）
+		if(BIT(m_swp->m_revram_enable, region_of(m_pc))) {
+			m_memr_value[m_delay_2] = 0;
 			m_memr_active[m_delay_2] = true;
 			break;
 		}
@@ -3836,6 +3859,7 @@ void swp30_device::meg_state::build_ops(op *ops) const
 			if(i == 7 || m_map[i+1] <= m_map[i] || ((m_map[i+1] & 0xf800) > key)) {
 				o.addr_mask = (1 << (10+BIT(m_map[i], 8, 3))) - 1;
 				o.addr_base = BIT(m_map[i], 0, 8) << 10;
+				o.region    = u8(i);
 				break;
 			}
 	}
@@ -4001,6 +4025,14 @@ void swp30_device::meg_state::run_program(const op *ops)
 			goto mem_done;
 		}
 		if(o.memop) {
+			// S-MU2000: 区画が無効の間は、書き込みは落ち、読み出しは 0 になる（step() と同じ）
+			if(BIT(m_swp->m_revram_enable, o.region)) {
+				if(o.memop != 1) {
+					m_memr_value[d2] = 0;
+					m_memr_active[d2] = true;
+				}
+				goto mem_done;
+			}
 			u32 off = u32(m_offset[o.offset_index]) + u32(o.mem_use_index ? m_ram_index : 0) + u32(o.mem_use_index2 ? ram_index2 : 0) - sample_counter;
 			if(o.memop == 3)
 				off += 1;

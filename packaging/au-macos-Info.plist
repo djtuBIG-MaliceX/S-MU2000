@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Info.plist for the AU v2 component bundle.
+
+  Unlike VST3, where the host opens the bundle with CFBundle and calls a known
+  symbol, an Audio Unit is *described* in this file: the AudioComponents array
+  is what makes it show up in a host's plug-in list. factoryFunction names the
+  AudioComponentFactoryFunction in the binary (SMU2000AUFactory in
+  src/au/plugin.cpp), and the type/subtype/manufacturer here have to match the
+  constants in that file -- a mismatch means either the AU is invisible or the
+  host loads it and finds nothing.
+
+  Type aumu is MusicDevice, which is what a synth is: MIDI in, audio out.
+
+  version is the AudioComponent version, as a number: 0x00010000 = 0.1.0.
+-->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleExecutable</key>
+	<string>S-MU2000</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.tarboh.smu2000.au</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>S-MU2000</string>
+	<key>CFBundleDisplayName</key>
+	<string>S-MU2000</string>
+	<key>CFBundlePackageType</key>
+	<string>BNDL</string>
+	<key>CFBundleSignature</key>
+	<string>????</string>
+	<key>CFBundleVersion</key>
+	<string>0.1.0</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CSResourcesFileMapped</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>AudioComponents</key>
+	<array>
+		<dict>
+			<key>type</key>
+			<string>aumu</string>
+			<key>subtype</key>
+			<string>SMU2</string>
+			<key>manufacturer</key>
+			<string>Trbh</string>
+			<key>name</key>
+			<string>tarboh: S-MU2000</string>
+			<key>version</key>
+			<integer>65536</integer>
+			<key>factoryFunction</key>
+			<string>SMU2000AUFactory</string>
+			<!--
+			  No <key>sandboxSafe</key> here, on purpose. It sets
+			  kAudioComponentFlag_SandboxSafe, which tells the system the unit may
+			  be loaded in the caller's process -- and a host that runs sandboxed
+			  (auvaltool does) then loads it there instead of out of process. This
+			  unit is not sandbox-safe: it reads the ROM directory and writes a log
+			  under ~/Library/Application Support. Claiming otherwise made auval
+			  report "didn't find the component" even though every AudioComponent
+			  call worked.
+			-->
+			<key>tags</key>
+			<array>
+				<string>Synth</string>
+				<string>Sampler</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

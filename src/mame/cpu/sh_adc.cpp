@@ -19,7 +19,16 @@ sh_adc_device::sh_adc_device(const machine_config &mconfig, device_type type, co
 	m_cpu(*this, finder_base::DUMMY_TAG),
 	m_intc(*this, finder_base::DUMMY_TAG),
 	m_intc_vector(0), m_adcsr(0), m_adcr(0), m_trigger(0), m_start_mode(0), m_start_channel(0),
-	m_end_channel(0), m_start_count(0), m_mode(0), m_channel(0), m_count(0), m_analog_powered(false), m_adtrg(false), m_next_event(0)
+	m_end_channel(0), m_start_count(0),
+	// S-MU2000: these two were declared but initialized nowhere. done() reads
+	// m_analog_power_control, and interrupt handling reads
+	// m_suspend_on_interrupt, so the value used to depend on whatever the heap
+	// happened to hold. AddressSanitizer fills fresh allocations with 0xBE, which
+	// made m_analog_power_control load as true (190 is not a valid bool) and
+	// changed the ADC's behaviour. Set both to the value a zeroed heap gave on
+	// the original Windows build
+	m_suspend_on_interrupt(false), m_analog_power_control(false),
+	m_mode(0), m_channel(0), m_count(0), m_analog_powered(false), m_adtrg(false), m_next_event(0)
 {
 }
 

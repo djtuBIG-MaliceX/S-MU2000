@@ -2,6 +2,7 @@
 
 #include "layout.h"
 #include "draw.h"
+#include "compat/paths.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -578,22 +579,21 @@ std::string layout::find_default()
 		return "panel.txt";
 	// 2. exe と同じ場所
 	{
-		char buf[MAX_PATH] = {};
-		if (GetModuleFileNameA(nullptr, buf, MAX_PATH)) {
-			std::string p(buf);
-			const size_t slash = p.find_last_of("\\/");
-			if (slash != std::string::npos) {
-				const std::string q = p.substr(0, slash + 1) + "panel.txt";
-				if (exists(q))
-					return q;
-			}
+		const std::string dir = smu2000::exe_dir();
+		if (!dir.empty()) {
+			const std::string q = dir + "panel.txt";
+			if (exists(q))
+				return q;
 		}
 	}
 	// 3. 設定の置き場
-	if (const char *base = std::getenv("LOCALAPPDATA")) {
-		const std::string q = std::string(base) + "\\S-MU2000\\panel.txt";
-		if (exists(q))
-			return q;
+	{
+		const std::string dir = smu2000::config_dir();
+		if (!dir.empty()) {
+			const std::string q = dir + "panel.txt";
+			if (exists(q))
+				return q;
+		}
 	}
 	return {};
 }

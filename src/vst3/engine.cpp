@@ -6,14 +6,16 @@
 #include "nvram.h"
 #include "smartmedia.h"
 
+#include "compat/paths.h"
+#include "compat/platform.h"
+
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
-
-#include <windows.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -25,40 +27,15 @@ namespace vst3 {
 namespace {
 
 // ---- プラグイン本体（DLL）の置かれている場所
-
-std::string module_dir()
-{
-	HMODULE self = nullptr;
-	if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-	                        GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-	                        reinterpret_cast<LPCSTR>(&module_dir), &self))
-		return {};
-	char buf[MAX_PATH * 2] = {};
-	const DWORD n = GetModuleFileNameA(self, buf, sizeof(buf));
-	if (!n || n >= sizeof(buf))
-		return {};
-	std::string s(buf, n);
-	const size_t slash = s.find_last_of("\\/");
-	return slash == std::string::npos ? std::string() : s.substr(0, slash);
-}
-
-std::string env(const char *name)
-{
-	char buf[MAX_PATH * 4];
-	const DWORD n = GetEnvironmentVariableA(name, buf, sizeof(buf));
-	return (n && n < sizeof(buf)) ? std::string(buf, n) : std::string();
-}
-
-bool is_file(const std::string &p)
-{
-	const DWORD a = GetFileAttributesA(p.c_str());
-	return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
-}
+//
+// The OS answers now come from compat/paths.h: where this image lives, what
+// the environment says, and where the per-user settings directory is. Only the
+// search order below is this file's business.
 
 // そのディレクトリが ROM 置き場かどうか
 bool has_roms(const std::string &dir)
 {
-	return !dir.empty() && is_file(dir + "\\mu2000_flash.bin");
+	return !dir.empty() && smu2000::is_file(smu2000::join(dir, "mu2000_flash.bin"));
 }
 
 // roms.txt に書かれた場所を読む（1 行目だけ）
@@ -85,12 +62,9 @@ std::string read_pointer_file(const std::string &path)
 
 std::string log_path()
 {
-	const std::string base = env("LOCALAPPDATA");
-	if (base.empty())
-		return {};
-	const std::string dir = base + "\\S-MU2000";
-	CreateDirectoryA(dir.c_str(), nullptr);
-	return dir + "\\log.txt";
+	// The same per-user directory the GUI keeps gui.ini and panel.txt in
+	const std::string dir = smu2000::ensure_config_dir();
+	return dir.empty() ? std::string() : smu2000::join(dir, "log.txt");
 }
 
 void logf(const char *fmt, ...)
@@ -98,16 +72,13 @@ void logf(const char *fmt, ...)
 	static const std::string path = log_path();
 	if (path.empty())
 		return;
-	const bool fresh = !is_file(path);
+	const bool fresh = !smu2000::is_file(path);
 	std::FILE *f = std::fopen(path.c_str(), "ab");
 	if (!f)
 		return;
 	if (fresh)
 		std::fwrite("\xef\xbb\xbf", 1, 3, f);   // UTF-8 の印。無いと化けて読まれる
-	SYSTEMTIME t;
-	GetLocalTime(&t);
-	std::fprintf(f, "%04d-%02d-%02d %02d:%02d:%02d  ", t.wYear, t.wMonth, t.wDay,
-	             t.wHour, t.wMinute, t.wSecond);
+	std::fprintf(f, "%s  ", smu2000::local_time().c_str());
 	va_list ap;
 	va_start(ap, fmt);
 	std::vfprintf(f, fmt, ap);
@@ -122,22 +93,25 @@ std::string find_roms(std::string &tried)
 	std::vector<std::string> cand;
 
 	// 1. 環境変数。一番強い
-	const std::string ev = env("S_MU2000_ROMS");
+	const std::string ev = smu2000::env("S_MU2000_ROMS");
 	if (!ev.empty())
 		cand.push_back(ev);
 
-	const std::string dir = module_dir();
+	// The address of a function in this image is what locates the image:
+	// a module handle on Windows, the Mach-O header on macOS
+	const std::string dir = smu2000::module_dir(reinterpret_cast<const void *>(&logf));
 	if (!dir.empty()) {
 		// 2. バンドルの Resources。
 		//    <名前>.vst3/Contents/x86_64-win/ に DLL がいるので 1 つ上
-		cand.push_back(dir + "\\..\\Resources");
-		cand.push_back(dir + "\\..\\Resources\\roms");
+		//    (macOS puts the binary in Contents/MacOS, also one level up)
+		cand.push_back(smu2000::join(dir, "../Resources"));
+		cand.push_back(smu2000::join(dir, "../Resources/roms"));
 		// 3. DLL のすぐ横
-		cand.push_back(dir + "\\roms");
+		cand.push_back(smu2000::join(dir, "roms"));
 		cand.push_back(dir);
 		// 4. 場所を書いた紙
-		const std::string notes[2] = { dir + "\\..\\Resources\\roms.txt",
-		                               dir + "\\roms.txt" };
+		const std::string notes[2] = { smu2000::join(dir, "../Resources/roms.txt"),
+		                               smu2000::join(dir, "roms.txt") };
 		for (const std::string &p : notes) {
 			const std::string s = read_pointer_file(p);
 			if (!s.empty())
@@ -145,18 +119,40 @@ std::string find_roms(std::string &tried)
 		}
 	}
 
-	// 5. 決め打ちの置き場
-	const std::string local = env("LOCALAPPDATA");
-	if (!local.empty())
-		cand.push_back(local + "\\S-MU2000\\roms");
-	const std::string home = env("USERPROFILE");
+	// 5. The fixed places, following where macOS puts an application's own data
+	//    (Application Support, Documents). Per-user comes first and machine-wide
+	//    last, so a user's own copy wins
+	const std::string local = smu2000::config_dir();
+	if (!local.empty()) {
+		// A note naming the directory. Someone using this from a DAW has nowhere
+		// to set an environment variable, so one line here (roms.txt) does it
+		const std::string note = read_pointer_file(smu2000::join(local, "roms.txt"));
+		if (!note.empty())
+			cand.push_back(note);
+		cand.push_back(smu2000::join(local, "roms"));
+		cand.push_back(local);
+	}
+	const std::string home = smu2000::home_dir();
 	if (!home.empty())
-		cand.push_back(home + "\\Documents\\S-MU2000\\roms");
+		cand.push_back(smu2000::join(home, "Documents/S-MU2000/roms"));
+
+	// 6. The machine-wide places. **Put the ROMs here once and every user of the
+	//    machine, and every instance of either plug-in, finds them.** The AU is
+	//    one bundle in Components, shared by all accounts, so this is its
+	//    intended home (/Library/Application Support, %ProgramData% on Windows)
+	//
+	//    This program never writes here: creating it takes the rights to
+	const std::string shared = smu2000::shared_config_dir();
+	if (!shared.empty()) {
+		const std::string note = read_pointer_file(smu2000::join(shared, "roms.txt"));
+		if (!note.empty())
+			cand.push_back(note);
+		cand.push_back(smu2000::join(shared, "roms"));
+		cand.push_back(shared);
+	}
 
 	for (const std::string &c : cand) {
-		char full[MAX_PATH * 2] = {};
-		const DWORD n = GetFullPathNameA(c.c_str(), sizeof(full), full, nullptr);
-		const std::string p = (n && n < sizeof(full)) ? std::string(full, n) : c;
+		const std::string p = smu2000::full_path(c);
 		if (has_roms(p))
 			return p;
 		tried += "  " + p + "\n";
@@ -258,21 +254,21 @@ void engine::boot()
 			warn = shared->warn;
 			logf("ROM は読み込み済みのものを借りた");
 		} else {
-			if (!mu->load_program(dir + "\\mu2000_flash.bin") ||
-			    !mu->load_wave(dir + "\\dump")) {
+			if (!mu->load_program(smu2000::join(dir, "mu2000_flash.bin")) ||
+			    !mu->load_wave(smu2000::join(dir, "dump"))) {
 				m_message = mu->error();
 				logf("%s", m_message.c_str());
 				delete mu;
 				m_state.store(status::failed, std::memory_order_release);
 				return;
 			}
-			if (!mu->load_sintab(dir + "\\standin\\sin-table.bin")) {
+			if (!mu->load_sintab(smu2000::join(dir, "standin/sin-table.bin"))) {
 				warn = mu->error();
 				logf("警告: %s", warn.c_str());
 			}
 			// LCD の字の絵。無くても音は出るが、画面に何も映らなくなる
-			if (!mu->load_lcd_font(dir + "\\hd44780u_b04.bin") &&
-			    !mu->load_lcd_font(dir + "\\standin\\hd44780u_b04.bin"))
+			if (!mu->load_lcd_font(smu2000::join(dir, "hd44780u_b04.bin")) &&
+			    !mu->load_lcd_font(smu2000::join(dir, "standin/hd44780u_b04.bin")))
 				logf("警告: %s", mu->error().c_str());
 			shared = std::make_shared<rom_set>();
 			shared->prog   = mu->program_rom();
@@ -287,7 +283,21 @@ void engine::boot()
 		m_roms = shared;
 	}
 
-	mu->set_threaded(true);
+	// SWP30 のスレーブを別スレッドで回すか。既定は回す（挿した枚数が論理コアの 1/4 を超えたら自動で 1 本）。
+	// DAW の中では、DAW が管理しない糸が 1 本増える。嫌う DAW や、自分でコアを割り振りたい人のために、
+	// %LOCALAPPDATA%\S-MU2000\plugin.ini に threaded=0 と書けば 1 本で回す
+	bool threaded = true;
+	if (const std::string local = smu2000::config_dir(); !local.empty())
+		if (std::FILE *f = std::fopen(smu2000::join(local, "plugin.ini").c_str(), "rb")) {
+			char line[256];
+			while (std::fgets(line, sizeof(line), f))
+				if (!std::strncmp(line, "threaded=", 9))
+					threaded = line[9] != '0';
+			std::fclose(f);
+		}
+	mu->set_threaded(threaded);
+	if (!threaded)
+		logf("plugin.ini: threaded=0（スレーブを別スレッドにしない）");
 	// gui / live が残した設定で起動する。**読むだけで書かない。**VST3 の中で
 	// 変えたものは DAW のプロジェクトに残るし、何枚も挿されたときに
 	// 同じファイルを取り合わずに済む
@@ -298,8 +308,7 @@ void engine::boot()
 	ui::driver::publish_message(m_bridge, "MU2000 起動中");
 
 	// 起動を待つ。ここを待たずに MIDI を流すと音色指定が全部捨てられる
-	LARGE_INTEGER t0;
-	QueryPerformanceCounter(&t0);
+	const auto t0 = std::chrono::steady_clock::now();
 	const int64_t limit = int64_t(30.0 * NATIVE_RATE);
 	int64_t i = 0;
 	for (; i < limit; i++) {
@@ -320,15 +329,16 @@ void engine::boot()
 		return;
 	}
 
-	LARGE_INTEGER t1, f;
-	QueryPerformanceCounter(&t1);
-	QueryPerformanceFrequency(&f);
-	logf("起動: 音 %.2f 秒ぶん / 実時間 %.2f 秒", double(i) / NATIVE_RATE,
-	     double(t1.QuadPart - t0.QuadPart) / double(f.QuadPart));
+	const double wall = std::chrono::duration<double>(
+	    std::chrono::steady_clock::now() - t0).count();
+	logf("起動: 音 %.2f 秒ぶん / 実時間 %.2f 秒", double(i) / NATIVE_RATE, wall);
 
 	m_mu = mu;
 	m_message = warn.empty() ? std::string("ROM: ") + dir
 	                         : std::string("ROM: ") + dir + "\n警告: " + warn;
+	// A restore that arrived before the machine came up is kept in
+	// m_deferred_state and applied by the first fill() (apply_deferred_state),
+	// which is also where the m_machine lock is already held
 	m_state.store(status::ready, std::memory_order_release);
 	ui::driver::publish_now(*m_mu, m_bridge, true, nullptr);
 }
@@ -353,6 +363,8 @@ void engine::build_table()
 
 void engine::set_output_rate(double rate)
 {
+	// 変換器の入れ物を作り直すので、音声スレッドと重ならないようにする
+	std::lock_guard<std::mutex> lock(m_machine);
 	if (rate <= 0.0)
 		rate = NATIVE_RATE;
 	m_direct = std::fabs(rate - NATIVE_RATE) < 1e-6;
@@ -396,16 +408,25 @@ void engine::midi(const uint8_t *bytes, size_t n, int port)
 {
 	port = port == 1 ? 1 : 0;
 	const status s = state();
-	if (s == status::ready) {
-		for (size_t i = 0; i < n; i++) {
-			m_mu->midi_in(bytes[i], port);
-			m_drv.watch(bytes[i], port);
-		}
-		return;
-	}
 	if (s == status::failed)
 		return;
-	// 起動待ち。あふれるようなら捨てる
+	if (s == status::ready) {
+		std::unique_lock<std::mutex> lock(m_machine, std::try_to_lock);
+		if (lock.owns_lock()) {
+			// 溜まっていた分を先に流して、順番を保つ
+			for (uint8_t b : m_pending[port]) {
+				m_mu->midi_in(b, port);
+				m_drv.watch(b, port);
+			}
+			m_pending[port].clear();
+			for (size_t i = 0; i < n; i++) {
+				m_mu->midi_in(bytes[i], port);
+				m_drv.watch(bytes[i], port);
+			}
+			return;
+		}
+	}
+	// 起動待ちか、機械を他が使っている。あふれるようなら捨てる
 	std::vector<uint8_t> &pending = m_pending[port];
 	if (pending.size() + n > 65536)
 		return;
@@ -459,15 +480,17 @@ void engine::fill(float *left, float *right, int n, const float *in_l, const flo
 {
 	if (n <= 0)
 		return;
-	push_input(in_l, in_r, n);
-	if (state() != status::ready) {
+	// 音声スレッドは待たない。保存などで機械が使われていれば、この区間は無音
+	std::unique_lock<std::mutex> lock(m_machine, std::try_to_lock);
+	if (!lock.owns_lock() || state() != status::ready) {
 		std::memset(left,  0, size_t(n) * sizeof(float));
 		std::memset(right, 0, size_t(n) * sizeof(float));
+		if (lock.owns_lock())
+			push_input(in_l, in_r, n);
 		return;
 	}
-	// 頼まれている保存と復元を、ここ（音声スレッド）で片づける
-	m_fill_tick.fetch_add(1, std::memory_order_release);
-	serve_state();
+	push_input(in_l, in_r, n);
+	apply_deferred_state();
 
 	m_drv.apply_buttons(*m_mu, m_bridge);
 	m_drv.pump_midi(*m_mu, m_bridge);
@@ -536,123 +559,58 @@ void engine::fill(float *left, float *right, int n, const float *in_l, const flo
 
 // ---- 状態の保存と復元
 //
-// 機械に触れてよいのは、音を作っているあいだは音声スレッドだけ。
-// だから頼み事を置いておいて、fill() の頭で片づける。止まっているときは
-// 誰も触っていないので、その場でやってしまう。
+// どれも m_machine を取ってその場でやる。音声スレッドは取れない区間を無音にして待たない
 
-void engine::serve_state()
+void engine::apply_deferred_state()
 {
-	int want = 1;
-	if (m_fn_req.compare_exchange_strong(want, 3, std::memory_order_acq_rel)) {
-		if (m_mu && m_fn)
-			(*m_fn)(*m_mu);
-		m_fn_req.store(2, std::memory_order_release);
-	}
-	if (m_load_req.load(std::memory_order_acquire) == 1) {
-		std::string err;
-		if (m_mu)
-			m_mu->load_state(m_load_buf.data(), m_load_buf.size(), err);
-		m_load_req.store(0, std::memory_order_release);
-	}
-	if (m_save_req.load(std::memory_order_acquire) == 1) {
-		m_save_buf = m_mu ? m_mu->save_state() : std::vector<u8>();
-		m_save_req.store(2, std::memory_order_release);
-	}
+	if (m_deferred_state.empty() || state() != status::ready || !m_mu)
+		return;
+	std::string err;
+	if (!m_mu->load_state(m_deferred_state.data(), m_deferred_state.size(), err))
+		log_line(("状態を読み戻せない: " + err).c_str());
+	m_deferred_state.clear();
+	m_deferred_state.shrink_to_fit();
 }
 
 std::vector<uint8_t> engine::save_state()
 {
-	if (state() != status::ready || !m_mu)
-		return {};
-	if (!m_processing.load(std::memory_order_acquire)) {
-		// 誰も触っていない。その場で
-		return m_mu->save_state();
+	std::lock_guard<std::mutex> lock(m_machine);
+	if (state() != status::ready || !m_mu) {
+		// 起動が終わる前に保存されたら、戻す予定だった状態をそのまま返す
+		return m_deferred_state;
 	}
-	// 「動いている」と言われていても、実際に fill() が回っていないことがある
-	// （止めたばかり、ホストが呼んでいない）。回っていなければその場でやる
-	const uint64_t t0 = m_fill_tick.load(std::memory_order_acquire);
-	m_save_req.store(1, std::memory_order_release);
-	for (int i = 0; i < 200; i++) {          // 2 秒まで待つ
-		if (m_save_req.load(std::memory_order_acquire) == 2)
-			break;
-		Sleep(10);
-	}
-	if (m_save_req.load(std::memory_order_acquire) != 2) {
-		m_save_req.store(0, std::memory_order_release);
-		if (m_fill_tick.load(std::memory_order_acquire) == t0)
-			return m_mu->save_state();   // 誰も回していない
-		log_line("状態を保存できなかった（音声スレッドが応じない）");
-		return {};
-	}
-	std::vector<uint8_t> out;
-	out.swap(m_save_buf);
-    m_save_req.store(0, std::memory_order_release);
-	return out;
+	apply_deferred_state();
+	return m_mu->save_state();
 }
 
 bool engine::load_state(const uint8_t *p, size_t n)
 {
-	if (state() != status::ready || !m_mu || !p || !n)
+	if (!p || !n)
 		return false;
-	if (!m_processing.load(std::memory_order_acquire)) {
-		std::string err;
-		const bool ok = m_mu->load_state(p, n, err);
-		if (!ok)
-			log_line(("状態を読み戻せない: " + err).c_str());
-		return ok;
+	std::lock_guard<std::mutex> lock(m_machine);
+	if (state() == status::failed)
+		return false;
+	if (state() != status::ready || !m_mu) {
+		m_deferred_state.assign(p, p + n);
+		return true;
 	}
-	const uint64_t t0 = m_fill_tick.load(std::memory_order_acquire);
-	m_load_buf.assign(p, p + n);
-	m_load_req.store(1, std::memory_order_release);
-	for (int i = 0; i < 200; i++) {
-		if (m_load_req.load(std::memory_order_acquire) == 0)
-			return true;
-		Sleep(10);
-	}
-	m_load_req.store(0, std::memory_order_release);
-	if (m_fill_tick.load(std::memory_order_acquire) == t0) {
-		std::string err;
-		return m_mu->load_state(p, n, err);   // 誰も回していない
-	}
-	log_line("状態を読み戻せなかった（音声スレッドが応じない）");
-	return false;
+	m_deferred_state.clear();
+	std::string err;
+	const bool ok = m_mu->load_state(p, n, err);
+	if (!ok)
+		log_line(("状態を読み戻せない: " + err).c_str());
+	return ok;
 }
 
 
-// ---- 機械に触る仕事を頼む（SmartMedia の差し替えなど）
+// ---- 機械に触る仕事（SmartMedia の差し替えなど）
 
 bool engine::on_machine(const std::function<void(mu2000 &)> &fn)
 {
+	std::lock_guard<std::mutex> lock(m_machine);
 	if (state() != status::ready || !m_mu)
 		return false;
-	if (!m_processing.load(std::memory_order_acquire)) {
-		fn(*m_mu);
-		return true;
-	}
-	const uint64_t t0 = m_fill_tick.load(std::memory_order_acquire);
-	m_fn = &fn;
-	m_fn_req.store(1, std::memory_order_release);
-	for (int i = 0; i < 200; i++) {
-		if (m_fn_req.load(std::memory_order_acquire) == 2)
-			break;
-		Sleep(10);
-	}
-	int want = 1;
-	if (m_fn_req.compare_exchange_strong(want, 0, std::memory_order_acq_rel)) {
-		// 音声スレッドは手を付けていない。回っていなければその場でやる
-		m_fn = nullptr;
-		if (m_fill_tick.load(std::memory_order_acquire) == t0) {
-			fn(*m_mu);
-			return true;
-		}
-		log_line("カードの差し替えができなかった（音声スレッドが応じない）");
-		return false;
-	}
-	// 始めていれば終わるまで待つ（fn はこの関数の中にある）
-	while (m_fn_req.load(std::memory_order_acquire) != 2)
-		Sleep(1);
-	m_fn_req.store(0, std::memory_order_release);
-	m_fn = nullptr;
+	fn(*m_mu);
 	return true;
 }
 

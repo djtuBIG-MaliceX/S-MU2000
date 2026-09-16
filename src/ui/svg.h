@@ -21,7 +21,7 @@
 #include <string>
 #include <vector>
 
-#include <windows.h>
+#include "compat/gdi.h"
 
 namespace ui {
 

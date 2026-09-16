@@ -3,8 +3,14 @@
 #include "player.h"
 
 #include <algorithm>
+#include <chrono>
 
+// timeBeginPeriod() only exists on Windows, as the way to ask the scheduler for
+// a 1 ms timer resolution. macOS already sleeps finely enough, so the call is
+// simply not made there
+#if defined(_WIN32)
 #include <windows.h>
+#endif
 
 namespace ui {
 
@@ -66,17 +72,18 @@ void player::run(bridge &br)
 {
 	// 1 ミリ秒で起きられるようにしておく。既定の 15.6 ミリ秒だと
 	// 音符の頭がばらつく
+#if defined(_WIN32)
 	timeBeginPeriod(1);
+#endif
 
-	LARGE_INTEGER f, t0;
-	QueryPerformanceFrequency(&f);
-	QueryPerformanceCounter(&t0);
+	// std::chrono::steady_clock is QueryPerformanceCounter underneath on
+	// Windows, so this reads the same clock the Windows code used to
+	const auto t0 = std::chrono::steady_clock::now();
 
 	size_t at = 0;
 	while (!m_quit.load(std::memory_order_acquire) && at < m_events.size()) {
-		LARGE_INTEGER now;
-		QueryPerformanceCounter(&now);
-		const double sec = double(now.QuadPart - t0.QuadPart) / double(f.QuadPart);
+		const double sec = std::chrono::duration<double>(
+		    std::chrono::steady_clock::now() - t0).count();
 		m_pos.store(sec, std::memory_order_relaxed);
 
 		// 来ている分をまとめて送る。トラックの出し先（SMF のポート指定）が 0 なら口 A、1 なら口 B。
@@ -94,11 +101,13 @@ void player::run(bridge &br)
 
 		// 次まで待つ。長く待ちすぎないように刻む
 		const double wait = m_events[at].time - sec;
-		Sleep(wait > 0.010 ? 5 : 1);
+		std::this_thread::sleep_for(std::chrono::milliseconds(wait > 0.010 ? 5 : 1));
 	}
 
 	all_off(br);
+#if defined(_WIN32)
 	timeEndPeriod(1);
+#endif
 	m_playing.store(false, std::memory_order_release);
 }
 

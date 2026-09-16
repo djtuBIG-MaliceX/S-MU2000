@@ -115,7 +115,7 @@ private:
 		s32 m_pos_dec = 0;
 		s16 m_dpcm_s0 = 0, m_dpcm_s1 = 0, m_dpcm_s2 = 0, m_dpcm_s3 = 0;
 		u32 m_dpcm_pos = 0;
-		s32 m_dpcm_delta = 0;
+		s32 m_dpcm_delta = 0;             // S-MU2000: 上 24bit が差分、下 8bit が持ち越す余り（-r）
 
 		bool m_first = false, m_finetune_active = false, m_done = false;
 		s16 m_last = 0;
@@ -329,6 +329,7 @@ private:
 			u8  memop, mem_use_index, mem_table;
 			u8  lfo, offset_index;
 			u32 addr_mask, addr_base;   // resolve_address() を解いたもの
+			u8  region;                 // どの区画（地図の何番）か。区画ごとの有効・無効を見るのに使う
 			u8  latch;                // bit 0x20: 結果の符号とゼロを覚える
 			u8  jump;                 // bit 0x3f: 条件つきで先へ飛ぶ（ALU もレジスタも使わない）
 			u8  cond;                 // bit 0x18-0x1f
@@ -389,6 +390,9 @@ private:
 		void lfo_step();
 		u32 get_lfo(int lfo);
 		u32 resolve_address(u16 pc, s32 offset);
+		// S-MU2000: その番地がどの区画（地図の何番）に当たるか。区画ごとの
+		// 有効・無効（m_revram_enable、1 が無効）を見るのに使う
+		int region_of(u16 pc) const;
 
 		static u16 revram_encode(u32 v);
 		static u32 revram_decode(u16 v);

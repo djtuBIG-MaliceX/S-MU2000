@@ -81,12 +81,15 @@ MIDI 経由の予備の経路もあり、両方で吸ったものが 1 バイト
 ```
 make
 
-build/live.exe   <rom ディレクトリ> [--midi 番号]     MIDI 入力を受けて鳴らす
+build/live.exe   <rom ディレクトリ> [--midi 番号] [--fast-midi]  MIDI 入力を受けて鳴らす
 build/live.exe   --list                              MIDI 入力の一覧
 build/render.exe <rom ディレクトリ> <MIDI> <出力 wav>  ファイルを WAV に
+                 [--reset gm|gs|xg]                 リセットを明示して先頭に入れる
+                 [--fast-midi]                      firmware が読める速さで MIDI を渡す
 build/midisend.exe <MIDI ファイル> [--port 番号]      MIDI 出力へ実時間で流す
 build/boot.exe   <rom ディレクトリ> [サイクル数]       起動の確認
-build/gui.exe    <rom ディレクトリ> [--midi 番号]      実機パネル風の画面で鳴らす
+build/gui.exe    <rom ディレクトリ> [--midi 番号] [--fast-midi]  実機パネル風の画面で鳴らす
+build/gui.exe    <rom ディレクトリ> --lcd              LCD だけの画面で鳴らす
 build/gui.exe    --list                              MIDI の入口と出口の一覧
 build/rec.exe    --list                              音声入力の一覧
 build/rec.exe    <番号> <wav> <秒> [--send <番号> <MIDI>]  実機の音を録る
@@ -129,6 +132,17 @@ DAW に挿すなら VST3。作り方と ROM の置き場は [doc/vst3.md](doc/vs
 make vst3           build/S-MU2000.vst3/ にバンドルができる
 make install-vst3   VST3 の置き場へ複製する
 make probe          DAW 無しで読み込みと発音を確かめる
+```
+
+CLAP にも対応した（Windows で確かめた。macOS 用の `make clap` も書いてあるが、まだ macOS のホストで試していない）。中身は VST3 版と同じで、MIDI はバイト列のまま
+受け取る。ノートの入力は MIDI IN A（パート 1-16）と B（パート 17-32）の 2 本。
+置き場は `C:\Program Files\Common Files\CLAP`（全員）か
+`%LOCALAPPDATA%\Programs\Common\CLAP`（利用者ごと）。ROM の置き場は
+`S-MU2000.clap` のすぐ横の `roms.txt` か、`%LOCALAPPDATA%\S-MU2000\roms.txt` に 1 行書く。
+
+```
+make clap           build/S-MU2000.clap ができる
+make install-clap   CLAP の置き場へ複製する
 ```
 
 `live` は音声デバイスが要求した分だけ音源を進める。自分で時計を持たないので、
@@ -250,6 +264,9 @@ VST3 のインターフェース定義（`third_party/vst3/pluginterfaces`）は
 ものだが **MIT** で配られている。GPLv3 の `public.sdk` は使っていないので、
 プラグインの土台は全部このリポジトリの中にある。
 くわしくは [third_party/vst3/README.md](third_party/vst3/README.md)。
+
+CLAP のヘッダ（`third_party/clap`、Alexandre BIQUE、**MIT**）も手を加えずに取り込んだ。
+くわしくは [third_party/clap/README.md](third_party/clap/README.md)。
 
 gui.exe の PC エディタの窓は Dear ImGui（`third_party/imgui`、Omar Cornut、**MIT**）で
 描いている。手を加えずに取り込んだ。

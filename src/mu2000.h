@@ -95,11 +95,11 @@ public:
 	// 受信が有効になったか。firmware が起動を終えた印。
 	// これを待たずに流すと、曲頭のリセットや音色指定が全部捨てられる
 	bool midi_ready(int port = 0) const { return m_cpu->sci(port)->rx_enabled(); }
+	void set_fast_midi(bool fast) { m_fast_midi = fast; }
 
-	// 1 バイト送る。実機と同じく 31250bps の直列で流れる。
-	// 線は 1 秒に 3125 バイトしか流れないので、それより速く積まれると溜まる一方になる。
-	// 仮想の口で MIDI の輪ができると際限なく積まれる（実際に起きた）ので、
-	// 溜まっている量が上限（線の 20 秒ぶん）を超えたら捨てる。実機の受信溢れと同じ
+	// 1 バイト送る。既定では実機と同じ 31250bps の直列で流れる。
+	// fast MIDI では firmware が前のバイトを読むと、待たずに次を渡す。
+	// 仮想の口で MIDI の輪ができると際限なく積まれるので、上限を超えたら捨てる。
 	static constexpr size_t MIDI_QUEUE_LIMIT = 65536;
 	void midi_in(u8 byte, int port = 0)
 	{
@@ -110,15 +110,30 @@ public:
 	}
 	// 溢れて捨てたバイト数（どの糸から読んでもよい）
 	u64 midi_dropped() const { return m_midi_dropped.load(std::memory_order_relaxed); }
+	size_t midi_pending() const
+	{
+		size_t pending = 0;
+		for (const midi_line &m : m_midi)
+			pending += m.queue.size() + (!m_fast_midi && m.bit >= 0 ? 1 : 0);
+		if (m_fast_midi)
+			for (int port = 0; port < MIDI_PORTS; port++)
+				pending += m_cpu->sci(port)->rx_byte_pending() ? 1 : 0;
+		return pending;
+	}
 	bool midi_idle(int port) const
 	{
-		return m_midi[port].bit < 0 && m_midi[port].queue.empty();
+		return m_midi[port].queue.empty() &&
+			(m_fast_midi ? !m_cpu->sci(port)->rx_byte_pending() : m_midi[port].bit < 0);
 	}
 	bool midi_idle() const
 	{
 		for (const midi_line &m : m_midi)
-			if (m.bit >= 0 || !m.queue.empty())
+			if (!m.queue.empty() || (!m_fast_midi && m.bit >= 0))
 				return false;
+		if (m_fast_midi)
+			for (int port = 0; port < MIDI_PORTS; port++)
+				if (m_cpu->sci(port)->rx_byte_pending())
+					return false;
 		return true;
 	}
 
@@ -269,6 +284,8 @@ private:
 	u64 m_cycle_debt = 0;
 	// 命令の途中で止まれず走りすぎた分。次の呼び出しから引く
 	u64 m_overrun = 0;
+	// SWP30 のレジスタに書いたので、このサンプルの残りは CPU を止める（run_cycles の説明）
+	bool m_swp_hold = false;
 	bool m_profile = false;
 
 	// スレーブ用のスレッド。合図は atomic の回し合いで、錠は使わない。
@@ -309,6 +326,7 @@ private:
 	void midi_step(u64 now);
 	std::array<midi_line, MIDI_PORTS> m_midi;
 	std::atomic<u64> m_midi_dropped{0};
+	bool m_fast_midi = false;
 
 	// MIDI OUT の線から枠を組み立てる。SCI は 1 ビットにつき 1 回だけ線の値を
 	// 知らせてくるので、時刻を見なくても「0 で開始、8 ビット、1 で終わり」で読める

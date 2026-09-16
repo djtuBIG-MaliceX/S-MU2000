@@ -20,7 +20,8 @@
 #include <string>
 #include <vector>
 
-#include <windows.h>
+// COLORREF, UINT and the DT_* alignment bits, on both platforms
+#include "compat/gdi.h"
 
 namespace ui {
 

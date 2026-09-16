@@ -33,12 +33,21 @@
 #include "pluginterfaces/vst/ivstparameterchanges.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <thread>
 #include <vector>
 
-#include <windows.h>
+#if defined(_WIN32)
+#include "compat/platform.h"      // windows.h (lean) for QueryPerformanceCounter
+#endif
+
+#if defined(__APPLE__)
+#include <CoreFoundation/CoreFoundation.h>      // CFBundleRef, the host's handle
+#include <mach/mach_time.h>                     // mach_absolute_time
+#endif
 
 using namespace Steinberg;
 using namespace Steinberg::Vst;
@@ -52,6 +61,43 @@ static const FUID kProcessorUID(0x5D2E4B70, 0xA1C34F92, 0x8B0E7A61, 0x4D553000);
 constexpr const char *kPlugName   = "S-MU2000";
 constexpr const char *kVendor     = "tarboh";
 constexpr const char *kVersion    = "0.1.0.0";
+
+// ---- A clock for measuring the load
+//
+// In the shape QueryPerformanceCounter has: a constant frequency and a tick
+// count, so "busy seconds" and "did this block miss its deadline" are the same
+// arithmetic on both platforms. Only ever used to report load -- nothing here
+// reaches the audio path, so the exact rate does not matter.
+//
+//   Windows … QueryPerformanceCounter
+//   macOS   … mach_absolute_time, scaled to nanoseconds by mach_timebase_info
+int64 perf_frequency()
+{
+#if defined(_WIN32)
+	LARGE_INTEGER f;
+	QueryPerformanceFrequency(&f);
+	return f.QuadPart;
+#else
+	return 1000000000;      // perf_ticks() below hands back nanoseconds
+#endif
+}
+
+uint64 perf_ticks()
+{
+#if defined(_WIN32)
+	LARGE_INTEGER t;
+	QueryPerformanceCounter(&t);
+	return uint64(t.QuadPart);
+#else
+	// The timebase is constant on a given machine, so resolve it once
+	static const double scale = [] {
+		mach_timebase_info_data_t tb{};
+		mach_timebase_info(&tb);
+		return double(tb.numer) / double(tb.denom);
+	}();
+	return uint64(double(mach_absolute_time()) * scale);
+#endif
+}
 
 // MIDI のコントロール番号は 0-127 のほか、
 //   128 チャンネルプレッシャ / 129 ピッチベンド / 130 プログラムチェンジ
@@ -140,9 +186,7 @@ public:
 		m_gain_now = 1.0f;
 		m_msgs.reserve(8192);
 		m_engine.set_output_rate(smu2000::vst3::NATIVE_RATE);
-		LARGE_INTEGER f;
-		QueryPerformanceFrequency(&f);
-		m_qpc_freq = f.QuadPart;
+		m_qpc_freq = perf_frequency();
 	}
 
 	virtual ~mu_plugin() = default;
@@ -313,7 +357,7 @@ public:
 
 		// 起動が終わっていないと戻せない。終わるまで待つ
 		for (int i = 0; i < 300 && m_engine.state() == smu2000::vst3::status::loading; i++)
-			Sleep(10);
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
 		m_engine.load_state(blob.data(), blob.size());
 
 		// 版 3 から: 差していた SmartMedia のファイル（UTF-8）。無くなっていたら差さない
@@ -625,8 +669,7 @@ tresult PLUGIN_API mu_plugin::process(ProcessData &data)
 	const float *in_l = (in && in->numChannels > 0 && in->channelBuffers32) ? in->channelBuffers32[0] : nullptr;
 	const float *in_r = (in && in->numChannels > 1 && in->channelBuffers32) ? in->channelBuffers32[1] : in_l;
 
-	LARGE_INTEGER t0;
-	QueryPerformanceCounter(&t0);
+	const uint64 t0 = perf_ticks();
 
 	if (m_hush.exchange(false))
 		m_engine.all_notes_off();
@@ -709,12 +752,37 @@ tresult PLUGIN_API mu_plugin::process(ProcessData &data)
 				      uint8(e.polyPressure.pitch & 127), uint8(v));
 				break;
 			}
-			case Event::kDataEvent:
-				if (e.data.type == DataEvent::kMidiSysEx && e.data.bytes && e.data.size &&
-				    m_msgs.size() < m_msgs.capacity())
+			case Event::kDataEvent: {
+				if (e.data.type != DataEvent::kMidiSysEx || !e.data.bytes || !e.data.size)
+					break;
+				// ホストによっては、チャンネルメッセージまでここに入れてくる
+				// （VSTHost 1.58 はプログラムチェンジを C0 xx 00 と 3 byte にして渡す）。
+				// そのまま音源へ流すと、余分な 00 が走行状態のデータバイトになり、
+				// 続けてプログラム 0 が入って音色が戻ってしまう。頭がチャンネルの
+				// ステータスならシステムエクスクルーシブではないので、
+				// 決まった長さだけ取り出して流し、後ろの詰め物は捨てる
+				const uint8 first = e.data.bytes[0];
+				if (first >= 0x80 && first < 0xf0) {
+					for (uint32 at = 0; at < e.data.size;) {
+						const uint8 st = e.data.bytes[at];
+						if (st < 0x80 || st >= 0xf0)
+							break;      // 詰め物。ここから先は読まない
+						const uint32 len = uint32(smu2000::vst3::midi_length(st));
+						if (at + len > e.data.size)
+							break;
+						queue(port, off, st,
+						      len > 1 ? e.data.bytes[at + 1] : uint8(0),
+						      len > 2 ? e.data.bytes[at + 2] : uint8(0), int(len));
+						at += len;
+					}
+					break;
+				}
+				// 本物のシステムエクスクルーシブ（と、その途中の切れ端）はバイト列のまま
+				if (m_msgs.size() < m_msgs.capacity())
 					m_msgs.push_back({ off, int32(m_msgs.size()), uint8(port), 0, { 0, 0, 0 },
 					                   e.data.bytes, e.data.size });
 				break;
+			}
 			default:
 				break;
 			}
@@ -762,9 +830,7 @@ tresult PLUGIN_API mu_plugin::process(ProcessData &data)
 	}
 
 	// 間に合っているかの目安。setActive(false) のときに記録へ書く
-	LARGE_INTEGER t1;
-	QueryPerformanceCounter(&t1);
-	const uint64 took = uint64(t1.QuadPart - t0.QuadPart);
+	const uint64 took = perf_ticks() - t0;
 	m_busy_ticks += took;
 	m_produced   += uint64(n);
 	if (took > m_worst_ticks) m_worst_ticks = took;
@@ -894,16 +960,38 @@ factory g_factory;
 
 
 // ---- DLL の出口
+//
+// The entry points differ by platform: a Windows DLL is opened with
+// LoadLibrary and announces InitDll/ExitDll, while macOS loads the bundle with
+// CFBundle and looks for bundleEntry/bundleExit. Both still have to hand back
+// the same factory.
 
 extern "C" {
 
-__declspec(dllexport) IPluginFactory *PLUGIN_API GetPluginFactory()
+SMTG_EXPORT_SYMBOL IPluginFactory *PLUGIN_API GetPluginFactory()
 {
 	g_factory.addRef();
 	return &g_factory;
 }
 
+#if defined(_WIN32)
+
 __declspec(dllexport) bool InitDll() { return true; }
 __declspec(dllexport) bool ExitDll() { return true; }
+
+#elif defined(__APPLE__)
+
+SMTG_EXPORT_SYMBOL bool bundleEntry(CFBundleRef bundle);
+SMTG_EXPORT_SYMBOL bool bundleExit(void);
+
+SMTG_EXPORT_SYMBOL bool bundleEntry(CFBundleRef bundle)
+{
+	(void)bundle;
+	return true;
+}
+
+SMTG_EXPORT_SYMBOL bool bundleExit(void) { return true; }
+
+#endif
 
 }

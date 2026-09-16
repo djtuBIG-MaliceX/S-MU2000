@@ -24,11 +24,11 @@
 
 #include "mu2000.h"
 
+#include "compat/paths.h"
+
 #include <cstdio>
 #include <string>
 #include <vector>
-
-#include <windows.h>
 
 namespace smu2000 {
 namespace nvram {
@@ -46,19 +46,22 @@ inline u64 rom_key(const mu2000 &mu)
 }
 
 // 置き場。作れなければ空
+//
+// The directory comes from compat/paths.h, which answers with the setting this
+// project has always used on Windows (%LOCALAPPDATA%\S-MU2000) and the
+// equivalent place on macOS. "nvram" goes under it, so the Windows layout is
+// exactly what it was: <settings>\S-MU2000\nvram\<hash>.bin
 inline std::string path(const mu2000 &mu)
 {
-	char base[MAX_PATH * 2];
-	const DWORD n = GetEnvironmentVariableA("LOCALAPPDATA", base, sizeof(base));
-	if (!n || n >= sizeof(base))
+	const std::string base = smu2000::ensure_config_dir();
+	if (base.empty())
 		return {};
-	std::string dir = std::string(base, n) + "\\S-MU2000";
-	CreateDirectoryA(dir.c_str(), nullptr);
-	dir += "\\nvram";
-	CreateDirectoryA(dir.c_str(), nullptr);
+	const std::string dir = smu2000::join(base, "nvram");
+	if (!smu2000::ensure_dir(dir))
+		return {};
 	char name[32];
-	std::snprintf(name, sizeof(name), "\\%016llx.bin", (unsigned long long)rom_key(mu));
-	return dir + name;
+	std::snprintf(name, sizeof(name), "%016llx.bin", (unsigned long long)rom_key(mu));
+	return smu2000::join(dir, name);
 }
 
 // reset() の前に呼ぶ。無い・大きさが違うときは何もせず false（工場出荷状態で起動する）
@@ -90,10 +93,10 @@ inline bool save(const mu2000 &mu)
 	const std::vector<u8> &ram = mu.nvram();
 	const bool ok = std::fwrite(ram.data(), 1, ram.size(), f) == ram.size();
 	if (std::fclose(f) != 0 || !ok) {
-		DeleteFileA(tmp.c_str());
+		std::remove(tmp.c_str());
 		return false;
 	}
-	return MoveFileExA(tmp.c_str(), p.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+	return smu2000::replace_file(tmp, p);
 }
 
 } // namespace nvram

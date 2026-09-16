@@ -8,6 +8,7 @@
 // **同じ区間を何回も測って中央値を出す。** 1 回だけだと、ほかのアプリや
 // 周波数の上げ下げで数 % 揺れて、小さな改善が測れない。起動の直後の状態を
 // 保存しておき、毎回そこへ戻してから流すので、どの回も中身は同じ仕事になる。
+#include "compat/platform.h"
 #include "mu2000.h"
 #include "smf.h"
 
@@ -16,8 +17,6 @@
 #include <cstdlib>
 #include <string>
 #include <vector>
-
-#include <windows.h>
 
 namespace {
 
@@ -66,8 +65,11 @@ int main(int argc, char **argv)
 	const std::vector<u8> booted = mu.save_state();
 	mu.set_profile(true);
 
-	LARGE_INTEGER f; QueryPerformanceFrequency(&f);
-	const double tick = 1000.0 / double(f.QuadPart);   // ms
+	// perf_ticks() / perf_freq() are QueryPerformanceCounter and its frequency
+	// on Windows, and a monotonic nanosecond clock on macOS, so the measurement
+	// means the same thing on both
+	const u64 freq = smu2000::perf_freq();
+	const double tick = 1000.0 / double(freq);   // ms
 	const double span = 1000.0 * block / RATE;
 	const u64 total = u64(seconds * RATE);
 	// 曲は繰り返す
@@ -79,12 +81,11 @@ int main(int argc, char **argv)
 	// 周波数か温度の都合で、鳴らし続けたときの速さは落ち着いた後のほう。
 	// だから一定の時間、測らずに回してから測る
 	const double WARM_SECONDS = 20.0;
-	LARGE_INTEGER w0; QueryPerformanceCounter(&w0);
+	const u64 w0 = smu2000::perf_ticks();
 	std::vector<run_result> runs;
 	int warm = 0;
 	for (int rep = 0; rep < repeats; rep++) {
-		LARGE_INTEGER wn; QueryPerformanceCounter(&wn);
-		const bool warming = double(wn.QuadPart - w0.QuadPart) * tick < WARM_SECONDS * 1000.0;
+		const bool warming = double(smu2000::perf_ticks() - w0) * tick < WARM_SECONDS * 1000.0;
 		if (!mu.load_state(booted.data(), booted.size(), err)) { std::fprintf(stderr, "%s\n", err.c_str()); return 1; }
 		mu.clear_profile();
 
@@ -94,8 +95,7 @@ int main(int argc, char **argv)
 		double base = 0.0;
 		while (done < total) {
 			const int n = int(std::min<u64>(u64(block), total - done));
-			LARGE_INTEGER t0, t1;
-			QueryPerformanceCounter(&t0);
+			const u64 t0 = smu2000::perf_ticks();
 			for (int i = 0; i < n; i++) {
 				const double t = double(done + i) / RATE - base;
 				while (next < events.size() && events[next].time <= t) {
@@ -107,8 +107,8 @@ int main(int argc, char **argv)
 				s32 l = 0, r = 0;
 				mu.run_sample(l, r);
 			}
-			QueryPerformanceCounter(&t1);
-			ms.push_back(double(t1.QuadPart - t0.QuadPart) * tick);
+			const u64 t1 = smu2000::perf_ticks();
+			ms.push_back(double(t1 - t0) * tick);
 			done += n;
 		}
 
@@ -125,8 +125,8 @@ int main(int argc, char **argv)
 		r.blocks = ms.size();
 		if (mu.m_t_n) {
 			const double n = double(mu.m_t_n);
-			r.cpu_ns  = 1e9 * mu.m_t_cpu  / f.QuadPart / n;
-			r.swpm_ns = 1e9 * mu.m_t_swpm / f.QuadPart / n;
+			r.cpu_ns  = 1e9 * mu.m_t_cpu  / double(freq) / n;
+			r.swpm_ns = 1e9 * mu.m_t_swpm / double(freq) / n;
 			r.megm_ns = double(mu.swpm().m_t_meg) / n;
 			r.megs_ns = double(mu.swps().m_t_meg) / n;
 			r.loops   = double(mu.m_loops) / n;

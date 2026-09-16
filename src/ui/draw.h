@@ -1,13 +1,17 @@
 // license:BSD-3-Clause
 //
 // 描くための小物。パネルとエディタで共用する。GDI しか使わない。
+//
+// What it includes is compat/gdi.h: real GDI on Windows, and on macOS a thin
+// shim with the same surface, so callers cannot tell the two apart.
+// See doc/porting-macos.md.
 
 #ifndef S_MU2000_UI_DRAW_H
 #define S_MU2000_UI_DRAW_H
 
 #pragma once
 
-#include <windows.h>
+#include "compat/gdi.h"
 
 namespace ui {
 

@@ -7,6 +7,9 @@
 // SysEx（マスターボリュームや XG のパラメータチェンジ）を受けるには、
 // **入れ物をあらかじめ Windows へ渡しておく**必要がある。渡していないと
 // MIM_LONGDATA は一度も来ず、SysEx だけが黙って消える。
+//
+// macOS uses CoreMIDI, which hands whole packets over already, so it needs none
+// of that buffer pre-posting.
 
 #ifndef S_MU2000_UI_MIDI_IN_H
 #define S_MU2000_UI_MIDI_IN_H
@@ -21,6 +24,55 @@
 
 namespace ui {
 
+#if defined(__APPLE__)
+
+// macOS: CoreMIDI hands over whole packets, SysEx included, so there are no
+// receive buffers to pre-post the way WinMM needs. The shape is otherwise the
+// same as the Windows class, and so is the lock-free ring the audio thread
+// drains.
+class midi_in
+{
+public:
+	~midi_in() { close(); }
+
+	static std::vector<std::string> list();
+
+	// A negative number means do not open (run without MIDI)
+	bool open(int device, std::string &err);
+	void close();
+
+	bool  is_open() const { return m_ctx != nullptr; }
+	std::string device_name() const { return m_name; }
+	u64   bytes() const { return m_bytes.load(); }
+
+	// From the audio thread: pull the queued bytes out one at a time
+	bool pop(u8 &v);
+
+	void push(u8 v);   // from the callback
+
+	// Kept so both platforms expose the same surface. CoreMIDI needs neither:
+	// it never asks us for buffers, and "closing" is only there to stop WinMM's
+	// reset from re-posting buffers during teardown
+	static constexpr int    SYSEX_BUFFERS = 4;
+	static constexpr size_t SYSEX_SIZE    = 8192;
+
+	bool closing() const { return m_closing.load(std::memory_order_acquire); }
+	void requeue(void *) {}
+
+private:
+	// A SysEx message can queue thousands of bytes at once, so take a big ring
+	static constexpr size_t SIZE = 65536, MASK = SIZE - 1;
+	u8 m_buf[SIZE] = {};
+	std::atomic<size_t> m_read{0}, m_write{0};
+	std::atomic<u64>    m_bytes{0};
+	std::atomic<bool>   m_closing{false};
+
+	struct ctx;            // CoreMIDI client / port / source, defined in the .cpp
+	ctx        *m_ctx = nullptr;
+	std::string m_name;
+};
+
+#else
 class midi_in
 {
 public:
@@ -74,6 +126,8 @@ private:
 	u8   *m_sysex[SYSEX_BUFFERS] = {};
 	std::atomic<bool> m_closing{false};
 };
+
+#endif // __APPLE__
 
 } // namespace ui
 
