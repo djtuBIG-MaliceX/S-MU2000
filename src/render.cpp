@@ -12,11 +12,10 @@
 // 出来た WAV は MAME の録音と突き合わせるためのもの。
 
 #include "mu2000.h"
+#include "bootcache.h"
 #include "smf.h"
 
 #include <algorithm>
-#include <cmath>
-#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -162,6 +161,9 @@ int main(int argc, char **argv)
 	bool duration_given = false;
 	bool trace_midi = false;
 	bool fast_midi = false;
+	bool usb_host  = false;
+	bool use_bootcache = false;   // --bootcache。起動後の写しから始める（確かめ用）
+	const char *state_at = nullptr; size_t state_sample = 0;   // --state-at（確かめ用）
 	const char *forced_reset = nullptr;
 	const char *swptrace = nullptr;
 	bool single = false;   // スレーブを別スレッドにしない
@@ -202,6 +204,14 @@ int main(int argc, char **argv)
 			trace_midi = true;
 		else if (!std::strcmp(argv[i], "--fast-midi"))
 			fast_midi = true;
+		else if (!std::strcmp(argv[i], "--usb"))
+			usb_host = true;
+		else if (!std::strcmp(argv[i], "--bootcache"))
+			use_bootcache = true;
+		else if (!std::strcmp(argv[i], "--state-at") && i + 2 < argc) {
+			state_sample = size_t(std::strtoull(argv[++i], nullptr, 0));
+			state_at = argv[++i];
+		}
 		else if (!std::strcmp(argv[i], "--reset")) {
 			if (i + 1 >= argc) {
 				std::fprintf(stderr, "--reset requires gm, gs, or xg\n");
@@ -272,21 +282,26 @@ int main(int argc, char **argv)
 
 	mu.set_threaded(!single);
 	mu.set_fast_midi(fast_midi);
+	mu.set_usb_host(usb_host);
+	// 鍵は起動に使うワーク RAM も混ぜるので reset() の前に作る
+	const u64 boot_key = use_bootcache ? smu2000::bootcache::key(mu) : 0;
 	mu.reset();
 
 	const u32 rate = 44100;
 	std::vector<s16> pcm;
 
-	// MIDI の 0 秒（＝t の基準）が立つサンプル番号。t はここからの整数オフセットを
-	// 後で一度だけ rate で割って作る。double(i) / rate - boot は桁落ちで数 e-16 秒
-	// 失われ、ちょうどサンプル境界に着るイベント（0.05 秒のリセット等）が
-	// 比較 1 回分＝1 サンプル遅れる
-	size_t boot_sample = size_t(-1);
-
 	// 起動を待つ。実機も電源投入から数秒は MIDI を受け付けない。
 	// 待たずに流すと曲頭のリセットや音色指定が捨てられ、全パートが
 	// 初期音色（ピアノ）で鳴り、発音数も足りなくなって音が抜ける。
 	// firmware が受信を有効にした時点を印にする
+	// 起動後の写しから始める（--bootcache）。**確かめ用**で既定では使わない。
+	// 試験は毎回まっさらから始めたいので、ここを既定にはしない
+	if (use_bootcache && boot < 0.0) {
+		if (smu2000::bootcache::load(mu, boot_key)) {
+			std::printf("起動: 前の写しから\n");
+			boot = 0.0;
+		}
+	}
 	if (boot < 0.0) {
 		const size_t limit = size_t(30.0 * rate);
 		size_t i = 0;
@@ -297,17 +312,16 @@ int main(int argc, char **argv)
 			pcm.push_back(s16(std::clamp(r * 32768 / mu2000::DAC_FULL_SCALE, -32768, 32767)));
 		}
 		boot = double(i) / rate;
-		boot_sample = i;
+		if (use_bootcache && i < limit)
+			smu2000::bootcache::save(mu, boot_key);
 		if (i >= limit) {
 			std::fprintf(stderr, "起動を待ったが MIDI 受信が有効にならなかった\n");
 			return 1;
 		}
 		std::printf("起動に %.2f 秒。ここから MIDI を流す\n", boot);
-	} else {
-		// --boot で秒を直接指定された時、最も近いサンプルに寄せる
-		boot_sample = size_t(std::llround(boot * rate));
 	}
 
+	const size_t boot_samples = size_t(boot * rate + 0.5);
 	const double estimated_seconds = duration_given ? seconds :
 		(events.empty() ? 3.0 : events.back().time + 3.0);
 	pcm.reserve(size_t((boot + estimated_seconds) * rate) * 2);
@@ -320,7 +334,7 @@ int main(int argc, char **argv)
 	size_t next = 0;
 	size_t scheduled_events = 0, scheduled_bytes = 0;
 	size_t tail_start = size_t(-1);
-	const size_t hard_stop = duration_given ? boot_sample + size_t(seconds * rate) : size_t(-1);
+	const size_t hard_stop = duration_given ? size_t((boot + seconds) * rate) : size_t(-1);
 	for (size_t i = pcm.size() / 2; ; i++) {
 		if (duration_given && i >= hard_stop)
 			break;
@@ -328,21 +342,31 @@ int main(int argc, char **argv)
 			if (tail_start == size_t(-1)) {
 				tail_start = i;
 				std::printf("MIDI queue drained at %.3f s; rendering 3.0 s tail\n",
-				            double(std::ptrdiff_t(i) - std::ptrdiff_t(boot_sample)) / rate);
+				            double(i) / rate - boot);
 			}
 			if (i >= tail_start + size_t(3.0 * rate))
 				break;
 		}
-		// 整数で引いてから一度だけ割る：整数の差は厳密なので t は (i-boot_sample)/rate の
-		// 最も近い double。i/rate と boot を別に丸めて引くと境界で 1 回分ずれる
-		const double t = double(std::ptrdiff_t(i) - std::ptrdiff_t(boot_sample)) / rate;
+		if (state_at && i == size_t(boot * rate) + state_sample) {
+			const std::vector<u8> st = mu.save_state();
+			if (std::FILE *sf = std::fopen(state_at, "wb")) {
+				std::fwrite(st.data(), 1, st.size(), sf);
+				std::fclose(sf);
+			}
+		}
+		// 起動ぶんは**整数で引く**。double(i)/rate - boot と書くと桁落ちで
+		// 1e-12 秒ずれ、イベントの時刻がちょうど境に乗ったときに 1 サンプル動く
+		const double t = (double(i) - double(boot_samples)) / rate;
 		while (next < events.size() && events[next].time <= t) {
 			const std::vector<u8> &ev = events[next].bytes;
 			if (ev.size() == 2 && ev[0] == 0xf5)
 				port = std::clamp(int(ev[1]) - 1, 0, mu2000::MIDI_PORTS - 1);
 			else {
 				// ファイルの口 3・4 は gui の既定と同じく A・B に重ねる
-				const int to = port >= 0 ? port : smf::mu_port(events[next].port, true);
+				// USB の口を使うときは C・D まで届くので、ファイルの口をそのまま使う
+				const int to = port >= 0 ? port
+					: usb_host ? std::min<int>(events[next].port, mu2000::MIDI_PORTS - 1)
+					: smf::mu_port(events[next].port, true);
 				if (trace_midi)
 					trace_event(next, events[next], to);
 				if (const char *reset = reset_name(ev))
@@ -356,9 +380,8 @@ int main(int argc, char **argv)
 		}
 
 		if (!adc_l.empty()) {
-			// 同じ理由で割り算経由しない。t*rate は結局このサンプルオフセットそのもの
-			const std::ptrdiff_t n = std::ptrdiff_t(i) - std::ptrdiff_t(boot_sample);
-			const size_t k = n < 0 ? adc_l.size() : size_t(n);
+			const double tin = t * rate;
+			const size_t k = tin < 0 ? adc_l.size() : size_t(tin);
 			mu.set_audio_input(k < adc_l.size() ? adc_l[k] : 0, k < adc_r.size() ? adc_r[k] : 0);
 		}
 		s32 l = 0, r = 0;
@@ -370,8 +393,7 @@ int main(int argc, char **argv)
 		pcm.push_back(s16(std::clamp(r, -32768, 32767)));
 
 		if (!(i % (rate * 5)))
-			std::printf("  %5.1f 秒  PC=%08x\n",
-			            double(std::ptrdiff_t(i) - std::ptrdiff_t(boot_sample)) / rate, mu.cpu().pc());
+			std::printf("  %5.1f 秒  PC=%08x\n", double(i) / rate - boot, mu.cpu().pc());
 	}
 
 	const size_t total = pcm.size() / 2;

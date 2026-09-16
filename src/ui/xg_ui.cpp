@@ -196,17 +196,22 @@ const xg::param &P(const char *key)
 
 std::string part_name(int part)
 {
+	// エフェクトの掛け先は 64 パートの後ろに A/D INPUT が 2 つ並ぶ（実機で確かめた）
+	if (part == 64) return "AD1";
+	if (part == 65) return "AD2";
 	char buf[8];
-	std::snprintf(buf, sizeof(buf), "%c%d", part < 16 ? 'A' : 'B', part % 16 + 1);
+	const int port = (part < 0 ? 0 : part) / 16;
+	std::snprintf(buf, sizeof(buf), "%c%d", char('A' + (port < 4 ? port : 3)), part % 16 + 1);
 	return buf;
 }
 
-// 受信チャンネルは 0-31 が A1-A16・B1-B16、127 が OFF
+// 受信チャンネルは 0-63 が A1-A16 ... D1-D16、127 が OFF。
+// C・D は実機では USB だけの口
 std::string channel_name(int v)
 {
 	if (v == 127)
 		return "OFF";
-	if (v < 0 || v > 31)
+	if (v < 0 || v > 63)
 		return std::to_string(v);
 	return part_name(v);
 }

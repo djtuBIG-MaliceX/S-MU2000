@@ -96,6 +96,15 @@ extern u64        g_pc_cycles;     // 追跡に添えるサイクル数
 extern std::FILE *g_upd_trace;     // 周辺を進めた時刻と次の予定
 void pc_hash(u32 pc, u64 regs);        // 畳み込みだけ。安い
 void pc_trace(u32 pc, const char *regs);
+
+// どの番地で回っているかを数える（SMU2000_PCPROF=<出す件数> で入る）。
+// JIT のブロックに入るたびに 1 つ数えるので、詰まっている輪がすぐ分かる。
+// 追跡と違って JIT を止めないので、速さを測りながら使える
+extern u32 *g_pc_prof;                 // 0x40 ごとの数え上げ。ROM 4MB ぶん
+extern u64 g_pc_prof_why[5];           // 0 遅延枠 / 1 割り込みの印 / 2 番地が外 / 3 ブロックに入った / 4 進んだ命令数
+extern u64 g_slow_mem[2];              // JIT の速い道から外れたメモリ操作（0 読み / 1 書き）
+void pc_prof_start();                  // 環境変数を見て用意する。無ければ何もしない
+void pc_prof_report();                 // 多い順に出す
 }
 
 // MAME の logerror は書式を自前で組み立てるので %s に std::string を渡せる。
@@ -124,10 +133,13 @@ class flat_space
 public:
 	void set(const void *base, size_t bytes)
 	{
-		m_base  = reinterpret_cast<const u8 *>(base);
-		m_bytes = bytes;
-		m_mask  = bytes ? (bytes - 1) : 0;   // 2 の冪でない場合は下の wrap() で丸める
-		m_pow2  = bytes && !(bytes & (bytes - 1));
+		// S-MU2000: 空のときは 8 バイトの 0 を指す。こうしておくと読みの側で
+		// 「入っているか」を見なくてよくなる（read_dword は 1 声につき 2〜3 回呼ばれる）
+		static const u8 s_zero[8] = {};
+		m_base  = base ? reinterpret_cast<const u8 *>(base) : s_zero;
+		m_bytes = base ? bytes : 0;
+		m_mask  = m_bytes ? (m_bytes - 1) : 0;   // 2 の冪でない場合は下の wrap() で丸める
+		m_pow2  = m_bytes && !(m_bytes & (m_bytes - 1));
 	}
 
 	u16 read_word(offs_t addr) const
@@ -135,11 +147,19 @@ public:
 		return read_at<u16>(offset_of(addr, 2));
 	}
 
+	// S-MU2000: 声 1 つにつき 2〜3 回呼ばれる、いちばん熱い読み。
+	// 相手（波形 ROM 32MB、リバーブ RAM 512KB）はどちらも 2 の冪なので、
+	// そちらを枝の無い道にしてある。2 の冪でない領域は下の遅い道へ落とす
 	u32 read_dword(offs_t addr) const
 	{
 		if (u32(addr - m_ov_from) < m_ov_units) {
 			u32 v;
 			std::memcpy(&v, m_ov + (size_t(addr - m_ov_from) << (-AddrShift)), 4);
+			return v;
+		}
+		if (m_pow2) {
+			u32 v;
+			std::memcpy(&v, m_base + ((size_t(addr) << (-AddrShift)) & m_mask & ~size_t(3)), 4);
 			return v;
 		}
 		return read_at<u32>(offset_of(addr, 4));

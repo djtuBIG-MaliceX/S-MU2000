@@ -18,6 +18,9 @@ namespace {
 // MIDI は 31250bps。28MHz の CPU から見て 1 ビット = 896 サイクル
 constexpr u64 MIDI_BIT_CYCLES = 28000000 / 31250;
 
+// USB は実機で 19,500 byte/s 出た（doc/dump/usb.md）。1 バイトぶんのサイクル数
+constexpr u64 USB_BYTE_CYCLES = 28000000 / 19500;
+
 bool read_file(const std::string &path, std::vector<u8> &out, size_t expect)
 {
 	std::FILE *f = std::fopen(path.c_str(), "rb");
@@ -527,6 +530,16 @@ void mu2000::build_bus()
 		m_bus.add_device(d);
 	}
 
+	// f80000-f80001: USB の M37640 マイコン。SH-2 から見えるのはこの 2 番地だけ。
+	// 読みは 0 が受信バイト、1 が状態。書きは 0 が MIDI、1 が M37640 への指示
+	{
+		mem_bus::device d;
+		d.start = 0xf80000; d.end = 0xf80001;
+		d.r8 = [this](offs_t a) { return usb_r(a - 0xf80000); };
+		d.w8 = [this](offs_t a, u8 v) { usb_w(a - 0xf80000, v); };
+		m_bus.add_device(d);
+	}
+
 	// ffff8000-ffff9fff: CPU の内蔵周辺（sh7042_map.hxx が振り分ける）
 	{
 		mem_bus::device d;
@@ -635,7 +648,9 @@ void mu2000::reset()
 	m_cpu->read_adc<1>().set_constant(0);
 	m_cpu->read_adc<2>().set([this]() { return ad_level_adc(1); });
 	m_cpu->read_adc<3>().set_constant(0);
-	m_cpu->read_adc<4>().set_constant(0);        // ホストスイッチ = MIDI
+	// ホストスイッチ。firmware は 8 ビットに落として境で分ける（0x1098）。
+	// 0x20 未満が MIDI、0xBA-0xE0 が USB
+	m_cpu->read_adc<4>().set([this]() -> u16 { return m_usb_host ? 0x330 : 0; });
 	m_cpu->read_adc<5>().set_constant(0);
 	m_cpu->read_adc<6>().set_constant(0x3ff);    // 電池は満タン
 	m_cpu->read_adc<7>().set_constant(0);
@@ -711,6 +726,7 @@ void mu2000::run_cycles(u64 n)
 
 		// MIDI のビット送出も跨がないように
 		midi_step(now);
+		usb_step(now);
 
 		u64 chunk = n;
 		if (ev && ev - now < chunk)
@@ -778,10 +794,101 @@ void mu2000::tx_line(int state)
 	m_tx_w = next;
 }
 
+// ---- USB（M37640）の代役
+//
+// 溜めに積むときに口が変わっていれば `F5 <口>` を先に挟む。firmware 側は
+// 0x042932 で 0xF5 を見て次のバイトを「今の口」として覚え、以後のバイトを
+// その口として 0x04437C へ渡す。口は 1 始まり（1=A 2=B 3=C 4=D）
+
+void mu2000::usb_midi_in(u8 byte, int port)
+{
+	usb_line &u = m_usb;
+	if (u.rx.size() >= MIDI_QUEUE_LIMIT) {
+		m_midi_dropped.fetch_add(1, std::memory_order_relaxed);
+		return;
+	}
+	if (port != u.in_port) {
+		u.rx.push_back(0xf5);
+		u.rx.push_back(u8(port + 1));
+		u.in_port = port;
+	}
+	u.rx.push_back(byte);
+}
+
+void mu2000::usb_step(u64 now)
+{
+	usb_line &u = m_usb;
+
+	// USB を使っていないときは何もしない。割り込みを上げると firmware の
+	// USB ドライバが動き出してしまう
+	if (!m_usb_host && u.rx.empty() && !u.have)
+		return;
+
+	// 受信。1 バイト渡すごとに IRQ3（ベクタ 67）を上げる。
+	// 間隔は実機で測った USB の実効帯域 19,500 byte/s に合わせる
+	// （doc/dump/usb.md の実測）。DIN の 3,125 byte/s より 6 倍速いが、
+	// 発音の間隔は firmware 側が頭打ちなので実測とは食い違わない。
+	// 4 つの口が 1 本の流れを分け合うので、遅くすると互いに待たせてしまう
+	if (!u.have && !u.rx.empty() && now >= u.next) {
+		u.cur  = u.rx.front();
+		u.have = true;
+		u.rx.pop_front();
+		u.next = now + (m_fast_midi ? 0 : USB_BYTE_CYCLES);
+		m_cpu->execute_set_input(3, 1);
+	}
+
+	// 送信。firmware は IRQ2（ベクタ 66）が来るたびに 1 バイト出す。
+	// 上げないとリングが埋まり、0x437A0 の空き待ちで固まる（実機でやらかした）
+	if (now >= u.tx_next) {
+		u.tx_next = now + USB_BYTE_CYCLES;
+		m_cpu->execute_set_input(2, 1);
+	}
+}
+
+u8 mu2000::usb_r(offs_t a)
+{
+	usb_line &u = m_usb;
+	if (a & 1)
+		return u.have ? 0x01 : 0x00;   // bit0 = 受信あり、bit6 = コマンド（使わない）
+	u.have = false;
+	return u.cur;
+}
+
+void mu2000::usb_w(offs_t a, u8 v)
+{
+	if (a & 1)
+		return;                        // コマンド口。M37640 への指示なので捨てる
+	usb_line &u = m_usb;
+	if (u.tx.size() < TX_SIZE)
+		u.tx.push_back(v);
+}
+
+bool mu2000::usb_out_take(u8 &v, int &port)
+{
+	usb_line &u = m_usb;
+	while (!u.tx.empty()) {
+		const u8 b = u.tx.front();
+		u.tx.pop_front();
+		if (b == 0xf5) {
+			if (u.tx.empty()) {        // 口の番号がまだ来ていない。戻しておく
+				u.tx.push_front(b);
+				return false;
+			}
+			u.out_port = int(u.tx.front()) - 1;
+			u.tx.pop_front();
+			continue;
+		}
+		v = b;
+		port = u.out_port;
+		return true;
+	}
+	return false;
+}
+
 void mu2000::midi_step(u64 now)
 {
 	// A と B は別々の SCI に繋がっている。互いに待たせない
-	for (int port = 0; port < MIDI_PORTS; port++) {
+	for (int port = 0; port < MIDI_DIN_PORTS; port++) {
 		midi_line &m = m_midi[port];
 		sh_sci_device *sci = m_cpu->sci(port);
 		if (m_fast_midi) {
@@ -913,7 +1020,7 @@ namespace {
 
 // 保存の形。中身の並びを変えたら上げる
 constexpr u32 STATE_MAGIC   = 0x554d3253;   // "S2MU"
-constexpr u32 STATE_VERSION = 6;   // 2: MIDI の入口が A/B の 2 口になった / 3: SWP30 のピッチ EG / 4: サンプリングの録音の位置 / 5: SmartMedia の命令の途中 / 6: MEG の印と 2 つ目の idx
+constexpr u32 STATE_VERSION = 7;   // 2: MIDI の入口が A/B の 2 口になった / 3: SWP30 のピッチ EG / 4: サンプリングの録音の位置 / 5: SmartMedia の命令の途中 / 6: MEG の印と 2 つ目の idx / 7: USB の口（C・D）の受け取り途中
 constexpr u32 STATE_VERSION_OLDEST = 2;
 
 } // namespace
@@ -965,6 +1072,30 @@ void mu2000::state(state_io &s)
 		}
 		s.v(m.bit); s.v(m.cur); s.v(m.next);
 	}
+
+	// 版 7 から: USB の口（C・D）の受け取り途中。firmware へ渡す前のバイト列
+	if (s.version() >= 7) {
+		s.tag("usb");
+		u32 n = u32(m_usb.rx.size());
+		s.v(n);
+		if (s.writing()) {
+			for (u8 b : m_usb.rx)
+				s.v(b);
+		} else {
+			m_usb.rx.clear();
+			for (u32 i = 0; i < n && s.ok(); i++) {
+				u8 b = 0;
+				s.v(b);
+				m_usb.rx.push_back(b);
+			}
+		}
+		s.v(m_usb.in_port); s.v(m_usb.next); s.v(m_usb.have); s.v(m_usb.cur); s.v(m_usb.tx_next);
+	}
+}
+
+u32 mu2000::state_version()
+{
+	return STATE_VERSION;
 }
 
 std::vector<u8> mu2000::save_state() const

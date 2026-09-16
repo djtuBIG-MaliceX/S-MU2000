@@ -923,7 +923,8 @@ int main(int argc, char **argv)
 				continue;
 			const uint8 st = b[0], ch = uint8(st & 15);
 			// MIDI ファイルの口（FF 21）をそのままバスの番号にする。B はパート 17-32
-			const int32 bus = (e.port && !one_bus) ? 1 : 0;
+			// MIDI ファイルの口指定（FF 21）を、そのままバスに使う。口 A-D の 4 本
+			const int32 bus = one_bus ? 0 : int32(e.port < 4 ? e.port : 3);
 			// CC などはプラグインが教える割り当てで、パラメータ番号に直す
 			auto param = [&](int ctrl) {
 				ParamID id = ParamID(ch * 131 + ctrl);

@@ -20,10 +20,16 @@ namespace ui {
 class overview : public imgui_view
 {
 public:
+	overview()
+	{
+		for (int i = 0; i < XG_PARTS; i++)
+			m_playing[i] = m_saved_rcv[i] = -1;
+	}
+
 	const wchar_t *title() const override { return L"S-MU2000 一覧"; }
 	// 表示の大きさ（xgui::overview_zoom、既定 0.625）で描くので、窓もその分だけ小さく出す
 	int default_width() const override  { return 1200; }
-	int default_height() const override { return 500; }
+	int default_height() const override { return 700; }   // 64 パートぶん並ぶので高めに
 	void draw(xg::model &m, const xg_snapshot &ram, bridge &br) override;
 	// 閉じたら、鳴らしている鍵を離し、ミュートとソロを外す（受信チャンネルを戻す）
 	void hidden(bridge &br) override;
@@ -66,16 +72,15 @@ private:
 	void cell(const column &c, int part, xg::model &m, const xg_snapshot &ram, bridge &br, float w, float h);
 
 	int    m_part = 0;
-	float  m_level[32] = {};          // VEL メーターの今の高さ（0-1）
-	u32    m_seen_ons[32] = {};       // 見張りのノートオンの回数を最後に見た値
-	int    m_playing[32] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-	                         -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 };
-	int    m_playing_slot[32] = {};   // 鳴らしている鍵（-1 は無し）と、そのときの受信の口×チャンネル
+	float  m_level[XG_PARTS] = {};          // VEL メーターの今の高さ（0-1）
+	u32    m_seen_ons[XG_PARTS] = {};       // 見張りのノートオンの回数を最後に見た値
+	// 鳴らしている鍵（-1 は無し）と、そのときの受信の口×チャンネル。
+	// 配列の初期化で -1 を並べるのは 64 個では長いので、開くときに埋める（reset_rows）
+	int    m_playing[XG_PARTS];
+	int    m_playing_slot[XG_PARTS] = {};
 	xg::model *m_model = nullptr;     // 閉じたときに受信チャンネルを戻すため（draw で覚える）
-	bool   m_mute[32] = {}, m_solo[32] = {};
-	int    m_saved_rcv[32] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-	                           -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 };
-	                                  // ミュートで OFF にする前の受信チャンネル（-1 は消していない）
+	bool   m_mute[XG_PARTS] = {}, m_solo[XG_PARTS] = {};
+	int    m_saved_rcv[XG_PARTS];     // ミュートで OFF にする前の受信チャンネル（-1 は消していない）
 	double m_scrolled_at = -1;        // ホイールで表をスクロールした時刻（エディタと同じ決まり）
 	bool   m_wheel_taken = false;
 };

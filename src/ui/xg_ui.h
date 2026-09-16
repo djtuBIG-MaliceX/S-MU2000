@@ -35,7 +35,7 @@ namespace xgui {
 
 const xg::param &P(const char *key);
 
-std::string part_name(int part);        // A1-A16・B1-B16
+std::string part_name(int part);        // A1-A16 ... D1-D16
 std::string channel_name(int value);    // 受信チャンネル。127 は OFF
 const char *gm_name(int program);       // General MIDI の楽器名（規格の名前）
 std::string voice_text(int msb, int lsb, int program);
@@ -61,7 +61,7 @@ int  fx_window_slot();                         // 設定の窓で見ているイ
 void set_fx_window_slot(int slot);
 
 // ---- パートの音色の窓（VIB・FILTER・EG・EQ を大きく）を開く頼み。一覧の絵のダブルクリックから
-void request_part(int part);            // part は 0-31
+void request_part(int part);            // part は 0-63
 bool take_part_request();               // 頼みがあれば true（1 回だけ）
 int  shape_window_part();               // パートの音色の窓で見ているパート
 void set_shape_window_part(int part);

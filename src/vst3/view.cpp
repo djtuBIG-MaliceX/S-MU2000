@@ -244,6 +244,9 @@ void plug_view::repaint(void *native, int w, int h)
 	// (this is the GUI thread -- the Win32 timer and the macOS one both arrive
 	//  here, so the polling happens once per frame on either platform)
 	m_impl->panel.tick(m_engine.panel());
+	// PC で触る窓（一覧・エディタ）。見えていなければ何もしない
+	if (m_window)
+		m_window->pc_frame(m_impl->panel.xg(), m_impl->panel.ram(), m_engine.panel());
 
 #if defined(_WIN32)
 	HDC dst = static_cast<HDC>(native);

@@ -3,8 +3,10 @@
 #include "engine.h"
 
 #include "mu2000.h"
+#include "bootcache.h"
 #include "nvram.h"
 #include "smartmedia.h"
+#include "ui/xg_ui.h"
 
 #include "compat/paths.h"
 #include "compat/platform.h"
@@ -532,14 +534,27 @@ void engine::boot(bool sync)
 	// DAW の中では、DAW が管理しない糸が 1 本増える。嫌う DAW や、自分でコアを割り振りたい人のために、
 	// %LOCALAPPDATA%\S-MU2000\plugin.ini に threaded=0 と書けば 1 本で回す
 	bool threaded = true;
+	// MIDI IN の口 C・D（パート 33-64）は実機では USB だけの口で、firmware は
+	// HOST SELECT が USB のときしか通さない。**既定は USB**（実機を PC に繋ぐときと
+	// 同じ姿）。A・B も USB 側を通り、バイトの届き方が DIN の 31250bps から
+	// 実機の USB の速さになる。plugin.ini に usb=0 と書けば DIN に戻る
+	bool usb = true;
 	if (const std::string local = smu2000::config_dir(); !local.empty())
 		if (std::FILE *f = std::fopen(smu2000::join(local, "plugin.ini").c_str(), "rb")) {
 			char line[256];
-			while (std::fgets(line, sizeof(line), f))
+			while (std::fgets(line, sizeof(line), f)) {
 				if (!std::strncmp(line, "threaded=", 9))
 					threaded = line[9] != '0';
+				if (!std::strncmp(line, "usb=", 4))
+					usb = line[4] != '0';
+			}
 			std::fclose(f);
 		}
+	// 一覧やエディタで音色の名前と楽器の絵を利用者の ROM から読む（xg/voices.h）。
+	// gui.exe と同じ
+	ui::xgui::set_voice_rom(mu->program_rom());
+	mu->set_usb_host(usb);
+	logf(usb ? "MIDI は USB の口（A-D の 64 パート）" : "plugin.ini: usb=0（DIN の口 A・B だけ）");
 	mu->set_threaded(threaded);
 	if (!threaded)
 		logf("plugin.ini: threaded=0（スレーブを別スレッドにしない）");
@@ -548,7 +563,24 @@ void engine::boot(bool sync)
 	// 同じファイルを取り合わずに済む
 	if (nvram::load(*mu))
 		logf("設定: %s", nvram::path(*mu).c_str());
+
+	// 鍵は起動に使うワーク RAM も混ぜるので、reset() の前に作る
+	const u64 boot_key = bootcache::key(*mu);
 	mu->reset();
+
+	// 前に起動し切った姿を取ってあれば、そこから始める（bootcache.h）。
+	// 回した結果と 1 ビットも違わないので音は同じで、DAW に何枚挿しても
+	// そのたびに黙ることが無くなる。
+	// **reset() のあとで読むこと**（タイマが揃っていないと形が合わない）
+	if (bootcache::load(*mu, boot_key)) {
+		logf("起動: 前の写しから（%s）", bootcache::path(boot_key).c_str());
+		m_mu = mu;
+		m_message = warn.empty() ? std::string("ROM: ") + dir
+		                         : std::string("ROM: ") + dir + "\n警告: " + warn;
+		m_state.store(status::ready, std::memory_order_release);
+		ui::driver::publish_now(*m_mu, m_bridge, true, nullptr);
+		return;
+	}
 
 	ui::driver::publish_message(m_bridge, "MU2000 起動中");
 
@@ -598,6 +630,9 @@ void engine::boot(bool sync)
 	    std::chrono::steady_clock::now() - t_boot).count();
 	logf("boot: %s, cache %s, wall %.2f s", sync ? "sync" : "async",
 	     restored ? "hit" : "miss", wall);
+	// 次からはここまでを飛ばせるように残す
+	if (bootcache::save(*mu, boot_key))
+		logf("起動の写しを残した: %s", bootcache::path(boot_key).c_str());
 
 	m_mu = mu;
 	m_message = warn.empty() ? std::string("ROM: ") + dir
@@ -672,7 +707,8 @@ void engine::one_sample(float &l, float &r)
 
 void engine::midi(const uint8_t *bytes, size_t n, int port)
 {
-	port = port == 1 ? 1 : 0;
+	if (port < 0 || port >= mu2000::MIDI_PORTS)
+		port = 0;
 	const status s = state();
 	if (s == status::failed)
 		return;
@@ -699,10 +735,9 @@ void engine::midi(const uint8_t *bytes, size_t n, int port)
 	pending.insert(pending.end(), bytes, bytes + n);
 }
 
-void engine::all_notes_off(uint16_t mask_a, uint16_t mask_b)
+void engine::all_notes_off(const uint16_t *mask, int ports)
 {
-	const uint16_t mask[2] = { mask_a, mask_b };
-	for (int port = 0; port < 2; port++)
+	for (int port = 0; port < ports && port < mu2000::MIDI_PORTS; port++)
 		for (int ch = 0; ch < 16; ch++) {
 			if (!((mask[port] >> ch) & 1))
 				continue;

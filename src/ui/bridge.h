@@ -55,8 +55,17 @@ public:
 	// 入りきらなければ丸ごと捨てて false
 	bool send(const u8 *bytes, size_t n) { return m_to_mu.put(bytes, n); }
 	bool send(const std::vector<u8> &m)  { return m.empty() || send(m.data(), m.size()); }
-	// 口 B（パート 17-32）へ。一覧の鍵盤から弾くときに使う。THRU には流さない
-	bool send_b(const u8 *bytes, size_t n) { return m_to_mu_b.put(bytes, n); }
+	// 口 B・C・D（パート 17-64）へ。一覧の鍵盤から弾くときに使う。THRU には流さない。
+	// 口 A は上の send()（あちらは THRU にも流す）
+	bool send_port(int port, const u8 *bytes, size_t n)
+	{
+		if (port <= 0)
+			return send(bytes, n);
+		if (port >= mu2000::MIDI_PORTS)
+			return false;
+		return m_to_mu_p[port].put(bytes, n);
+	}
+	bool send_b(const u8 *bytes, size_t n) { return send_port(1, bytes, n); }
 
 	// パラメータの層の問い合わせ（ダンプ要求）。send と同じく音源の口 A へ入るが、
 	// **外の MIDI THRU へは流さない**（画面が値を読みに行っているだけで、外の機器には
@@ -104,7 +113,11 @@ public:
 	// 音源側から。溜まっている MIDI を 1 バイトずつ
 	bool take_midi(u8 &v) { return m_to_mu.take(v); }
 	bool take_ask(u8 &v)  { return m_ask.take(v); }
-	bool take_midi_b(u8 &v) { return m_to_mu_b.take(v); }
+	bool take_midi_port(int port, u8 &v)
+	{
+		return port > 0 && port < mu2000::MIDI_PORTS && m_to_mu_p[port].take(v);
+	}
+	bool take_midi_b(u8 &v) { return take_midi_port(1, v); }
 
 	// 音源の MIDI OUT から出たものを画面へ。書き手は音声の糸だけなので錠は取らない。
 	// 画面が読んでいなければ（VST3 の画面を閉じている等）溢れた分は捨てる
@@ -188,7 +201,8 @@ private:
 
 	ring                  m_to_mu;        // 画面・MIDI ファイル → 音源（THRU にも流す）
 	ring                  m_ask;          // パラメータの層の問い合わせ → 音源（THRU には流さない）
-	ring                  m_to_mu_b;      // 画面 → 音源の口 B（THRU には流さない）
+	// 画面 → 音源の口 B・C・D（THRU には流さない）。[0] は使わない（口 A は m_to_mu）
+	ring                  m_to_mu_p[mu2000::MIDI_PORTS];
 	ring                  m_from_mu;      // 音源の MIDI OUT → 画面
 	std::atomic<u64>      m_audio_ms{0};
 	u64                   m_clock_frac = 0;   // 音声の糸だけが触る

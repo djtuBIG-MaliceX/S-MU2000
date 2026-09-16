@@ -26,6 +26,7 @@
 #include "midi_in.h"
 #include "midi_out.h"
 #include "mu2000.h"
+#include "bootcache.h"
 #include "nvram.h"
 
 #include "compat/platform.h"
@@ -43,7 +44,9 @@ struct engine {
 	mu2000 mu;
 	bridge   &br;
 	midi_in  &midi;        // MIDI IN A（パート 1-16）
-	midi_in  *midi_b = nullptr;   // MIDI IN B（パート 17-32）
+	// B-D。B は実機の 2 つめの DIN、C・D は USB だけの口（パート 33-64）。
+	// [0] は使わない（midi が A）
+	midi_in  *midi_p[mu2000::MIDI_PORTS] = {};
 	midi_out *mout = nullptr;     // MIDI THRU A（A で受けたものを外へ）
 	midi_out *mout_b = nullptr;   // MIDI THRU B（B で受けたものを外へ）
 	// MIDI OUT。MU2000 が自分で送り出すもの（XG のダンプ要求への返事など）。
@@ -83,7 +86,17 @@ struct engine {
 		mu.set_threaded(true);
 		if (use_nvram && smu2000::nvram::load(mu))
 			std::printf("設定: %s\n", smu2000::nvram::path(mu).c_str());
+		// 鍵は起動に使うワーク RAM も混ぜるので、reset() の前に作る
+		const u64 key = smu2000::bootcache::key(mu);
 		mu.reset();
+		// 前に起動し切った姿を取ってあれば、そこから始める（bootcache.h）。
+		// 回した結果と 1 ビットも違わないので、音は同じ。
+		// **reset() のあとで読むこと**（タイマが揃っていないと形が合わない）
+		if (smu2000::bootcache::load(mu, key)) {
+			std::printf("起動: 前の写しから（%s）\n", smu2000::bootcache::path(key).c_str());
+			publish();
+			return true;
+		}
 		const size_t limit = size_t(30.0 * AUDIO_RATE);
 		size_t i = 0;
 		s32 l, r;
@@ -93,6 +106,8 @@ struct engine {
 			message = "起動しなかった";
 			return false;
 		}
+		if (smu2000::bootcache::save(mu, key))
+			std::printf("起動の写しを残した: %s\n", smu2000::bootcache::path(key).c_str());
 		publish();
 		return true;
 	}
@@ -165,12 +180,16 @@ struct engine {
 		// THRU も口ごとに分ける。A で受けたものは MIDI OUT A、
 		// B で受けたものは MIDI OUT B へ。混ぜると、外に繋いだ音源で
 		// パートの割り振りが崩れる
-		if (midi_b)
-			while (midi_b->pop(b)) {
-				mu.midi_in(b, 1);
-				drv.watch(b, 1);
-				if (mout_b && guard_b.pass(b)) mout_b->send(b);
+		// C・D は実機では USB だけの口で、外へ出す THRU の端子も無い
+		for (int p = 1; p < mu2000::MIDI_PORTS; p++) {
+			if (!midi_p[p])
+				continue;
+			while (midi_p[p]->pop(b)) {
+				mu.midi_in(b, p);
+				drv.watch(b, p);
+				if (p == 1 && mout_b && guard_b.pass(b)) mout_b->send(b);
 			}
+		}
 
 		const float g = br.gain();
 

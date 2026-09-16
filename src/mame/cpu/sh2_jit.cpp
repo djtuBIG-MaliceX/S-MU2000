@@ -218,22 +218,28 @@ void sh2_device::jit_irq(sh2_device *c)
 	c->m_test_irq = 0;
 }
 
-u32 sh2_device::jit_rb(sh2_device *c, u32 a) { return c->read_byte(a); }
-u32 sh2_device::jit_rw(sh2_device *c, u32 a) { return c->read_word(a); }
-u32 sh2_device::jit_rl(sh2_device *c, u32 a) { return c->read_long(a); }
-void sh2_device::jit_wb(sh2_device *c, u32 a, u32 v) { c->write_byte(a, u8(v)); }
-void sh2_device::jit_ww(sh2_device *c, u32 a, u32 v) { c->write_word(a, u16(v)); }
-void sh2_device::jit_wl(sh2_device *c, u32 a, u32 v) { c->write_long(a, v); }
+u32 sh2_device::jit_rb(sh2_device *c, u32 a) { if (smu2000::g_pc_prof) smu2000::g_slow_mem[0]++; return c->read_byte(a); }
+u32 sh2_device::jit_rw(sh2_device *c, u32 a) { if (smu2000::g_pc_prof) smu2000::g_slow_mem[0]++; return c->read_word(a); }
+u32 sh2_device::jit_rl(sh2_device *c, u32 a) { if (smu2000::g_pc_prof) smu2000::g_slow_mem[0]++; return c->read_long(a); }
+void sh2_device::jit_wb(sh2_device *c, u32 a, u32 v) { if (smu2000::g_pc_prof) smu2000::g_slow_mem[1]++; c->write_byte(a, u8(v)); }
+void sh2_device::jit_ww(sh2_device *c, u32 a, u32 v) { if (smu2000::g_pc_prof) smu2000::g_slow_mem[1]++; c->write_word(a, u16(v)); }
+void sh2_device::jit_wl(sh2_device *c, u32 a, u32 v) { if (smu2000::g_pc_prof) smu2000::g_slow_mem[1]++; c->write_long(a, v); }
 
 bool sh2_device::jit_run()
 {
 	// 割り込みの印が外（周辺）で立っているときは、解釈実行で 1 命令進めて確かめさせる。
 	// ブロックの中では、周辺に触らない命令のあとで印を見ないので
-	if (m_sh2_state->m_delay || m_test_irq || smu2000::g_pc_trace || smu2000::g_pc_hash)
+	if (m_sh2_state->m_delay || m_test_irq || smu2000::g_pc_trace || smu2000::g_pc_hash) {
+		if (smu2000::g_pc_prof)
+			smu2000::g_pc_prof_why[m_sh2_state->m_delay ? 0 : 1]++;
 		return false;
+	}
 	const u32 pc = m_sh2_state->pc;
-	if (pc >= jit::ROM_END - 0x100 || (pc & 1))
+	if (pc >= jit::ROM_END - 0x100 || (pc & 1)) {
+		if (smu2000::g_pc_prof)
+			smu2000::g_pc_prof_why[2]++;
 		return false;
+	}
 	if (!m_jit)
 		m_jit.reset(new jit);
 	jit::code_t code = *m_jit->slot(pc);
@@ -244,8 +250,15 @@ bool sh2_device::jit_run()
 			return false;
 		*m_jit->slot(pc) = code;
 	}
+	if (smu2000::g_pc_prof) {
+		smu2000::g_pc_prof[(pc & 0x3fffff) >> 6]++;
+		smu2000::g_pc_prof_why[3]++;
+	}
 	m_jit->entry = code;
+	const int before = m_sh2_state->icount;
 	m_jit->enter(this, m_sh2_state, m_program->hot_rom(), m_program->hot_ram());
+	if (smu2000::g_pc_prof)
+		smu2000::g_pc_prof_why[4] += u64(before - m_sh2_state->icount);
 	return true;
 }
 

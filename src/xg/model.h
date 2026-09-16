@@ -43,7 +43,7 @@ enum class view : u8 {
 	center,     // 真ん中を 0 として ±（ノートシフトなど）
 	pan,        // 0 がランダム、1-127 で L63 ... C ... R63
 	choice,     // 名前の表
-	part_off,   // 0-31 がパート 1-32、127 が OFF
+	part_off,   // 0-63 がパート 1-64、64-65 が AD1・AD2、127 が OFF
 };
 
 struct param {

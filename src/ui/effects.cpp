@@ -121,7 +121,7 @@ void panel::fx_bounds(int ctl, bool &at_min, bool &at_max) const
 		at_max = i == n - 1;
 		return;
 	}
-	if (p->special >= 0) {                     // パート。0-31 の次が OFF
+	if (p->special >= 0) {                     // パート。0-63 の次が OFF
 		at_min = v == p->min;
 		at_max = v == p->special;
 		return;

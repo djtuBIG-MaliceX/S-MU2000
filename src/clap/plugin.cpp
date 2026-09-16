@@ -362,7 +362,7 @@ private:
 	float                  m_gain_now = 1.0f;
 	std::atomic<bool>      m_hush{false};
 	// 音を出したチャンネル（口ごとに 16 ビット）。止めるときに流す先を絞る
-	std::atomic<uint16_t>  m_sounded[2] = {};
+	std::atomic<uint16_t>  m_sounded[mu2000::MIDI_PORTS] = {};
 
 	// 音を作る途中の入れ物。process の間だけ有効
 	float       *m_left = nullptr, *m_right = nullptr;
@@ -527,12 +527,17 @@ clap_process_status mu_plugin::process(const clap_process_t *pr)
 	m_in_r = (in && in->data32 && in->channel_count > 1) ? in->data32[1] : m_in_l;
 	m_done = 0;
 
-	// 止められたときは、鳴らしたチャンネルだけを黙らせる。全 32 チャンネルへ流すと
-	// 192 バイト＝61ms ぶんの直列になり、次の最初の音がそのぶん遅れる（issue #15）
+	// 止められたときは、鳴らしたチャンネルだけを黙らせる。全チャンネルへ流すと
+	// 1 口につき 192 バイト＝61ms ぶんの直列になり、次の最初の音がそのぶん遅れる（issue #15）
 	if (m_hush.exchange(false)) {
-		const uint16_t a = m_sounded[0].exchange(0), b = m_sounded[1].exchange(0);
-		if (a || b)
-			m_engine.all_notes_off(a, b);
+		uint16_t mask[mu2000::MIDI_PORTS];
+		bool any = false;
+		for (int p = 0; p < mu2000::MIDI_PORTS; p++) {
+			mask[p] = m_sounded[p].exchange(0);
+			any = any || mask[p];
+		}
+		if (any)
+			m_engine.all_notes_off(mask, mu2000::MIDI_PORTS);
 	}
 
 	// イベントは時刻順に来る。その時刻まで音を作ってから流す

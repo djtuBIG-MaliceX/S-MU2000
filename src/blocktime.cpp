@@ -58,6 +58,7 @@ int main(int argc, char **argv)
 	if (!mu.load_wave(dir + "/dump")) { std::fprintf(stderr, "%s\n", mu.error().c_str()); return 1; }
 	mu.load_sintab(dir + "/standin/sin-table.bin");
 	mu.set_threaded(true);
+	smu2000::pc_prof_start();
 	mu.reset();
 
 	// 起動を待つ（ここは測らない）
@@ -174,5 +175,6 @@ int main(int argc, char **argv)
 		            median(megm), spread(megm), median(col(&run_result::megs_ns)));
 		std::printf("  実行ループ %.1f 周 / サンプル\n", median(col(&run_result::loops)));
 	}
+	smu2000::pc_prof_report();
 	return 0;
 }

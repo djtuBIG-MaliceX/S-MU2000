@@ -46,11 +46,12 @@ public:
 		// パラメータの層の問い合わせ。外へは流さない
 		while (br.take_ask(b))
 			mu.midi_in(b);
-		// 画面から口 B へ（一覧の鍵盤）。外へは流さない
-		while (br.take_midi_b(b)) {
-			mu.midi_in(b, 1);
-			watch(b, 1);
-		}
+		// 画面から口 B・C・D へ（一覧の鍵盤）。外へは流さない
+		for (int port = 1; port < mu2000::MIDI_PORTS; port++)
+			while (br.take_midi_port(port, b)) {
+				mu.midi_in(b, port);
+				watch(b, port);
+			}
 	}
 
 	void pump_midi(mu2000 &mu, bridge &br)
@@ -87,7 +88,8 @@ public:
 	// （音源の中の鍵の状態はきれいに取り出せないので、入口で数える）
 	void watch(u8 b, int port)
 	{
-		port = port ? 1 : 0;
+		if (port < 0 || port >= mu2000::MIDI_PORTS)
+			return;
 		if (b >= 0xf8)
 			return;                           // リアルタイム
 		if (b == 0xf0) {
@@ -221,11 +223,11 @@ private:
 	u64 m_applied = 0;
 	u64 m_since = 0;
 	xg_snapshot m_xg;                        // 音声の糸だけが触る
-	u8   m_status[2] = {}, m_data[2][2] = {};
-	int  m_have[2] = {};
-	bool m_sysex[2] = {};
-	u8   m_sx[2][16] = {};                    // SysEx の頭（リセットかを見るだけ）
-	size_t m_sx_len[2] = {};
+	u8   m_status[mu2000::MIDI_PORTS] = {}, m_data[mu2000::MIDI_PORTS][2] = {};
+	int  m_have[mu2000::MIDI_PORTS] = {};
+	bool m_sysex[mu2000::MIDI_PORTS] = {};
+	u8   m_sx[mu2000::MIDI_PORTS][16] = {};                    // SysEx の頭（リセットかを見るだけ）
+	size_t m_sx_len[mu2000::MIDI_PORTS] = {};
 };
 
 } // namespace ui

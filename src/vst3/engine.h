@@ -81,12 +81,13 @@ public:
 
 	// MIDI を 1 メッセージ流す。実機と同じく 31250bps の直列に崩される。
 	// 起動が終わっていない間は溜めておいて、終わってから流す。
-	// port は 0 が MIDI IN A（パート 1-16）、1 が MIDI IN B（パート 17-32）
+	// port は 0 が MIDI IN A（パート 1-16）、1 が B（17-32）、2 が C（33-48）、3 が D（49-64）
 	void midi(const uint8_t *bytes, size_t n, int port = 0);
 	// オールサウンドオフ + オールノートオフを流す。mask は口ごとのチャンネルのビット
-	// （bit 0 が 1ch）。全チャンネルに流すと 192 バイト＝31250bps で 61ms かかり、
-	// そのあとに続く音が丸ごと遅れるので、鳴らした覚えのあるチャンネルだけに絞る
-	void all_notes_off(uint16_t mask_a = 0xffff, uint16_t mask_b = 0xffff);
+	// （bit 0 が 1ch）で、ports 個ぶん並べて渡す。全チャンネルに流すと 1 口あたり
+	// 192 バイト＝31250bps で 61ms かかり、そのあとに続く音が丸ごと遅れるので、
+	// 鳴らした覚えのあるチャンネルだけに絞る
+	void all_notes_off(const uint16_t *mask, int ports);
 
 	// n サンプルぶん作る。左右は別々の配列（VST3 はそういう渡し方をする）。
 	// in_l / in_r はホストの周波数で n サンプルぶんの A/D INPUT（無ければ nullptr）
@@ -183,7 +184,7 @@ private:
 	ui::driver m_drv;
 
 	// 起動前や、機械を他が使っている間に来た MIDI。口ごとに持つ。音声スレッドしか触らない
-	std::vector<uint8_t> m_pending[2];
+	std::vector<uint8_t> m_pending[mu2000::MIDI_PORTS];
 };
 
 } // namespace vst3

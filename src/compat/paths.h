@@ -28,6 +28,7 @@
 #include <cerrno>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 #if defined(_WIN32)
 #  ifndef WIN32_LEAN_AND_MEAN
@@ -38,6 +39,7 @@
 #  endif
 #  include <windows.h>
 #else
+#  include <dirent.h>
 #  include <dlfcn.h>
 #  include <mach-o/dyld.h>
 #  include <sys/stat.h>
@@ -190,6 +192,47 @@ inline bool is_dir(const std::string &p)
 	struct stat st{};
 	return ::stat(p.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
 #endif
+}
+
+// S-MU2000: そのディレクトリの中のファイルを、名前と最終更新の組で並べる。
+// ディレクトリそのものは入れない。古いものを間引くために使う（bootcache.h）
+struct dir_entry { std::string name; unsigned long long mtime; };
+
+inline std::vector<dir_entry> list_dir(const std::string &dir)
+{
+	std::vector<dir_entry> out;
+	if (dir.empty())
+		return out;
+#if defined(_WIN32)
+	WIN32_FIND_DATAA fd{};
+	const HANDLE h = FindFirstFileA((dir + "\\*").c_str(), &fd);
+	if (h == INVALID_HANDLE_VALUE)
+		return out;
+	do {
+		if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+			continue;
+		const unsigned long long t =
+			((unsigned long long)(fd.ftLastWriteTime.dwHighDateTime) << 32) |
+			fd.ftLastWriteTime.dwLowDateTime;
+		out.push_back({ fd.cFileName, t });
+	} while (FindNextFileA(h, &fd));
+	FindClose(h);
+#else
+	DIR *d = ::opendir(dir.c_str());
+	if (!d)
+		return out;
+	while (const struct dirent *e = ::readdir(d)) {
+		const std::string name = e->d_name;
+		if (name == "." || name == "..")
+			continue;
+		struct stat st{};
+		if (::stat((dir + "/" + name).c_str(), &st) != 0 || !S_ISREG(st.st_mode))
+			continue;
+		out.push_back({ name, (unsigned long long)st.st_mtime });
+	}
+	::closedir(d);
+#endif
+	return out;
 }
 
 // One directory level, no parents. Already existing counts as success

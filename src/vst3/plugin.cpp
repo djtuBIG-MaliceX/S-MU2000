@@ -112,15 +112,16 @@ constexpr int32 kMidiParams = kChannels * kCtrlCount;
 constexpr ParamID kGainId   = 4096;
 constexpr ParamID kStatusId = 4097;
 
-// MIDI IN B（パート 17-32）のぶん。A の 0-2095 と Output / Status の番号は
-// 保存した曲が覚えているので動かさず、B は離れた 8192 番から並べる
-constexpr int32   kPorts      = 2;
-constexpr ParamID kPortBBase  = 8192;
+// MIDI IN B-D（パート 17-64）のぶん。A の 0-2095 と Output / Status の番号は
+// **保存した曲が覚えているので動かさない**。B 以降は離れた所から 8192 刻みで並べる。
+// C・D は実機では USB だけの口
+constexpr int32   kPorts      = mu2000::MIDI_PORTS;
+constexpr ParamID kPortBase[4] = { 0, 8192, 16384, 24576 };
 constexpr int32   kParamCount = kPorts * kMidiParams + 2;
 
 ParamID param_of(int32 port, int32 ch, int32 ctrl)
 {
-	return ParamID((port ? kPortBBase : 0) + ch * kCtrlCount + ctrl);
+	return ParamID(kPortBase[port & 3] + ch * kCtrlCount + ctrl);
 }
 
 // パラメータ番号を、口・チャンネル・番号と m_value の位置に戻す。
@@ -128,15 +129,15 @@ ParamID param_of(int32 port, int32 ch, int32 ctrl)
 bool midi_param(ParamID id, int32 &port, int32 &ch, int32 &ctrl, int32 &slot)
 {
 	int32 x = 0;
-	if (id < ParamID(kMidiParams)) {
-		port = 0;
-		x = int32(id);
-	} else if (id >= kPortBBase && id < kPortBBase + ParamID(kMidiParams)) {
-		port = 1;
-		x = int32(id - kPortBBase);
-	} else {
+	port = -1;
+	for (int32 p = 0; p < kPorts; p++)
+		if (id >= kPortBase[p] && id < kPortBase[p] + ParamID(kMidiParams)) {
+			port = p;
+			x = int32(id - kPortBase[p]);
+			break;
+		}
+	if (port < 0)
 		return false;
-	}
 	ch   = x / kCtrlCount;
 	ctrl = x % kCtrlCount;
 	slot = port * kMidiParams + x;
@@ -282,8 +283,11 @@ public:
 			bus.mediaType    = kEvent;
 			bus.direction    = kInput;
 			bus.channelCount = 16;
-			// 実機の MIDI IN A / B。B はパート 17-32 に届く
-			set_str(bus.name, index == 0 ? "MIDI In A (Part 1-16)" : "MIDI In B (Part 17-32)");
+			// 実機の MIDI IN A-D。B はパート 17-32、C は 33-48、D は 49-64 に届く。
+			// C・D は実機では USB だけの口
+			static const char *NAMES[4] = { "MIDI In A (Part 1-16)", "MIDI In B (Part 17-32)",
+			                                "MIDI In C (Part 33-48)", "MIDI In D (Part 49-64)" };
+			set_str(bus.name, NAMES[index]);
 			bus.busType = index == 0 ? kMain : kAux;
 			bus.flags   = BusInfo::kDefaultActive;
 			return kResultOk;
@@ -463,8 +467,8 @@ public:
 	{
 		if (index < 0 || index >= kParamCount)
 			return kInvalidArgument;
-		// 並びは A の 2096 本、Output、Status、B の 2096 本。
-		// 前からあるものの位置を変えないよう、B は後ろに足した
+		// 並びは A の 2096 本、Output、Status、B・C・D の 2096 本ずつ。
+		// 前からあるものの位置を変えないよう、B 以降は後ろに足した
 		if (index == kMidiParams || index == kMidiParams + 1) {
 			std::memset(&info, 0, sizeof(info));
 			if (index == kMidiParams) {
@@ -483,12 +487,14 @@ public:
 			}
 			return kResultOk;
 		}
-		const int32 port = index < kMidiParams ? 0 : 1;
-		const int32 x = port ? index - kMidiParams - 2 : index;
+		const int32 after = index - kMidiParams - 2;      // Output / Status の後ろ
+		const int32 port = index < kMidiParams ? 0 : 1 + after / kMidiParams;
+		const int32 x = port ? after % kMidiParams : index;
 		const int32 ch = x / kCtrlCount, ctrl = x % kCtrlCount;
 
-		// B の口は頭に "B " を付ける（A は前からの名前のまま）
-		const char *pre = port ? "B " : "";
+		// B 以降は頭に口の字を付ける（A は前からの名前のまま）
+		static const char *PRE[4] = { "", "B ", "C ", "D " };
+		const char *pre = PRE[port & 3];
 		char name[64];
 		if (ctrl < 128)      std::snprintf(name, sizeof(name), "%sCh%d CC%d", pre, ch + 1, ctrl);
 		else if (ctrl == 128) std::snprintf(name, sizeof(name), "%sCh%d Aftertouch", pre, ch + 1);
@@ -652,7 +658,7 @@ private:
 	float                 m_gain_now = 1.0f;
 	std::atomic<bool>     m_hush{false};
 	// 音を出したチャンネル（口ごとに 16 ビット）。止めるときに流す先を絞る
-	std::atomic<uint16>   m_sounded[2] = {};
+	std::atomic<uint16>   m_sounded[kPorts] = {};
 	// 間に合っているかの記録。音声スレッドだけが触る
 	uint64                m_busy_ticks = 0, m_produced = 0, m_worst_ticks = 0, m_late = 0;
 	int64                 m_qpc_freq = 1;
@@ -676,12 +682,17 @@ tresult PLUGIN_API mu_plugin::process(ProcessData &data)
 
 	const uint64 t0 = perf_ticks();
 
-	// ホストが止めたときは、鳴らしたチャンネルだけを黙らせる。全 32 チャンネルへ流すと
-	// 192 バイト＝61ms ぶんの直列になり、次に再生した最初の音がそのぶん遅れる（issue #15）
+	// ホストが止めたときは、鳴らしたチャンネルだけを黙らせる。全チャンネルへ流すと
+	// 1 口につき 192 バイト＝61ms ぶんの直列になり、次に再生した最初の音がそのぶん遅れる（issue #15）
 	if (m_hush.exchange(false)) {
-		const uint16 a = m_sounded[0].exchange(0), b = m_sounded[1].exchange(0);
-		if (a || b)
-			m_engine.all_notes_off(a, b);
+		uint16 mask[kPorts];
+		bool any = false;
+		for (int32 p = 0; p < kPorts; p++) {
+			mask[p] = m_sounded[p].exchange(0);
+			any = any || mask[p];
+		}
+		if (any)
+			m_engine.all_notes_off(mask, kPorts);
 	}
 
 	// ---- まず、この区間に来た MIDI を全部集める
@@ -742,7 +753,7 @@ tresult PLUGIN_API mu_plugin::process(ProcessData &data)
 			if (events->getEvent(i, e) != kResultOk)
 				continue;
 			const int32 off = e.sampleOffset;
-			const int32 port = e.busIndex == 1 ? 1 : 0;
+			const int32 port = (e.busIndex >= 0 && e.busIndex < kPorts) ? e.busIndex : 0;
 			switch (e.type) {
 			case Event::kNoteOnEvent: {
 				const int v = std::clamp(int(std::lround(e.noteOn.velocity * 127.0)), 1, 127);

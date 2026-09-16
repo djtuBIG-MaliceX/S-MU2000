@@ -19,6 +19,10 @@
 
 #include <string>
 
+// PC で触る窓（一覧・エディタ）に渡すもの。型の中身はここでは要らない
+namespace xg { class model; }
+namespace ui { class bridge; struct xg_snapshot; }
+
 namespace smu2000 {
 namespace vst3 {
 
@@ -69,6 +73,12 @@ public:
 
 	// Say something went wrong (the panel has nowhere to put it)
 	virtual void alert(const std::string &text) = 0;
+
+	// PC で触る窓（一覧・エディタ・インサーション・パートの音色）を 1 コマ描く。
+	// gui.exe と同じ ui::pc_window で、パネルの右クリックから開く。
+	// **中身を持つのは Windows だけ**（macOS の窓はまだ）。
+	// 画面の糸から、パネルを描き直すのと同じ周期で呼ばれる
+	virtual void pc_frame(::xg::model &, const ::ui::xg_snapshot &, ::ui::bridge &) {}
 };
 
 // The platform type string this build answers to: kPlatformTypeHWND on

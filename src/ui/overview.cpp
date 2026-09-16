@@ -22,7 +22,7 @@ using namespace xgui;
 
 namespace {
 
-constexpr int PARTS = 32;
+constexpr int PARTS = XG_PARTS;   // 口 A-D の 64 パート
 
 enum class src { param, exp, mod, bend, hold, vib, filter, eq, eg, ins };
 
@@ -34,11 +34,11 @@ ImU32 col(ImGuiCol c, float a = 1.0f) { return ImGui::GetColorU32(c, a); }
 // 押さえている鍵の色。VEL メーターと同じ
 const ImU32 NOTE_ON = IM_COL32(236, 116, 70, 255);
 
-// マスターの鍵盤でのパートの色。32 色を色相で振る（隣のパートが似ないよう 7 つ飛ばし）
+// マスターの鍵盤でのパートの色。パートの数だけ色相で振る（隣のパートが似ないよう 7 つ飛ばし）
 ImU32 part_color(int part)
 {
 	float r, g, b;
-	ImGui::ColorConvertHSVtoRGB(float((part * 7) % 32) / 32.0f, 0.75f, 1.0f, r, g, b);
+	ImGui::ColorConvertHSVtoRGB(float((part * 7) % PARTS) / float(PARTS), 0.75f, 1.0f, r, g, b);
 	return IM_COL32(int(r * 255), int(g * 255), int(b * 255), 255);
 }
 
@@ -329,7 +329,7 @@ constexpr const char *DRAG_FX = "S_MU2000_FX";
 int fx_target(const fx_slot &f, xg::model &m)
 {
 	int who = 127, conn = 1;
-	if (!m.get(P(f.part_key), 0, who) || who >= 32)
+	if (!m.get(P(f.part_key), 0, who) || who >= PARTS + 2)
 		return -1;
 	if (f.id == 5 && (!m.get(P("variation.connect"), 0, conn) || conn != 0))
 		return -1;                               // SYSTEM のバリエーションはパートに掛からない
@@ -1029,7 +1029,7 @@ void overview::row(int part, xg::model &m, const xg_snapshot &ram, bridge &br, f
 	m.get(P("part.rcv_channel"), part, rcv);
 	if (m_saved_rcv[part] >= 0)
 		rcv = m_saved_rcv[part];
-	const int slot = rcv >= 0 && rcv < 32 ? rcv : -1;
+	const int slot = rcv >= 0 && rcv < PARTS ? rcv : -1;
 
 	// ---- VEL メーター
 	ImGui::TableNextColumn();
@@ -1069,8 +1069,7 @@ void overview::row(int part, xg::model &m, const xg_snapshot &ram, bridge &br, f
 		const int want = down ? key_at(pos, w, h, ImGui::GetIO().MousePos, vel) : -1;
 		if (want != m_playing[part]) {
 			auto send = [&](const u8 msg[3]) {
-				if (m_playing_slot[part] >= 16) br.send_b(msg, 3);
-				else                            br.send(msg, 3);
+				br.send_port(m_playing_slot[part] / 16, msg, 3);
 			};
 			if (m_playing[part] >= 0) {
 				const u8 off[3] = { u8(0x80 | (m_playing_slot[part] & 15)), u8(m_playing[part]), 64 };
@@ -1118,15 +1117,20 @@ void part_menu(const char *key, xg::model &m, bridge &br, bool with_off)
 {
 	int cur = 127;
 	m.get(P(key), 0, cur);
-	for (int port = 0; port < 2; port++) {
-		if (!ImGui::BeginMenu(port == 0 ? "A1-A16" : "B1-B16"))
+	static const char *PORT_MENU[4] = { "A1-A16", "B1-B16", "C1-C16", "D1-D16" };
+	for (int port = 0; port < PARTS / 16; port++) {
+		if (!ImGui::BeginMenu(PORT_MENU[port]))
 			continue;
 		for (int i = port * 16; i < port * 16 + 16; i++)
 			if (ImGui::MenuItem(part_name(i).c_str(), nullptr, cur == i))
 				br.send(m.set(P(key), 0, i));
 		ImGui::EndMenu();
 	}
-	if (with_off && ImGui::MenuItem("OFF（どのパートにも掛けない）", nullptr, cur >= 32))
+	// 64 パートの後ろに A/D INPUT が 2 つ並ぶ（実機で確かめた）
+	for (int i = PARTS; i < PARTS + 2; i++)
+		if (ImGui::MenuItem(part_name(i).c_str(), nullptr, cur == i))
+			br.send(m.set(P(key), 0, i));
+	if (with_off && ImGui::MenuItem("OFF（どのパートにも掛けない）", nullptr, cur >= PARTS + 2))
 		br.send(m.set(P(key), 0, 127));
 }
 
@@ -1176,7 +1180,7 @@ void overview::system_fx_cell(const char *title, const std::vector<xg::fx_type> 
 	bool dim = false;
 	if (variation && m.get(P("variation.connect"), 0, conn) && conn == 0) {
 		m.get(P("variation.part"), 0, vpart);
-		name += vpart < 32 ? " → " + part_name(vpart) : " → OFF";
+		name += vpart < PARTS + 2 ? " → " + part_name(vpart) : " → OFF";
 		dim = false;
 	}
 	dl->PushClipRect(pos, ImVec2(pos.x + w, pos.y + line), true);
@@ -1321,7 +1325,7 @@ void overview::master_pane(xg::model &m, const xg_snapshot &ram, bridge &br)
 		int slots[PARTS];
 		for (int p = 0; p < PARTS; p++) {
 			int rcv = 127;
-			slots[p] = m.get(P("part.rcv_channel"), p, rcv) && rcv < 32 ? rcv : -1;
+			slots[p] = m.get(P("part.rcv_channel"), p, rcv) && rcv < PARTS ? rcv : -1;
 		}
 		draw_keys(dl, pos, w, h, [&](int note) -> ImU32 {
 			int r = 0, g = 0, b = 0, n = 0;
@@ -1349,8 +1353,7 @@ void overview::release_keys(bridge &br)
 		if (m_playing[part] < 0)
 			continue;
 		const u8 off[3] = { u8(0x80 | (m_playing_slot[part] & 15)), u8(m_playing[part]), 64 };
-		if (m_playing_slot[part] >= 16) br.send_b(off, 3);
-		else                            br.send(off, 3);
+		br.send_port(m_playing_slot[part] / 16, off, 3);
 		m_playing[part] = -1;
 	}
 }
@@ -1399,11 +1402,10 @@ void overview::apply_mutes(xg::model &m, bridge &br)
 		const bool known = m.get(prcv, p, rcv);
 		if (m_saved_rcv[p] >= 0 && known && rcv != 127)
 			m_saved_rcv[p] = -1;                    // 曲などが受信チャンネルを書き換えた
-		if (want && m_saved_rcv[p] < 0 && known && rcv < 32) {
+		if (want && m_saved_rcv[p] < 0 && known && rcv < PARTS) {
 			// 鳴っている音を先に止める（受信を切るとノートオフも届かなくなるため）
 			const u8 off[3] = { u8(0xb0 | (rcv & 15)), 120, 0 };
-			if (rcv >= 16) br.send_b(off, 3);
-			else           br.send(off, 3);
+			br.send_port(rcv / 16, off, 3);
 			br.send(m.set(prcv, p, 127));
 			m_saved_rcv[p] = rcv;
 		} else if (!want && m_saved_rcv[p] >= 0) {

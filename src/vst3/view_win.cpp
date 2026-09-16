@@ -12,6 +12,11 @@
 #include "plug_window.h"
 #include "view.h"
 
+#include "ui/fx_editor.h"
+#include "ui/part_shapes.h"
+#include "ui/pc_editor.h"
+#include "ui/overview.h"
+#include "ui/pc_window.h"
 #include "ui/text.h"
 
 #include <windows.h>
@@ -94,14 +99,24 @@ public:
 	void set_size(int w, int h) override;
 	void card_menu(int x, int y) override;
 	void alert(const std::string &text) override;
+	void pc_frame(::xg::model &m, const ::ui::xg_snapshot &ram, ::ui::bridge &br) override;
 
 private:
 	static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
 	LRESULT handle(HWND h, UINT msg, WPARAM wp, LPARAM lp);
 	void card_command(UINT id);
+	void open_pc(ui::pc_window &w);
 
 	plug_view &m_owner;
 	HWND m_hwnd = nullptr;
+
+	// PC で触る窓。gui.exe と同じ中身（ui::overview など）を、同じ ui::pc_window に
+	// 載せる。**プラグインなので自分の窓を持つ**: ホストがくれた親の中には
+	// パネルしか入らない。閉じても消さずに隠すだけなので、開き直すと同じ姿で出る
+	ui::pc_window m_list{ std::make_unique<ui::overview>() };
+	ui::pc_window m_editor{ std::make_unique<ui::pc_editor>() };
+	ui::pc_window m_fx{ std::make_unique<ui::fx_editor>() };
+	ui::pc_window m_shapes{ std::make_unique<ui::part_shapes>() };
 };
 
 bool win_window::attach(void *parent, int w, int h)
@@ -150,7 +165,8 @@ LRESULT CALLBACK win_window::wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 
 namespace {
 
-enum : UINT { ID_CARD_NEW16 = 100, ID_CARD_NEW32, ID_CARD_NEW64, ID_CARD_NEW128, ID_CARD_OPEN = 110, ID_CARD_EJECT = 111 };
+enum : UINT { ID_CARD_NEW16 = 100, ID_CARD_NEW32, ID_CARD_NEW64, ID_CARD_NEW128, ID_CARD_OPEN = 110, ID_CARD_EJECT = 111,
+              ID_PC_LIST = 120, ID_PC_EDITOR = 121 };
 
 void add_item(HMENU m, UINT flags, UINT_PTR id, const char *utf8)
 {
@@ -210,6 +226,9 @@ void win_window::card_menu(int x, int y)
 	if (!path.empty())
 		eject += "（" + path.substr(path.find_last_of("\\/") + 1) + "）";
 	add_item(m, MF_STRING | (path.empty() ? MF_GRAYED : 0), ID_CARD_EJECT, eject.c_str());
+	AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+	add_item(m, MF_STRING, ID_PC_LIST, "一覧を開く");
+	add_item(m, MF_STRING, ID_PC_EDITOR, "エディタを開く");
 	POINT pt{ x, y };
 	ClientToScreen(m_hwnd, &pt);
 	TrackPopupMenu(m, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON, pt.x, pt.y, 0, m_hwnd, nullptr);
@@ -228,7 +247,33 @@ void win_window::card_command(UINT id)
 			m_owner.card_insert_path(path);
 	} else if (id == ID_CARD_EJECT) {
 		m_owner.card_eject();
+	} else if (id == ID_PC_LIST) {
+		open_pc(m_list);
+	} else if (id == ID_PC_EDITOR) {
+		open_pc(m_editor);
 	}
+}
+
+void win_window::open_pc(ui::pc_window &w)
+{
+	std::string err;
+	if (!w.show(this_module(), err))
+		alert(err.empty() ? std::string("窓を出せない") : err);
+}
+
+// パネルを描き直すのと同じ周期で呼ばれる。見えていない窓は何もしない
+void win_window::pc_frame(::xg::model &m, const ::ui::xg_snapshot &ram, ::ui::bridge &br)
+{
+	m_list.frame(m, ram, br);
+	m_editor.frame(m, ram, br);
+	m_fx.frame(m, ram, br);
+	m_shapes.frame(m, ram, br);
+	// 一覧でインサーションの欄をダブルクリックされたら設定の窓を、
+	// VIB・FILTER・EG・EQ の絵をダブルクリックされたらパートの音色の窓を出す
+	if (ui::xgui::take_fx_request())
+		open_pc(m_fx);
+	if (ui::xgui::take_part_request())
+		open_pc(m_shapes);
 }
 
 LRESULT win_window::handle(HWND h, UINT msg, WPARAM wp, LPARAM lp)
