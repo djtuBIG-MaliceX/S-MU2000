@@ -1,5 +1,5 @@
 # SMU2000_VST2 API targets — mirrors ../sw10_plug/SW10_PLUG/CMakeLists.txt.
-# Both GUI-OFF (default) and GUI-ON use the SAME graphics-free manual recipe (NO
+# Both GUI-OFF (opt-out) and GUI-ON (default since 2026-09-16) use the SAME graphics-free manual recipe (NO
 # iplug_configure_target, NO IGraphics): IPlugVST2/IPlugCLAP glue added by hand +
 # iPlug2::IPlug + NO_IGRAPHICS. GUI-ON (P7) just adds SMU2000_ENABLE_GUI (→ PLUG_HAS_UI 1)
 # and links smu2000_gui — the native Win32/GDI editor (ui::panel, port of src/vst3/view.cpp)
@@ -62,7 +62,7 @@ else()
 
     if(NOT SMU2000_ENABLE_GUI)
       # ------------------------------------------------------------------
-      # GUI-OFF (default) graphics-free VST2 — ledger §"Graphics-free plugin recipe".
+      # GUI-OFF (opt-out: -DSMU2000_ENABLE_GUI=OFF) graphics-free VST2 — ledger §"Graphics-free plugin recipe".
       # NOT iplug_configure_target/iPlug2::VST2: those force IPLUG_EDITOR=1 (VST2.cmake:53)
       # and pull IGraphics. We add ${IPLUG2_DIR}/IPlug/VST2/IPlugVST2.cpp by hand and link
       # iPlug2::IPlug (DSP core only). Defines: NO IPLUG_EDITOR (editor code compiles out),
@@ -148,7 +148,7 @@ else()
 
     if(NOT SMU2000_ENABLE_GUI)
       # ------------------------------------------------------------------
-      # GUI-OFF (default) graphics-free CLAP — same recipe as smu2000_vst2 above:
+      # GUI-OFF (opt-out) graphics-free CLAP — same recipe as smu2000_vst2 above:
       # NOT iplug_configure_target/iPlug2::CLAP (CLAP.cmake forces IPLUG_EDITOR=1 and
       # pulls IGraphics). Same API-agnostic plugin sources compiled with CLAP_API;
       # IPlug_include_in_plug_src.h picks the CLAP entry (clap_entry, CLAP_EXPORT).

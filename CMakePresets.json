@@ -15,14 +15,14 @@
     {
       "name": "vs-x64",
       "displayName": "VS 2026 x64",
-      "description": "VST2+CLAP, x64 (NanoVG/GL2, GUI off by default). SDKs via SMU2000_* cache vars / env.",
+      "description": "VST2+CLAP, x64 (NanoVG/GL2, GUI/GDI editor on by default). SDKs via SMU2000_* cache vars / env.",
       "inherits": "base",
       "architecture": { "value": "x64", "strategy": "set" }
     },
     {
       "name": "vs-win32",
       "displayName": "VS 2026 Win32",
-      "description": "VST2+CLAP, Win32 (NanoVG/GL2, GUI off by default). SDKs via SMU2000_* cache vars / env.",
+      "description": "VST2+CLAP, Win32 (NanoVG/GL2, GUI/GDI editor on by default). SDKs via SMU2000_* cache vars / env.",
       "inherits": "base",
       "architecture": { "value": "Win32", "strategy": "set" }
     },

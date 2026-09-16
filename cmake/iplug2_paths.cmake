@@ -193,7 +193,7 @@ else()
 endif()
 
 # ---------------------------------------------------------------------------
-# Prebuilt graphics deps (Skia/Freetype) — backend stays NANOVG (GUI default OFF),
+# Prebuilt graphics deps (Skia/Freetype) — backend stays NANOVG (both GUI states graphics-free),
 # so a missing download tree is a WARNING here, never FATAL.
 # ---------------------------------------------------------------------------
 set(SMU2000_DEPS_WIN_DIR "${IPLUG2_DIR}/Dependencies/Build/win" CACHE PATH

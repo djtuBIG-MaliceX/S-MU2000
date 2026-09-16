@@ -151,7 +151,8 @@ Verified against the pinned iPlug2 CMake (`Scripts/cmake/`):
 - **`iPlug2::IPlug` (the DSP core) does NOT define `IPLUG_EDITOR` and pulls NO IGraphics**
   (`IPlug.cmake:71-88`; it links only system libs Shlwapi/comctl32/wininet). Core sources
   (`IPlugAPIBase.cpp` etc.) are editor-free when `IPLUG_EDITOR` is unset.
-- ⇒ **GUI OFF (default) recipe:** build the plugin MODULE WITHOUT `iplug_configure_target`/
+- ⇒ **GUI OFF recipe** (GUI now defaults ON since 2026-09-16 — this is the `-DSMU2000_ENABLE_GUI=OFF`
+  opt-out path): build the plugin MODULE WITHOUT `iplug_configure_target`/
   `iPlug2::VST2`. Instead: `add_library(... MODULE)`; add the plugin sources **plus**
   `${IPLUG_DIR}/VST2/IPlugVST2.cpp` (CLAP: the CLAP glue is via `IPlug_include_in_plug_src.h`
   with `CLAP_API` + CLAP SDK/HELPERS includes); include `${IPLUG_DIR}/VST2` + the VST2 SDK stub
@@ -161,7 +162,7 @@ Verified against the pinned iPlug2 CMake (`Scripts/cmake/`):
   the plugin `.h` includes only `IPlug_include_in_plug_hdr.h` (NOT `IControls.h`) and guards every
   editor member under `#if IPLUG_EDITOR`. `PLUG_HAS_UI 0`. Verify with `dumpbin /DEPENDENTS` → no
   opengl32/nanovg/skia/IGraphics imports.
-- **GUI ON (P7 — native, still graphics-free):** the SAME manual recipe as GUI OFF (add
+- **GUI ON (P7 — native, still graphics-free; default since 2026-09-16):** the SAME manual recipe as GUI OFF (add
   `IPlugVST2.cpp`/`IPlugCLAP.cpp` by hand, `iPlug2::IPlug`, keep `NO_IGRAPHICS`) PLUS
   `-DSMU2000_ENABLE_GUI` (→ `PLUG_HAS_UI 1`) + link `smu2000_gui` + `gdi32/comdlg32/user32`. NO
   `iplug_configure_target`, NO `${IGRAPHICS_LIB}`, NO `IPLUG_EDITOR`. `NO_IGRAPHICS` keeps
@@ -173,7 +174,9 @@ Verified against the pinned iPlug2 CMake (`Scripts/cmake/`):
 ---
 
 ## GUI toggle
-- `SMU2000_ENABLE_GUI` cache var (alias `-DENABLE_GUI=1`), **default OFF**. **Both states are
+- `SMU2000_ENABLE_GUI` cache var (alias `-DENABLE_GUI`), **default ON since 2026-09-16**
+  (`-DSMU2000_ENABLE_GUI=OFF` / `-DENABLE_GUI=OFF` opts out; pre-existing build caches keep their
+  old value — flip explicitly once). **Both states are
   graphics-free** (no IGraphics/NanoVG/OpenGL/Skia) — the GUI is the native Win32/GDI panel.
   - OFF → `PLUG_HAS_UI 0`; no editor sources; pure instrument plugin (VST2/CLAP load, MIDI-in,
     audio-out, state chunks). `/DEPENDENTS` = KERNEL32/USER32/api-ms.

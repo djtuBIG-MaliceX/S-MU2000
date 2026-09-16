@@ -15,6 +15,14 @@ endif()
 
 if(MSVC)
   set(SMU2000_TOOLCHAIN "msvc")
+  # Aggressive MSVC optimizer switches for EVERY config and every target defined
+  # afterwards (engine, plugin MODULEs, native tools; iPlug2's compiled targets too
+  # since this runs before find_package(iPlug2)): /Ob2 inline any suitable function,
+  # /Ot favor fast code, /GT fiber-safe Win32 TLS, /GL whole-program opt — /LTCG on
+  # the linker is what actually activates /GL at link time. Debug links trade
+  # incremental linking for these (linker drops /INCREMENTAL, warning LNK4075).
+  add_compile_options(/Ob2 /Ot /GT /GL)
+  add_link_options(/LTCG)
 elseif(MINGW)
   set(SMU2000_TOOLCHAIN "mingw")
 endif()
@@ -26,7 +34,9 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 # ---------------------------------------------------------------------------
 option(SMU2000_BUILD_VST2 "Build the VST2 plugin (smu2000_vst2)"   ON)
 option(SMU2000_BUILD_CLAP "Build the CLAP plugin (smu2000_clap)"   ON)
-option(SMU2000_ENABLE_GUI "Compile the native GDI editor (smu2000_gui; default OFF = graphics-free). ON is ALSO graphics-free: raw Win32/GDI panel, no IGraphics/NanoVG/GL/Skia." OFF)
+# GUI is ON by default now (2026-09-16); both states are graphics-free (native Win32/GDI
+# panel, no IGraphics/NanoVG/GL/Skia). Disable with -DSMU2000_ENABLE_GUI=OFF (or -DENABLE_GUI=OFF).
+option(SMU2000_ENABLE_GUI "Compile the native GDI editor (smu2000_gui; default ON; both ON/OFF are graphics-free: raw Win32/GDI panel, no IGraphics/NanoVG/GL/Skia). OFF removes the editor." ON)
 option(SMU2000_COPY_ROMS  "Post-build: copy the repo roms/ tree next to each binary (runtime requirement)" ON)
 # Native tool exes (Makefile render/live/gui). Desktop tools — imgui/D3D/WinMM allowed in
 # native/ only; the plugin targets above/below stay graphics-free (hard rule #6 unaffected).
@@ -45,7 +55,7 @@ include(cmake/iplug2_paths.cmake)
 # ---------------------------------------------------------------------------
 # iPlug2 consumption — include(iPlug2.cmake) + find_package(iPlug2) the way upstream
 # Examples do, instead of add_subdirectory(iPlug2) (which would pull in Examples/Tests).
-# Graphics: NanoVG/GL2 (upstream Windows default; GUI is OFF by default anyway).
+# Graphics: NanoVG/GL2 (upstream Windows default; unused either way — both GUI states are graphics-free).
 # ---------------------------------------------------------------------------
 set(IGRAPHICS_BACKEND "NANOVG" CACHE STRING "IGraphics drawing backend (NANOVG or SKIA)")
 set_property(CACHE IGRAPHICS_BACKEND PROPERTY STRINGS "NANOVG" "SKIA")
@@ -74,7 +84,8 @@ endif()
 # GUI toggle wiring (P4). Deliberately NOT a global add_compile_definitions: the
 # smu2000_engine target must never see SMU2000_ENABLE_GUI. SMU2000_VST2/CMakeLists.txt
 # adds it PRIVATE on the GUI-ON plugin targets only, where config.h turns it into
-# PLUG_HAS_UI 1. OFF (default) links no IGraphics/NanoVG/OpenGL/Skia (hard rule #6).
+# PLUG_HAS_UI 1. BOTH states (ON = default since 2026-09-16, and OFF) link no
+# IGraphics/NanoVG/OpenGL/Skia (hard rule #6).
 
 # ---------------------------------------------------------------------------
 # Output layout: build-cmake/<api>/<arch>/<Config>/
