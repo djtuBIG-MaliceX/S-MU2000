@@ -275,6 +275,24 @@ MinGW appends `-mingw`/`-mingw-clang`). Static `/MT` CRT everywhere.
   state-based, `pump_midi`/`wheel`/`out` drain-while, `publish`/`advance_clock` sum to nFrames) all
   verified safe across split `fill()` calls. No latency change: `engine::latency_samples()` is
   intentionally 0 (resampler synthesises lookahead). Rebuilt VST2+CLAP Win32+x64 clean (MSVC).
+- **P2-FIX2 (2026-09-16) — allocation-free MIDI queue (P2-FIX hot path was malloc-bound).** Dense
+  MIDI files stuttered: the parked event embedded a `std::vector` (`ProcessMidiMsg` malloc'd per
+  message, `push_back` grew the queue with elementwise vector moves) and `std::stable_sort` malloc'd
+  a scratch buffer **every block** even though hosts deliver offsets in order. Now: `midi_event` is
+  a 16-byte trivially-copyable POD `{offset, pos, len, port}` into an append-only byte arena
+  (`m_midi_bytes`); the ctor reserves once (queue 8192 + arena 64 KiB) and `clear()` keeps capacity
+  → zero mallocs in the steady state. No ring needed: offsets are block-relative and fully drained
+  every block. Hot path (`ProcessMidiMsg`/`ProcessSysEx`) is append-only; `ProcessBlock` does an
+  O(n) is-sorted scan (ordered hosts never sort) and only then falls back to `std::sort` — with the
+  arena `pos` (monotonic with arrival) as tie-break, output order is identical to the old
+  `stable_sort`. Rebuilt VST2+CLAP Win32+x64 clean (MSVC).
+  **HEAD-BREAK fixed on the way (pre-existing, not MIDI-related):** upstream `5901ea5` made
+  `src/vst3/engine.cpp:555` call `ui::xgui::set_voice_rom` unconditionally, but its definition
+  (`src/ui/xg_ui.cpp`) is imgui-only and excluded from plugin targets (rule #6) → plugin links
+  broke with LNK2001. Shim: `engine/xgui_plugin_stub.cpp` (no-op sink, in `smu2000_engine` ONLY —
+  Makefile/VST3/native keep the real `xg_ui.cpp`); the native GDI panel never reads the voice ROM.
+  If `xg_ui.h:44`'s signature ever changes, the plugin link fails on that mangled name — update
+  the stub too.
 
 ### Phase 3 — CLAP wrapper (`P3-clap-wrapper`, Wave 3b) — subagent (parallel with P2)
 - Reuse the **same** `SMU2000_VST2.{h,cpp}` plugin class + `smu2000_engine`. Add CLAP target in
@@ -529,7 +547,11 @@ this harness. No plugin/GUI/editor regression observed on any arch.
        `bootcache.bin` makes every later instantiation ~instant (0.93 s cold → 0.07 s warm,
        bit-identical audio, SCI rx + RAM verified round-trip). Knobs: `plugin.ini`/env
        `boot=async`·`SMU2000_SYNC_BOOT=0` (opt out), `bootcache=0`·`SMU2000_BOOT_CACHE=0`
-       (disable). Supersedes the P2 "engine boots async — poll state()" probe note.
+        (disable). Supersedes the P2 "engine boots async — poll state()" probe note.
+  - [x] MIDI queue perf — **DONE 2026-09-16** (P2-FIX2 above). POD event + byte arena + ctor
+        reserve + append-only hot path + sortedness check (no per-msg/per-block mallocs); also
+        fixed the LNK2001 HEAD-break from upstream `5901ea5` via `engine/xgui_plugin_stub.cpp`.
+        VST2+CLAP Win32+x64 rebuilt clean.
 
 ### Wave schedule — COMPLETE (P0–P7 green)
 
