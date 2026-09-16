@@ -638,6 +638,9 @@ private:
 	{
 		if (m_msgs.size() >= m_msgs.capacity())
 			return;
+		// 鳴らしたチャンネルを覚えておく。止めるときはここだけに流す（下の m_hush）
+		if ((a & 0xf0) == 0x90 && c)
+			m_sounded[port ? 1 : 0] |= uint16(1u << (a & 15));
 		m_msgs.push_back({ off, int32(m_msgs.size()), uint8(port), uint8(n), { a, b, c }, nullptr, 0 });
 	}
 
@@ -648,6 +651,8 @@ private:
 	// 出力レベルは bridge が持つ。ここは 1 サンプルずつ寄せる途中の値
 	float                 m_gain_now = 1.0f;
 	std::atomic<bool>     m_hush{false};
+	// 音を出したチャンネル（口ごとに 16 ビット）。止めるときに流す先を絞る
+	std::atomic<uint16>   m_sounded[2] = {};
 	// 間に合っているかの記録。音声スレッドだけが触る
 	uint64                m_busy_ticks = 0, m_produced = 0, m_worst_ticks = 0, m_late = 0;
 	int64                 m_qpc_freq = 1;
@@ -671,8 +676,13 @@ tresult PLUGIN_API mu_plugin::process(ProcessData &data)
 
 	const uint64 t0 = perf_ticks();
 
-	if (m_hush.exchange(false))
-		m_engine.all_notes_off();
+	// ホストが止めたときは、鳴らしたチャンネルだけを黙らせる。全 32 チャンネルへ流すと
+	// 192 バイト＝61ms ぶんの直列になり、次に再生した最初の音がそのぶん遅れる（issue #15）
+	if (m_hush.exchange(false)) {
+		const uint16 a = m_sounded[0].exchange(0), b = m_sounded[1].exchange(0);
+		if (a || b)
+			m_engine.all_notes_off(a, b);
+	}
 
 	// ---- まず、この区間に来た MIDI を全部集める
 

@@ -433,10 +433,13 @@ void engine::midi(const uint8_t *bytes, size_t n, int port)
 	pending.insert(pending.end(), bytes, bytes + n);
 }
 
-void engine::all_notes_off()
+void engine::all_notes_off(uint16_t mask_a, uint16_t mask_b)
 {
+	const uint16_t mask[2] = { mask_a, mask_b };
 	for (int port = 0; port < 2; port++)
 		for (int ch = 0; ch < 16; ch++) {
+			if (!((mask[port] >> ch) & 1))
+				continue;
 			const uint8_t msg[6] = { uint8_t(0xb0 | ch), 120, 0,
 			                         uint8_t(0xb0 | ch), 123, 0 };
 			midi(msg, sizeof(msg), port);

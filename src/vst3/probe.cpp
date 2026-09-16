@@ -650,6 +650,7 @@ int main(int argc, char **argv)
 	bool adc_sine = false;
 	bool one_bus = false;    // 比べる用。MIDI ファイルの口 B も A のバスへ流す
 	bool data_midi = false;  // VSTHost のまね。チャンネルメッセージも DataEvent で渡す
+	bool restart = false;    // DAW の「止めて再生」のまね（流す直前に setProcessing を切り入れする）
 	int  view_seconds = 0;
 	for (int i = 2; i < argc; i++) {
 		if (!std::strcmp(argv[i], "--rate") && i + 1 < argc) rate = std::atof(argv[++i]);
@@ -659,6 +660,7 @@ int main(int argc, char **argv)
 		else if (!std::strcmp(argv[i], "--adc-sine")) adc_sine = true;
 		else if (!std::strcmp(argv[i], "--one-bus")) one_bus = true;
 		else if (!std::strcmp(argv[i], "--data-midi")) data_midi = true;
+		else if (!std::strcmp(argv[i], "--restart")) restart = true;
 		else if (!std::strcmp(argv[i], "--view")) view_seconds =
 		    (i + 1 < argc && argv[i + 1][0] != '-') ? std::atoi(argv[++i]) : 20;
 		else if (mid.empty()) mid = argv[i];
@@ -890,6 +892,13 @@ int main(int argc, char **argv)
 			break;
 	}
 	std::printf(" %ld ms\n", long(now_ms() - t_wait));
+
+	// DAW で止めて再生し直したときと同じ状態にしてから流す
+	if (restart) {
+		proc->setProcessing(false);
+		proc->setProcessing(true);
+		std::printf("止めて再生し直した状態から流す\n");
+	}
 
 	const int64_t total = int64_t((length + extra) * rate);
 	std::vector<int16_t> pcm;

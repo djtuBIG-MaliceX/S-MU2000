@@ -79,8 +79,10 @@ public:
 	// 起動が終わっていない間は溜めておいて、終わってから流す。
 	// port は 0 が MIDI IN A（パート 1-16）、1 が MIDI IN B（パート 17-32）
 	void midi(const uint8_t *bytes, size_t n, int port = 0);
-	// 両方の口の全チャンネルにオールノートオフ + リセットオールコントローラ
-	void all_notes_off();
+	// オールサウンドオフ + オールノートオフを流す。mask は口ごとのチャンネルのビット
+	// （bit 0 が 1ch）。全チャンネルに流すと 192 バイト＝31250bps で 61ms かかり、
+	// そのあとに続く音が丸ごと遅れるので、鳴らした覚えのあるチャンネルだけに絞る
+	void all_notes_off(uint16_t mask_a = 0xffff, uint16_t mask_b = 0xffff);
 
 	// n サンプルぶん作る。左右は別々の配列（VST3 はそういう渡し方をする）。
 	// in_l / in_r はホストの周波数で n サンプルぶんの A/D INPUT（無ければ nullptr）

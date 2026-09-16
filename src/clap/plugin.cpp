@@ -361,6 +361,8 @@ private:
 	// 出力レベルは bridge が持つ。ここは 1 サンプルずつ寄せる途中の値
 	float                  m_gain_now = 1.0f;
 	std::atomic<bool>      m_hush{false};
+	// 音を出したチャンネル（口ごとに 16 ビット）。止めるときに流す先を絞る
+	std::atomic<uint16_t>  m_sounded[2] = {};
 
 	// 音を作る途中の入れ物。process の間だけ有効
 	float       *m_left = nullptr, *m_right = nullptr;
@@ -525,8 +527,13 @@ clap_process_status mu_plugin::process(const clap_process_t *pr)
 	m_in_r = (in && in->data32 && in->channel_count > 1) ? in->data32[1] : m_in_l;
 	m_done = 0;
 
-	if (m_hush.exchange(false))
-		m_engine.all_notes_off();
+	// 止められたときは、鳴らしたチャンネルだけを黙らせる。全 32 チャンネルへ流すと
+	// 192 バイト＝61ms ぶんの直列になり、次の最初の音がそのぶん遅れる（issue #15）
+	if (m_hush.exchange(false)) {
+		const uint16_t a = m_sounded[0].exchange(0), b = m_sounded[1].exchange(0);
+		if (a || b)
+			m_engine.all_notes_off(a, b);
+	}
 
 	// イベントは時刻順に来る。その時刻まで音を作ってから流す
 	if (const clap_input_events_t *ev = pr->in_events) {
@@ -569,7 +576,10 @@ void mu_plugin::event(const clap_event_header_t *h)
 	switch (h->type) {
 	case CLAP_EVENT_MIDI: {
 		const auto *e = reinterpret_cast<const clap_event_midi_t *>(h);
-		m_engine.midi(e->data, size_t(midi_length(e->data[0])), e->port_index == 1 ? 1 : 0);
+		const int port = e->port_index == 1 ? 1 : 0;
+		if ((e->data[0] & 0xf0) == 0x90 && e->data[2])
+			m_sounded[port] |= uint16_t(1u << (e->data[0] & 15));
+		m_engine.midi(e->data, size_t(midi_length(e->data[0])), port);
 		break;
 	}
 	case CLAP_EVENT_MIDI_SYSEX: {
@@ -589,7 +599,10 @@ void mu_plugin::event(const clap_event_header_t *h)
 		int v = int(std::lround(e->velocity * 127.0));
 		v = on ? std::clamp(v, 1, 127) : std::clamp(v, 0, 127);
 		const uint8_t msg[3] = { uint8_t((on ? 0x90 : 0x80) | e->channel), uint8_t(e->key), uint8_t(v) };
-		m_engine.midi(msg, 3, e->port_index == 1 ? 1 : 0);
+		const int port = e->port_index == 1 ? 1 : 0;
+		if (on && v)
+			m_sounded[port] |= uint16_t(1u << (e->channel & 15));
+		m_engine.midi(msg, 3, port);
 		break;
 	}
 	default:
