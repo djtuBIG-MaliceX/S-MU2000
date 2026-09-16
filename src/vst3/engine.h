@@ -63,8 +63,12 @@ public:
 	engine();
 	~engine();
 
-	// ROM を探して読み、起動するまでを別スレッドで進める。すぐ返る
-	void start();
+	// ROM を探して読み、起動するまでを別スレッドで進める。すぐ返る。
+	// block をたてると呼んだスレッドのまま起動を済ませる（返るころには
+	// state() が ready か failed）。DAW は音作りを待ってくれないので、
+	// プラグインは構築の場で起動を終えておき、曲頭から音を鳴らせるようにする。
+	// plugin.ini の boot=async か SMU2000_SYNC_BOOT=0 で裏スレッドに戻せる
+	void start(bool block = false);
 
 	status state() const { return m_state.load(std::memory_order_acquire); }
 	// state() が failed のときの理由。ready でも「代用品を使った」等が入る
@@ -129,7 +133,9 @@ private:
 	mutable std::mutex m_card_mutex;        // m_card_path を守る
 	std::string m_card_path;
 
-	void boot();
+	// sync は「呼んだスレッドで起動している」印。記録に残すだけ
+	// （false なら裏スレッド）。起動の途中に m_abort が入ったら途中でやめる
+	void boot(bool sync);
 	void apply_deferred_state();   // 起動前に来た状態を戻す（m_machine を持って呼ぶ）
 	void one_sample(float &l, float &r);
 	void build_table();

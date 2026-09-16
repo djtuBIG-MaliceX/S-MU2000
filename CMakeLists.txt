@@ -28,6 +28,9 @@ option(SMU2000_BUILD_VST2 "Build the VST2 plugin (smu2000_vst2)"   ON)
 option(SMU2000_BUILD_CLAP "Build the CLAP plugin (smu2000_clap)"   ON)
 option(SMU2000_ENABLE_GUI "Compile the native GDI editor (smu2000_gui; default OFF = graphics-free). ON is ALSO graphics-free: raw Win32/GDI panel, no IGraphics/NanoVG/GL/Skia." OFF)
 option(SMU2000_COPY_ROMS  "Post-build: copy the repo roms/ tree next to each binary (runtime requirement)" ON)
+# Native tool exes (Makefile render/live/gui). Desktop tools — imgui/D3D/WinMM allowed in
+# native/ only; the plugin targets above/below stay graphics-free (hard rule #6 unaffected).
+option(SMU2000_BUILD_TOOLS "Build native tool exes (gui, live, render)" ON)
 
 # Alias: -DENABLE_GUI=ON maps to SMU2000_ENABLE_GUI (ledger GUI toggle contract).
 if(DEFINED ENABLE_GUI)
@@ -96,9 +99,13 @@ set(SMU2000_OUTPUT_ROOT "${CMAKE_SOURCE_DIR}/build-cmake" CACHE PATH
 
 add_subdirectory(engine)
 add_subdirectory(SMU2000_VST2)
+if(SMU2000_BUILD_TOOLS)
+  add_subdirectory(native)   # render/live/gui exes (native/CMakeLists.txt; Makefile mirror)
+endif()
 
 message(STATUS "SMU2000_VST2 configure summary:")
 message(STATUS "  toolchain=${SMU2000_TOOLCHAIN}  arch=${SMU2000_ARCH}  graphics=${IGRAPHICS_BACKEND}/${IGRAPHICS_RENDERER}  gui=${SMU2000_ENABLE_GUI}")
 message(STATUS "  vst2=${SMU2000_BUILD_VST2} (sdk=${SMU2000_VST2_SUPPORTED}) clap=${SMU2000_BUILD_CLAP} (sdk=${SMU2000_CLAP_SUPPORTED}) (no app, no vst3)")
 message(STATUS "  roms=${SMU2000_ROMS_DIR} (copy=${SMU2000_COPY_ROMS})")
+message(STATUS "  tools=${SMU2000_BUILD_TOOLS} (render/live/gui exes -> ${SMU2000_OUTPUT_ROOT}/tools/${SMU2000_ARCH}/<Config>/)")
 message(STATUS "  outputs -> ${SMU2000_OUTPUT_ROOT}/<api>/${SMU2000_ARCH}/<Config>/")

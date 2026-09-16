@@ -67,9 +67,14 @@ cmake --preset vs-x64    ; cmake --build --preset vs-x64-release
 # GUI toggle (both states graphics-free; ON = native GDI panel editor, no NanoVG/GL/Skia)
 cmake --preset vs-win32 -DSMU2000_ENABLE_GUI=ON      # alias -DENABLE_GUI=1
 # CI-equivalent (SDK dirs from env VST2_SDK_DIR, no ROM): ci-win32 / ci-win64
+# Native tool exes (render/live/gui; imgui/D3D allowed there, NEVER in plugin targets):
+# ON by default in every preset; vs-x64-tools / vs-win32-tools presets keep own build dirs.
+# Opt out: -DSMU2000_BUILD_TOOLS=OFF
 ```
 Outputs: `build-cmake/<api>/<arch>/<Config>/SMU2000_VST2.{dll,clap}` (`<api>`=vst2|clap,
-`<arch>`=Win32|x64; MinGW appends `-mingw[-clang]`). Static `/MT` CRT everywhere.
+`<arch>`=Win32|x64; MinGW appends `-mingw[-clang]`). Tools:
+`build-cmake/tools/<arch>/<Config>/smu2000_{render,live,gui}.exe` (exe target is
+`smu2000_gui_app`; renamed vs the GUI-ON plugin's `smu2000_gui` static lib). Static `/MT` CRT everywhere.
 
 Legacy native exes (unchanged, MSYS2 g++): `make`, `make test`, `make vst3`.
 
@@ -82,8 +87,12 @@ Legacy native exes (unchanged, MSYS2 g++): `make`, `make test`, `make vst3`.
   `__x86_64__ || _M_X64` (x64 — **MSVC x64 now gets the JIT too**) and `__i386__ || _M_IX86`
   (x86-32) in `sh2_jit.cpp`/`swp30_jit.cpp`; 32-bit builds self-define `SMU_JIT32_PORT_SH2`/
   `SMU_JIT32_PORT_MEG` (opt out: `SMU_JIT32_NO_SH2`/`SMU_JIT32_NO_MEG`) → **Win32 JIT default-ON**,
-  bit-exact vs interpreter. Runtime kill-switches: `SMU2000_{MEG,SH2}_JIT=0`, `SMU2000_MEG_BAKE=0`,
-  `SMU2000_MEG_EARLY=0`. Native win32 tool harness = `tools/msvc32_build.ps1` (MSVC `amd64_x86`);
+   bit-exact vs interpreter. Runtime kill-switches: `SMU2000_{MEG,SH2}_JIT=0`, `SMU2000_MEG_BAKE=0`,
+   `SMU2000_MEG_EARLY=0`. Boot knobs (plugin ctor; `plugin.ini` line or env, env wins):
+   `boot=async` / `SMU2000_SYNC_BOOT=0` → background boot (song head goes silent — old
+   behavior; default is synchronous ctor boot), `bootcache=0` / `SMU2000_BOOT_CACHE=0` →
+   disable the `<config_dir>\bootcache.bin` post-boot snapshot (see ledger §Boot gating).
+   Native win32 tool harness = `tools/msvc32_build.ps1` (MSVC `amd64_x86`);
   `tools/x64asm32_test.cpp` = the 32-bit encoding gate. **On THIS box the MinGW-w64 Win32 toolchain
   is broken (cc1plus loads and silently no-ops) — use the `vs-win32` preset and NEVER attempt
   mingw32 repairs or any write under `C:\msys64`.**

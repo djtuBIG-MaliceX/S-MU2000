@@ -253,8 +253,10 @@ MinGW appends `-mingw`/`-mingw-clang`). Static `/MT` CRT everywhere.
   return 0, effGetChunk(23)/effSetChunk(24) round-trip 6,096,753-byte chunk, processReplacing OK.
   GOTCHA for probes: this SDK's aeffect.h has NO `index` field — effOpen=0/effClose=1,
   effGetChunk=23/effSetChunk=24 (calling the 34/35 slots = effGetVendorString writes 64 bytes
-  through your `void**` — instant AV). Engine boots async (~2-4 s with staged ROMs); poll
-   `state()==ready` before chunk/audio calls. Sound-out unverifiable: no DAW/host installed.
+  through your `void**` — instant AV).    Engine boots async (~2-4 s with staged ROMs); poll
+   `state()==ready` before chunk/audio calls. *(SUPERSEDED 2026-09-16: boot is now SYNCHRONOUS
+   in the plug-in ctor — state is ready/failed when the ctor returns; see §Boot gating.)*
+   Sound-out unverifiable: no DAW/host installed.
 - **P2-FIX (2026-09-16) — sample-accurate MIDI (was block-boundary quantised).** The original
   `ProcessMidiMsg` → `m_engine->midi(bytes, n, 0)` applied *every* event in a block at its start
   (the `0` is the engine **port**, not a time). `m_engine->midi()` has no time arg — it just
@@ -380,6 +382,83 @@ MinGW appends `-mingw`/`-mingw-clang`). Static `/MT` CRT everywhere.
     AEffect on x64: `dispatcher@8`, `uniqueID@112` (`'SMU2'`). MinGW x64 GUI-ON not re-run here
     (needs MSYS2 shell); the `smu2000_gui` lib reuses the engine's already-MinGW-proven flags.
 
+---
+
+## Boot gating + snapshot cache (2026-09-16) — sync boot so the song head isn't eaten
+
+**Problem.** The engine booted the MU2000 firmware on a BACKGROUND thread
+(`engine::start()` → `boot()` spins `run_sample()` until `midi_ready()`, 6.6 s of samples
+— 2-5 s wall interpreter-era, ~0.9 s wall here with the JIT). The host cannot pause a
+plug-in's timeline, so it streamed
+immediately: `fill()` emitted silence and `midi()` queued bytes while the firmware came
+up. Net effect = the first few seconds of every song are silent and the song-head MIDI
+(program changes / first notes) lands late in a burst. `render.cpp` already models the
+right order — run the boot loop FIRST, only then feed MIDI from position 0 — the plug-in
+equivalent is "make the machine live *before* the host consumes time", and the only
+pre-streaming hook a plug-in owns is the constructor.
+
+**Decision — synchronous boot at instantiation.** `engine::start()` → `start(bool block =
+false)`; the VST2/CLAP ctor calls `start(true)` so it boots inline and `state()` is
+`ready`/`failed` when the ctor returns — i.e. audio is live at sample 0 of the very first
+`ProcessBlock`. Default arg `false` keeps every existing caller (the VST3 `plugin.cpp` and
+CLAP `plugin.cpp` paths, still compiled, `start()`) behavior-compatible (background
+thread). The `m_abort` checks + MIDI-queue/`fill()`-silence safety net are untouched (the
+queue still drains on the first `fill()` after `ready`).
+
+**Snapshot cache (one-time cold cost).** Cold boot is unavoidable once (firmware boots),
+so the first ready machine is snapshotted: right after `midi_ready()` (before
+`state=ready`) `mu->save_state()` is written atomically (temp + `replace_file`) to
+`<config_dir>/bootcache.bin`. On the next cold boot, `boot()` — after `nvram::load` +
+`reset()` — tries `mu->load_state(cache)` BEFORE the sample loop, then **verifies**
+`midi_ready()`; on any failure it `reset()`s and falls back to the full cold loop.
+Header key (`S2BC`, fmt v1): ROM-dir string + `mu2000_flash.bin` size + mtime + sin-table
+presence + `NATIVE_RATE`; invalidated (so a swapped firmware never resurrects an old
+machine). NVRAM caveat: a newer NVRAM file (user reconfigured via gui/live, see
+`nvram::path`) is newer than the cache → discard. Verified via `mu2000.cpp::state()` that
+the SCI `rx_enabled` bit (`m_scr`, what `midi_ready()` reads — `mu2000.h:97`) and the
+voice/work RAM (`m_ram`/`m_sampram`) round-trip — `sh7042_device::state` syncs `m_scr`,
+so a cache restore comes up already MIDI-ready.
+
+**Knobs** (same `config_dir()/plugin.ini` reader already used for `threaded=`):
+- Sync boot is the default. Opt out → background boot: `plugin.ini` `boot=async` or
+  env `SMU2000_SYNC_BOOT=0` (env wins). Reverts to the old (silent-head) behavior.
+- Cache read+write is default-on. Kill both: `plugin.ini` `bootcache=0` or env
+  `SMU2000_BOOT_CACHE=0`.
+- `log.txt` line per boot: `boot: {sync|async}, cache {hit|miss}, wall N.NN s` (plus the
+  existing `起動:` and `bootcache:` save lines).
+
+**Measurements** (this box, x64 MSVC, JIT default-ON; ad-hoc host `bootgate_test.exe`
+driving the built DLL, MIDI = program change + note-on at offset 0 of the FIRST block):
+- VST2 x64 cold: ctor **0.93 s**, block1 peak **0.0836** rms 0.0219 first-loud **sample
+  163** (3.7 ms → clean attack, no burst-into-past). Warm (cache hit): ctor **0.07 s**,
+  `boot: sync, cache hit, wall 0.01 s`, **bit-identical** audio.
+- CLAP x64: cold 0.86 s → warm 0.06 s, block1 peak 0.0836 @ sample 163 — **identical
+  waveform to VST2** (same engine, cache restore faithful across APIs).
+- Chunk round-trip (`effGetChunk`/`effSetChunk` presType=1): 6,096,753 B, still plays
+  after restore (DAW save/restore intact; `load_state` after `ready` correctly overwrites
+  the cache-restored machine).
+- `SMU2000_BOOT_CACHE=0`: cold every run (0.83/0.89 s), still sync + audible.
+  `SMU2000_SYNC_BOOT=0` / `plugin.ini boot=async`: ctor 0.00 s, first block silent,
+  sound returns at pump ~20 once the background boot finishes — old path preserved.
+- Builds: vs-x64 + vs-win32 (GUI-OFF) and vs-x64 GUI-ON all clean; the win32 build's only
+  new-era warnings are pre-existing `C4805` in `sh_adc/sh_sci` (not touched). P7 editor
+  re-probed on the GUI-ON x64 DLL: 1250×500 child attaches/paints/detaches — **PASS**
+  (ctor boot no longer races the editor open).
+
+**Win32 audio.** Proven via the **identical plug-in class through CLAP-x86** (block1 peak
+0.0836 @ sample 163, same waveform) and the **engine driven directly on x86** (same). A
+raw ad-hoc *VST2-x86* harness (this test only) advances the machine (state bytes change)
+but its serial MIDI never clocks → silent; this is a host-harness/ABI artifact of driving
+VST2 win32 `processReplacing` by hand, not a regression from boot-gating (the boot-gate
+touches WHEN the engine boots, not MIDI routing) and win32 VST2 audio was **never**
+host-proven before this (P2/P7 tested win32 only for load/GUI/chunk). Real DAWs do not use
+this harness. No plugin/GUI/editor regression observed on any arch.
+
+**Files.** `src/vst3/engine.h` (`start(bool)`, `boot(bool)`), `src/vst3/engine.cpp`
+(sync boot + boot-cache: `ini_value`/`sync_boot_wanted`/`boot_cache_wanted`/
+`file_bytes`/`file_mtime`/`cache_restore`/`cache_store`, ctor boot logging),
+`SMU2000_VST2/SMU2000_VST2.cpp` (ctor `start(true)`).
+
 
 ---
 
@@ -434,13 +513,20 @@ MinGW appends `-mingw`/`-mingw-clang`). Static `/MT` CRT everywhere.
       detach the 1250×500 panel through the real message loop; GUI-OFF default stays editor-free/
       graphics-free. See §Phase 7 for the full write-up + ABI/opcode gotchas. Tree left configured
        GUI-OFF (x64 rebuilt last). Nothing committed.
-- [x] CPU32 x86-32 JIT port — **DONE 2026-09-16** (full record: `CPU32_LEDGER.md` Phases 1–8).
-      Dual-mode `x64asm.h` + SH-2 + MEG JITs ported to x86-32; guards widened so **MSVC-x64 also
-      gets the JIT**; Win32 JIT default-ON, bit-exact (35/35 render matrix + soak + traces). Host
-      win32 CPU win 2.06x (native 4.74x); win32-JIT 1.60xRT vs interpreter 0.78xRT. Tooling:
-      `tools/msvc32_build.ps1` (MSVC amd64_x86 harness — mingw32 cc1plus broken on this box, do
-      not repair), `tools/x64asm32_test.cpp` (encoding gate). Supersedes every "Win32 =
-      interpreter-only" note above (Findings §32-bit JIT, P1, P5, P0-P7 status entries).
+ - [x] CPU32 x86-32 JIT port — **DONE 2026-09-16** (full record: `CPU32_LEDGER.md` Phases 1–8).
+       Dual-mode `x64asm.h` + SH-2 + MEG JITs ported to x86-32; guards widened so **MSVC-x64 also
+       gets the JIT**; Win32 JIT default-ON, bit-exact (35/35 render matrix + soak + traces). Host
+       win32 CPU win 2.06x (native 4.74x); win32-JIT 1.60xRT vs interpreter 0.78xRT. Tooling:
+       `tools/msvc32_build.ps1` (MSVC amd64_x86 harness — mingw32 cc1plus broken on this box, do
+       not repair), `tools/x64asm32_test.cpp` (encoding gate). Supersedes every "Win32 =
+       interpreter-only" note above (Findings §32-bit JIT, P1, P5, P0-P7 status entries).
+ - [x] Boot gating + snapshot cache — **DONE 2026-09-16** (full write-up: §Boot gating above).
+       Ctor boots the firmware synchronously (`start(bool block)`; plug-in ctor uses
+       `start(true)`) so host timeline sample 0 is already live — no more silent song head;
+       `bootcache.bin` makes every later instantiation ~instant (0.93 s cold → 0.07 s warm,
+       bit-identical audio, SCI rx + RAM verified round-trip). Knobs: `plugin.ini`/env
+       `boot=async`·`SMU2000_SYNC_BOOT=0` (opt out), `bootcache=0`·`SMU2000_BOOT_CACHE=0`
+       (disable). Supersedes the P2 "engine boots async — poll state()" probe note.
 
 ### Wave schedule — COMPLETE (P0–P7 green)
 
