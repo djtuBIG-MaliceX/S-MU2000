@@ -214,4 +214,17 @@ else()
       smu2000_stage_roms(smu2000_clap)
     endif()
   endif()
+
+  # Both MODULE targets OUTPUT_NAME "SMU2000_VST2" (hosts want that file name). The VS
+  # generator puts each MSVC import lib/.exp at <bin>/<srcdir>/<Config>/<OUTPUT_NAME>.{lib,exp}
+  # — same path for both — so a parallel ALL_BUILD races the two link steps over the shared
+  # .exp (LNK1104 on SMU2000_VST2.exp, typically on smu2000_clap). Neither MODULE's import
+  # lib is ever linked by anything; distinct ARCHIVE_OUTPUT_NAME removes the collision
+  # while the shipped .dll/.clap keep their name (MinGW: no import lib, harmless).
+  if(TARGET smu2000_vst2)
+    set_target_properties(smu2000_vst2 PROPERTIES ARCHIVE_OUTPUT_NAME "SMU2000_VST2_vst2")
+  endif()
+  if(TARGET smu2000_clap)
+    set_target_properties(smu2000_clap PROPERTIES ARCHIVE_OUTPUT_NAME "SMU2000_VST2_clap")
+  endif()
 endif()

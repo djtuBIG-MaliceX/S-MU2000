@@ -15,6 +15,8 @@
 #include "smf.h"
 
 #include <algorithm>
+#include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -275,6 +277,12 @@ int main(int argc, char **argv)
 	const u32 rate = 44100;
 	std::vector<s16> pcm;
 
+	// MIDI の 0 秒（＝t の基準）が立つサンプル番号。t はここからの整数オフセットを
+	// 後で一度だけ rate で割って作る。double(i) / rate - boot は桁落ちで数 e-16 秒
+	// 失われ、ちょうどサンプル境界に着るイベント（0.05 秒のリセット等）が
+	// 比較 1 回分＝1 サンプル遅れる
+	size_t boot_sample = size_t(-1);
+
 	// 起動を待つ。実機も電源投入から数秒は MIDI を受け付けない。
 	// 待たずに流すと曲頭のリセットや音色指定が捨てられ、全パートが
 	// 初期音色（ピアノ）で鳴り、発音数も足りなくなって音が抜ける。
@@ -289,11 +297,15 @@ int main(int argc, char **argv)
 			pcm.push_back(s16(std::clamp(r * 32768 / mu2000::DAC_FULL_SCALE, -32768, 32767)));
 		}
 		boot = double(i) / rate;
+		boot_sample = i;
 		if (i >= limit) {
 			std::fprintf(stderr, "起動を待ったが MIDI 受信が有効にならなかった\n");
 			return 1;
 		}
 		std::printf("起動に %.2f 秒。ここから MIDI を流す\n", boot);
+	} else {
+		// --boot で秒を直接指定された時、最も近いサンプルに寄せる
+		boot_sample = size_t(std::llround(boot * rate));
 	}
 
 	const double estimated_seconds = duration_given ? seconds :
@@ -308,7 +320,7 @@ int main(int argc, char **argv)
 	size_t next = 0;
 	size_t scheduled_events = 0, scheduled_bytes = 0;
 	size_t tail_start = size_t(-1);
-	const size_t hard_stop = duration_given ? size_t((boot + seconds) * rate) : size_t(-1);
+	const size_t hard_stop = duration_given ? boot_sample + size_t(seconds * rate) : size_t(-1);
 	for (size_t i = pcm.size() / 2; ; i++) {
 		if (duration_given && i >= hard_stop)
 			break;
@@ -316,12 +328,14 @@ int main(int argc, char **argv)
 			if (tail_start == size_t(-1)) {
 				tail_start = i;
 				std::printf("MIDI queue drained at %.3f s; rendering 3.0 s tail\n",
-				            double(i) / rate - boot);
+				            double(std::ptrdiff_t(i) - std::ptrdiff_t(boot_sample)) / rate);
 			}
 			if (i >= tail_start + size_t(3.0 * rate))
 				break;
 		}
-		const double t = double(i) / rate - boot;
+		// 整数で引いてから一度だけ割る：整数の差は厳密なので t は (i-boot_sample)/rate の
+		// 最も近い double。i/rate と boot を別に丸めて引くと境界で 1 回分ずれる
+		const double t = double(std::ptrdiff_t(i) - std::ptrdiff_t(boot_sample)) / rate;
 		while (next < events.size() && events[next].time <= t) {
 			const std::vector<u8> &ev = events[next].bytes;
 			if (ev.size() == 2 && ev[0] == 0xf5)
@@ -342,8 +356,9 @@ int main(int argc, char **argv)
 		}
 
 		if (!adc_l.empty()) {
-			const double tin = t * rate;
-			const size_t k = tin < 0 ? adc_l.size() : size_t(tin);
+			// 同じ理由で割り算経由しない。t*rate は結局このサンプルオフセットそのもの
+			const std::ptrdiff_t n = std::ptrdiff_t(i) - std::ptrdiff_t(boot_sample);
+			const size_t k = n < 0 ? adc_l.size() : size_t(n);
 			mu.set_audio_input(k < adc_l.size() ? adc_l[k] : 0, k < adc_r.size() ? adc_r[k] : 0);
 		}
 		s32 l = 0, r = 0;
@@ -355,7 +370,8 @@ int main(int argc, char **argv)
 		pcm.push_back(s16(std::clamp(r, -32768, 32767)));
 
 		if (!(i % (rate * 5)))
-			std::printf("  %5.1f 秒  PC=%08x\n", double(i) / rate - boot, mu.cpu().pc());
+			std::printf("  %5.1f 秒  PC=%08x\n",
+			            double(std::ptrdiff_t(i) - std::ptrdiff_t(boot_sample)) / rate, mu.cpu().pc());
 	}
 
 	const size_t total = pcm.size() / 2;
