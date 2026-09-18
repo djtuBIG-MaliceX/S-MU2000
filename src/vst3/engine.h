@@ -64,6 +64,7 @@ class engine
 public:
 	engine();
 	~engine();
+	bool m_voicecache = false;      // plugin.ini の voicecache=1
 
 	// ROM を探して読み、起動するまでを別スレッドで進める。すぐ返る。
 	// block をたてると呼んだスレッドのまま起動を済ませる（返るころには

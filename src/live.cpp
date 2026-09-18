@@ -20,6 +20,7 @@
 //                              供給が追いつかず細切れになる（合計 70ms 必要）
 
 #include "mu2000.h"
+#include "voicecache.h"
 #include "nvram.h"
 #include "ui/audio_out.h"
 #include "ui/midi_in.h"
@@ -530,6 +531,9 @@ int main(int argc, char **argv)
 	// 起動が終わってから入れる（起動には firmware が要る）
 	if (native_engine) {
 		mu.set_native_engine(native_engine);
+		if (std::getenv("SMU2000_VOICECACHE") &&
+		    smu2000::voicecache::load(mu, smu2000::voicecache::key(mu)))
+			std::printf("写し取り: %d 音色を前の写しから\n", int(mu.native_cal_count()));
 		std::printf("native の口: SH-2 は要るときだけ回す\n");
 	}
 

@@ -54,6 +54,8 @@ public:
 		const u8 *elem = nullptr;
 		const u8 *wave = nullptr;       // ベンドで音程を作り直すのに要る
 		const nv::voice_cal *cal = nullptr;
+		u16 lfo = 0;                    // いま鳴らしている 0x0a（モジュレーションを足す前）
+		u16 cut = 0;                    // いま鳴らしている 0x00（明るさを足す前）
 		u16 drum_rel = 0;
 		u64 age = 0;
 	};
@@ -76,6 +78,8 @@ public:
 			c = part_cc();
 		m_clock = 0;
 		m_traj = false;
+		m_rec = false;
+		m_traj_next = 0;
 		m_pend.clear();
 		m_age = 0;
 	}
@@ -107,6 +111,14 @@ public:
 		return m_ram[ram::part_base(part) + 0x07] != 0;
 	}
 
+	// 写し取ったものを取っておく・戻す（voicecache.h）
+	const std::unordered_map<u32, std::vector<nv::voice_cal>> &cal_map() const { return m_cal; }
+	const std::unordered_map<u64, std::vector<nv::voice_cal>> &drum_map() const { return m_drum; }
+	size_t cal_count() const { return m_cal.size() + m_drum.size(); }
+
+	// 写し取りの最中は、段が後から増えるので毎サンプル見る
+	void set_recording(bool on) { m_rec = on; m_traj_next = 0; }
+
 	// 写し取ったものを、あとから直せるように渡す（フィルタの包絡線の追記用）
 	std::vector<nv::voice_cal> *cals_of(u32 rec)
 	{
@@ -135,6 +147,12 @@ public:
 		}
 		if (!m_traj)
 			return;
+		// **つぎの段の時刻まで何もしない**。ここを毎サンプル 64 スロット見ていると、
+		// SH-2 を止めた意味が薄れるくらい重かった。
+		// 写し取りの最中だけは、段が後から増えるので毎回見る
+		if (!m_rec && clock < m_traj_next)
+			return;
+		u64 next = ~u64(0);
 		int live = 0;
 		for (int i = 0; i < SLOTS; i++) {
 			slot_use &s = m_slot[i];
@@ -146,11 +164,24 @@ public:
 				continue;
 			const std::vector<nv::fstep> &fe = s.cal->filter_env;
 			while (s.tpos < fe.size() && s.tstart + fe[s.tpos].at <= clock) {
-				m_poke(u32(i) * 64 + fe[s.tpos].reg, fe[s.tpos].v);
+				u16 v = fe[s.tpos].v;
+				if (fe[s.tpos].reg == 0x0a) {      // 深さにモジュレーションを足す
+					s.lfo = v;
+					v = lfo_reg(v, *s.cal, s.part);
+				} else if (fe[s.tpos].reg == 0x00) {   // 切る高さに明るさを足す
+					s.cut = v;
+					v = cutoff_reg(v, *s.cal, s.part);
+				} else if (fe[s.tpos].reg == 0x04) {
+					v = reso_reg(v, *s.cal, s.part);
+				}
+				m_poke(u32(i) * 64 + fe[s.tpos].reg, v);
 				s.tpos++;
 			}
+			if (s.tpos < fe.size() && s.tstart + fe[s.tpos].at < next)
+				next = s.tstart + fe[s.tpos].at;
 		}
 		m_traj = live > 0;
+		m_traj_next = next;
 	}
 
 	// ドラムの覚え先の鍵（バンクとプログラムと音の高さ）
@@ -187,6 +218,13 @@ public:
 	struct part_cc {
 		// -1 は「まだ動かされていない＝写し取ったときのまま」
 		int vol = -1, expr = -1, pan = -1;     // CC7 / CC11 / CC10
+		int mod = -1;                          // CC1（モジュレーション）
+		int rev = -1, cho = -1;                // CC91 / CC93（送り）
+		int bri = -1, res = -1;                // CC74 / CC71（明るさ・共振）
+		// **こちらでさばけない CC が既定から外れている**印（ビットごとに 1 つ）。
+		// 立っている間、そのパートの音は firmware に鳴らしてもらう。
+		// 黙って無視すると、ポルタメントや EG の設定が効かない音になる
+		u32 unknown = 0;
 		int bend = 8192, range = 2;            // ピッチベンドと、その幅（半音）
 		bool damper = false;                   // CC64
 	};
@@ -199,9 +237,27 @@ public:
 			return;
 		for (int p = 0; p < PARTS; p++) {
 			const u8 *b = m_ram + ram::part_base(p);
-			m_cc[p].vol  = b[0x0b];
-			m_cc[p].expr = b[ram::PART_EXP];
-			m_cc[p].pan  = b[0x0e];
+			// **こちらが動かした値は上書きしない**（firmware がまだ処理して
+			// いない古い値で潰してしまう）。触っていない（-1）ものだけ拾う
+			if (m_cc[p].vol < 0)
+				m_cc[p].vol = b[0x0b];
+			if (m_cc[p].expr < 0)
+				m_cc[p].expr = b[ram::PART_EXP];
+			if (m_cc[p].pan < 0)
+				m_cc[p].pan = b[0x0e];
+			if (m_cc[p].mod < 0)
+				m_cc[p].mod = b[ram::PART_MOD];
+			if (m_cc[p].rev < 0)
+				m_cc[p].rev = b[0x13];
+			if (m_cc[p].cho < 0)
+				m_cc[p].cho = b[0x12];
+			if (m_cc[p].bri < 0)
+				m_cc[p].bri = b[0x18];
+			if (m_cc[p].res < 0)
+				m_cc[p].res = b[0x19];
+			// ベンド幅（08 pp 23。64 が 0 半音）。RPN でも SysEx でもここに入る
+			const int r2 = int(b[0x23]) - 64;
+			m_cc[p].range = r2 < 0 ? 0 : (r2 > 24 ? 24 : r2);
 		}
 	}
 
@@ -209,10 +265,49 @@ public:
 	int part_vol(int part) const  { return m_ram ? int(m_ram[ram::part_base(part) + 0x0b]) : 100; }
 	int part_expr(int part) const { return m_ram ? int(m_ram[ram::part_base(part) + ram::PART_EXP]) : 127; }
 	int part_pan(int part) const  { return m_ram ? int(m_ram[ram::part_base(part) + 0x0e]) : 64; }
+	int part_mod(int part) const  { return m_ram ? int(m_ram[ram::part_base(part) + ram::PART_MOD]) : 0; }
+	int part_rev(int part) const  { return m_ram ? int(m_ram[ram::part_base(part) + 0x13]) : 40; }
+	int part_cho(int part) const  { return m_ram ? int(m_ram[ram::part_base(part) + 0x12]) : 0; }
+	int part_bri(int part) const  { return m_ram ? int(m_ram[ram::part_base(part) + 0x18]) : 64; }
+	int part_res(int part) const  { return m_ram ? int(m_ram[ram::part_base(part) + 0x19]) : 64; }
+
+	// こちらでさばけない CC のうち、**音に効くもの**。既定から外れたら
+	// そのパートは firmware に任せる（native では何も起きないため）
+	static int unknown_bit(int cc, int value)
+	{
+		struct e { u8 cc, def; };
+		static const e LIST[] = {
+			{ 0x05, 0 },     // ポルタメントの速さ
+			{ 0x41, 0 },     // ポルタメント 入切（64 以上で入）
+			{ 0x48, 64 },    // EG リリース
+			{ 0x49, 64 },    // EG アタック
+			{ 0x4b, 64 },    // EG ディケイ
+			{ 0x54, 0 },     // ポルタメント コントロール
+			{ 0x5e, 0 },     // バリエーション送り
+		};
+		for (size_t i = 0; i < sizeof(LIST) / sizeof(LIST[0]); i++)
+			if (LIST[i].cc == cc)
+				return value == LIST[i].def ? -int(i) - 1 : int(i) + 1;
+		return 0;
+	}
+
+	// アフタータッチ（触れた強さ）も native では何も起きない
+	void aftertouch(int part, int value)
+	{
+		if (part < 0 || part >= PARTS)
+			return;
+		if (value)
+			m_cc[part].unknown |= 1u << 31;
+		else
+			m_cc[part].unknown &= ~(1u << 31);
+	}
 
 	// その CC を native でさばけるか（実際にさばく前に決める）
 	static bool handles_cc(int cc)
-	{ return cc == 0x07 || cc == 0x0b || cc == 0x0a || cc == 0x40; }
+	{
+		return cc == 0x07 || cc == 0x0b || cc == 0x0a || cc == 0x40 || cc == 0x01 ||
+		       cc == 0x5b || cc == 0x5d || cc == 0x4a || cc == 0x47;
+	}
 
 	// CC を受ける。native でさばけたら true（firmware にも短く回す）
 	bool control(int part, int cc, int value)
@@ -224,6 +319,11 @@ public:
 		case 0x07: p.vol = value; break;
 		case 0x0b: p.expr = value; break;
 		case 0x0a: p.pan = value; break;
+		case 0x01: p.mod = value; break;
+		case 0x5b: p.rev = value; break;
+		case 0x5d: p.cho = value; break;
+		case 0x4a: p.bri = value; break;
+		case 0x47: p.res = value; break;
 		case 0x40:                             // ダンパー
 			p.damper = value >= 64;
 			if (!p.damper)
@@ -232,8 +332,15 @@ public:
 		case 0x78: case 0x7b:                  // 音を全部切る
 			all_off(part);
 			return false;
-		default:
+		default: {
+			// 音に効く「知らない CC」は、既定から外れている間だけ印を立てる
+			const int bit = unknown_bit(cc, value);
+			if (bit > 0)
+				p.unknown |= 1u << (bit - 1);
+			else if (bit < 0)
+				p.unknown &= ~(1u << (-bit - 1));
 			return false;                      // 知らない CC は firmware に任せる
+		}
 		}
 		apply_cc(part);
 		return true;
@@ -272,6 +379,18 @@ private:
 			m_poke(u32(i) * 64 + 9, u16(note_att(s, part)));
 			if (s.cal->has(0x32))
 				m_poke(u32(i) * 64 + 0x32, pan_reg(*s.cal, part));
+			if (s.lfo)
+				m_poke(u32(i) * 64 + 0x0a, lfo_reg(s.lfo, *s.cal, part));
+			if (s.cal->has(0x33))
+				m_poke(u32(i) * 64 + 0x33,
+				       send_reg(*s.cal, 0x33, false, m_cc[part].rev, s.cal->cal_rev));
+			if (s.cal->has(0x34))
+				m_poke(u32(i) * 64 + 0x34,
+				       send_reg(*s.cal, 0x34, true, m_cc[part].cho, s.cal->cal_cho));
+			if (s.cut)
+				m_poke(u32(i) * 64 + 0x00, cutoff_reg(s.cut, *s.cal, part));
+			if (s.cal->has(0x04))
+				m_poke(u32(i) * 64 + 0x04, reso_reg(s.cal->reg[0x04], *s.cal, part));
 		}
 	}
 
@@ -315,6 +434,58 @@ private:
 		return nv::clamp_att(a);
 	}
 
+	// フィルタのレジスタ。下 12bit が切る高さで、明るさ（CC74）のぶんをずらす
+	u16 cutoff_reg(u16 base, const nv::voice_cal &c, int part) const
+	{
+		const int now = m_cc[part].bri;
+		if (now < 0 || now == c.cal_bri)
+			return base;
+		int v = int(base & 0xfff) + nv::bright_shift(now) - nv::bright_shift(c.cal_bri);
+		v = v < 0 ? 0 : (v > nv::CUTOFF_MAX ? nv::CUTOFF_MAX : v);
+		return u16((base & 0xf000) | u16(v));
+	}
+
+	// 共振のレジスタ。上 5bit が共振で、CC71 のぶんをずらす
+	u16 reso_reg(u16 base, const nv::voice_cal &c, int part) const
+	{
+		const int now = m_cc[part].res;
+		if (now < 0 || now == c.cal_res)
+			return base;
+		int v = int(base >> 11) + nv::reso_shift(now) - nv::reso_shift(c.cal_res);
+		v = v < 0 ? 0 : (v > 31 ? 31 : v);
+		return u16((base & 0x07ff) | u16(v << 11));
+	}
+
+	// 送りのレジスタ。下位が減衰で、写し取ったときからの差ぶんだけ動かす。
+	// 写し取ったときに切れていた（0xff）送りは差が取れないので、
+	// **もう一方の送りから下駄を借りる**（どちらもパートの同じ下駄に乗っている）
+	// 0x32-0x37 は 1 つで 2 本ぶんの送りを持つ。リバーブは 0x33 の**下位**、
+	// コーラスは 0x34 の**上位**（nativeplay --ccwatch で確かめた）
+	u16 send_reg(const nv::voice_cal &c, int which, bool hi, int now, int was) const
+	{
+		const u16 base = c.reg[which];
+		if (now < 0 || now == was)
+			return base;
+		const int cur = hi ? (base >> 8) : (base & 0xff);
+		// 写し取ったときに切れていた（0xff）送りは差が取れない。
+		// 下駄は 16（CC91=127・CC93=127 のどちらも 16 になる）
+		const int v = (cur >= 0xff && was <= 0)
+		            ? 16 + nv::send_att(m_rom, now)
+		            : cur + nv::send_att(m_rom, now) - nv::send_att(m_rom, was);
+		const int w = nv::clamp_att(v);
+		return u16(hi ? ((w << 8) | (base & 0xff)) : ((base & 0xff00) | w));
+	}
+
+	// LFO のレジスタ。下位が深さで、モジュレーション（CC1）のぶんを足す
+	u16 lfo_reg(u16 base, const nv::voice_cal &c, int part) const
+	{
+		const int now = m_cc[part].mod;
+		if (now < 0)
+			return base;
+		const int d = nv::mod_depth(now) - nv::mod_depth(c.cal_mod);
+		return u16((base & 0xff00) | nv::clamp_att(int(base & 0xff) + d));
+	}
+
 	// パンのレジスタ（写し取った値からの差ぶんで動かす）
 	u16 pan_reg(const nv::voice_cal &c, int part) const
 	{
@@ -327,11 +498,25 @@ private:
 	}
 
 public:
+	// そのパートの音色をもう写し取ってあるか（CC を firmware にどれだけ
+	// 見せるかの目安。まだなら 1 音目は firmware が鳴らすので、CC も効かせてもらう）
+	bool part_learned(int part) const
+	{
+		if (!m_rom || part < 0 || part >= PARTS)
+			return false;
+		if (is_drum(part))
+			return !m_drum.empty();
+		const u32 rec = record_of(part);
+		return rec && m_cal.find(rec) != m_cal.end();
+	}
+
 	// その音を native で鳴らせるか（実際に鳴らす前に決める必要がある。
 	// 鳴らせないなら firmware に回すので、遅らせてはいけない）
 	bool can_play(int part, int note) const
 	{
 		if (!m_rom || part < 0 || part >= PARTS)
+			return false;
+		if (m_cc[part].unknown)              // 知らない CC が効いている間は firmware へ
 			return false;
 		if (is_drum(part))
 			return m_drum.find(drum_key(part, note)) != m_drum.end();
@@ -362,7 +547,7 @@ public:
 			if (!nv::element_active(el, note, vel))
 				continue;
 			// 波形の番地で、写し取ったスロットと結び付ける
-			const u8 *we = nv::wave_entry(m_rom, nv::wave_set(el), note);
+			const u8 *we = nv::wave_entry(m_rom, nv::wave_set(el), nv::wave_note(el, note));
 			const nv::voice_cal *c =
 			    we ? nv::match_cal(cals, nv::read_wave(we).format_addr, &taken) : nullptr;
 			if (!c && size_t(used) < cals.size()) {
@@ -379,14 +564,28 @@ public:
 			su.cal = c;
 			su.tpos = 0;
 			su.tstart = m_clock;
-			if (c)
+			if (c) {
 				m_traj = true;
+				m_traj_next = 0;       // つぎの tick で見直す
+			}
 			su.att = nv::volume_att(m_rom, el, c ? c->base_level : 64, note, vel);
 			const part_cc &pc = m_cc[part];
 			nv::slot_regs sr = nv::build_note(m_rom, el, note, note_att(su, part), c,
 			                                  nv::defaults(), nv::bend_cents(pc.bend, pc.range));
 			if (c && c->has(0x32))
 				sr.set(0x32, pan_reg(*c, part));
+			su.lfo = sr.v[0x0a];
+			su.cut = sr.v[0x00];
+			if (c) {
+				sr.set(0x0a, lfo_reg(su.lfo, *c, part));
+				sr.set(0x00, cutoff_reg(su.cut, *c, part));
+				if (c->has(0x04))
+					sr.set(0x04, reso_reg(c->reg[0x04], *c, part));
+				if (c->has(0x33))
+					sr.set(0x33, send_reg(*c, 0x33, false, pc.rev, c->cal_rev));
+				if (c->has(0x34))
+					sr.set(0x34, send_reg(*c, 0x34, true, pc.cho, c->cal_cho));
+			}
 			write_slot(slot, sr);
 			if (debug_on())
 				std::fprintf(stderr, "note part=%d note=%d vel=%d vol=%d/%d expr=%d/%d pan=%d/%d att=%d->%d\n",
@@ -456,12 +655,19 @@ public:
 			su.tpos = 0;
 			su.tstart = m_clock;
 			m_traj = true;
+			m_traj_next = 0;
 			su.att = att0 + 2 * (nv::velocity_att(m_rom, vel) - nv::velocity_att(m_rom, c.cal_vel));
 			const int att = note_att(su, part);
+			su.lfo = c.has(0x0a) ? c.reg[0x0a] : 0;
 			for (int i = 0; i < 0x40; i++)
 				if (c.has(i))
 					m_poke(u32(slot) * 64 + u32(i),
-					       i == 9 ? u16(att) : (i == 0x32 ? pan_reg(c, part) : c.reg[i]));
+					       i == 9 ? u16(att)
+					              : (i == 0x32 ? pan_reg(c, part)
+					              : (i == 0x0a ? lfo_reg(c.reg[0x0a], c, part)
+					              : (i == 0x33 ? send_reg(c, 0x33, false, m_cc[part].rev, c.cal_rev)
+					              : (i == 0x34 ? send_reg(c, 0x34, true, m_cc[part].cho, c.cal_cho)
+					                           : c.reg[i])))));
 
 			su.drum_rel = c.has(9) ? u16(c.reg[9]) : 0;
 			if (debug_on())
@@ -537,6 +743,8 @@ private:
 	std::array<part_cc, PARTS> m_cc;
 	u64 m_clock = 0;
 	bool m_traj = false;
+	bool m_rec = false;            // 写し取りの最中（段が後から増える）
+	u64 m_traj_next = 0;           // つぎに段を書く時刻
 	// 遅らせて鳴らす要素（byte72）。時が来たら key_on する
 	struct pending_key { u64 mask; u64 at; };
 	std::vector<pending_key> m_pend;

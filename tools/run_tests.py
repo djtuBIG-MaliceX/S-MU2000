@@ -165,14 +165,14 @@ def step_statetest(rep, roms, midi):
 BOOT_AT = 8.0
 
 
-def render(roms, name, midi, seconds, extra=()):
+def render(roms, name, midi, seconds, extra=(), env=None):
     """鳴らして指紋を作る。(指紋, かかった秒) を返す"""
     wav = WORK / ("%s.wav" % name)
     log = WORK / ("%s.log" % name)
     out = WORK / ("%s.out" % name)
     t0 = time.time()
     rc = run([tool("render"), roms, midi, wav, "%.3f" % seconds,
-              "--boot", "%.3f" % BOOT_AT, "-v"] + list(extra), out=out, err=log)
+              "--boot", "%.3f" % BOOT_AT, "-v"] + list(extra), out=out, err=log, env=env)
     took = time.time() - t0
     if rc != 0 or not wav.exists():
         return None, took
@@ -250,6 +250,41 @@ def step_threading(rep, roms, first):
         rep.add("別糸", ok, "%s で threaded と --single が%s" %
                 (name, "一致" if ok else "食い違う"))
 
+
+
+def step_native_engine(rep, roms, cases):
+    """**firmware を走らせない口**（doc/native-engine.md の段 2）が、既定の道と
+    同じ大きさで鳴るか。1 音ずつの波形までは合わないので、大きさ（rms）と
+    低域比で見る。写し取りはこの試験の中では残さない（SMU2000_NO_VOICECACHE）"""
+    import math
+    env = None
+    worst = 0.0
+    worst_name = ""
+    bad = []
+    for name, (midi, seconds) in cases.items():
+        base = BASE / ("%s.json" % name)
+        if not base.exists():
+            continue
+        ref = json.loads(base.read_text(encoding="utf-8"))
+        fp, _ = render(roms, name + "_ne", midi, seconds,
+                       extra=["--native-engine"], env=env)
+        if fp is None:
+            bad.append("%s: 鳴らせなかった" % name)
+            continue
+        a = max(ref["rms"])
+        b = max(fp["rms"])
+        if a <= 1.0 or b <= 1.0:
+            bad.append("%s: 音が無い" % name)
+            continue
+        d = 20.0 * math.log10(b / a)
+        if abs(d) > abs(worst):
+            worst, worst_name = d, name
+        if abs(d) > 1.5:
+            bad.append("%s %+.2f dB" % (name, d))
+    ok = not bad
+    note = ("いちばん違ったのは %s の %+.2f dB" % (worst_name, worst)) if ok \
+        else "、".join(bad)
+    rep.add("native の口", ok, note)
 
 def step_xg(rep, roms):
     """定義表の番地・大きさ・範囲が firmware と合っているか。音は見ない"""
@@ -332,6 +367,10 @@ def main():
     print()
     print("== 3. 鳴らし比べ（%d 件）" % len(cases))
     first = step_cases(rep, roms, cases, a.update)
+
+    print()
+    print("== 3b. native の口（SH-2 を止めて鳴らす）")
+    step_native_engine(rep, roms, cases)
 
     print()
     print("== 4. JIT あり・なしで wav がバイト単位で同じか")

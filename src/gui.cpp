@@ -23,6 +23,7 @@
 #include "mu2000.h"
 #include "bootcache.h"
 #include "nvram.h"
+#include "voicecache.h"
 #include "smf.h"
 #include "ui/audio_out.h"
 #include "ui/audio_in.h"
@@ -1353,8 +1354,11 @@ int main(int argc, char **argv)
 			return;
 		}
 		// 起動が終わってから入れる（起動には firmware が要る）
-		if (native_engine)
+		if (native_engine) {
 			eng.mu.set_native_engine(native_engine);
+			if (std::getenv("SMU2000_VOICECACHE"))
+				smu2000::voicecache::load(eng.mu, smu2000::voicecache::key(eng.mu));
+		}
 		eng.state.store(1);
 		eng.publish();
 

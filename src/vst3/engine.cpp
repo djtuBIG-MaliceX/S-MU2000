@@ -4,6 +4,7 @@
 
 #include "mu2000.h"
 #include "bootcache.h"
+#include "voicecache.h"
 #include "nvram.h"
 #include "smartmedia.h"
 #include "ui/xg_state.h"
@@ -439,7 +440,10 @@ engine::~engine()
 	m_abort.store(true, std::memory_order_relaxed);
 	if (m_thread.joinable())
 		m_thread.join();
-	// 音声スレッドはもう回っていない。SmartMedia に書いたものをその場で残す
+	// 音声スレッドはもう回っていない。覚えた写し取りを残す（次に挿したときに使う）
+	if (m_mu && m_mu->native_engine() && m_voicecache)
+		smu2000::voicecache::save(*m_mu, smu2000::voicecache::key(*m_mu));
+	// SmartMedia に書いたものをその場で残す
 	if (m_mu && !card_path().empty()) {
 		std::vector<smartmedia::block> blocks;
 		m_mu->card().take_dirty_blocks(blocks);
@@ -562,6 +566,9 @@ void engine::boot()
 	// **firmware を走らせない口**（doc/native-engine.md）。鍵・つまみを自分でさばき、
 	// SH-2 は必要なときだけ回す。2.3〜2.9 倍軽い。plugin.ini に native_engine=1 で入る
 	int native_engine = 0;
+	// 写し取りをファイルに残す（voicecache.h）。別の曲で取った写しは
+	// その曲の音にならないので既定は切
+	int voicecache = 0;
 	if (const std::string local = smu2000::config_dir(); !local.empty())
 		if (std::FILE *f = std::fopen(smu2000::join(local, "plugin.ini").c_str(), "rb")) {
 			char line[256];
@@ -574,6 +581,9 @@ void engine::boot()
 					native_fx = std::atoi(line + 10);
 				if (!std::strncmp(line, "native_engine=", 14))
 					native_engine = std::atoi(line + 14);
+				if (!std::strncmp(line, "voicecache=", 11))
+					voicecache = std::atoi(line + 11);
+				m_voicecache = voicecache != 0;
 			}
 			std::fclose(f);
 		}
@@ -609,6 +619,8 @@ void engine::boot()
 		if (native_engine) {
 			mu->set_native_engine(native_engine);
 			logf("plugin.ini: native_engine=1（SH-2 は要るときだけ回す）");
+			if (voicecache && smu2000::voicecache::load(*mu, smu2000::voicecache::key(*mu)))
+				logf("写し取り: %d 音色を前の写しから", int(mu->native_cal_count()));
 		}
 		m_mu = mu;
 		m_message = warn.empty() ? std::string("ROM: ") + dir
@@ -684,6 +696,8 @@ void engine::boot()
 	if (native_engine) {
 		mu->set_native_engine(native_engine);
 		logf("plugin.ini: native_engine=1（SH-2 は要るときだけ回す）");
+		if (voicecache && smu2000::voicecache::load(*mu, smu2000::voicecache::key(*mu)))
+			logf("写し取り: %d 音色を前の写しから", int(mu->native_cal_count()));
 	}
 	m_mu = mu;
 	m_message = warn.empty() ? std::string("ROM: ") + dir

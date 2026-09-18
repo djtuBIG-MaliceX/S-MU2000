@@ -317,8 +317,36 @@ public:
 	void set_native_engine(int mode);
 	int native_engine() const { return m_native_engine; }
 	// native の口の内訳（調べ用）
+	// SH-2 を回したのはなぜか（サンプル数）。doc/native-engine.md の 6.21
+	std::atomic<u64> m_ne_by_note{0};    // firmware が鳴らしている音がある
+	std::atomic<u64> m_ne_by_sysex{0};   // SysEx のあと
+	std::atomic<u64> m_ne_by_other{0};   // 音色の指定・CC など
+	std::atomic<u64> m_ne_by_learn{0};   // 写し取り（その音色の 1 音目）
+	std::atomic<u64> m_ne_by_midi{0};    // 渡した MIDI を受け取らせている
+	u8   m_fw_why = 0;                   // いまの hold の理由（1 SysEx / 2 そのほか）
+	// SysEx の頭を少し覚えて、長く回す必要があるかを見分ける
+	int  m_sx_pos = -1;
+	u8   m_sx[5] = {};
+
 	struct native_stats { u64 note_native = 0, note_fw = 0, learn = 0, other = 0; };
 	native_stats native_counts() const { return m_ne_stats; }
+
+	// **写し取りをファイルに残す・戻す**（voicecache.h）。
+	// これがあれば、2 回目からは 1 音目も native で鳴らせる
+	std::vector<u8> native_cal_save() const;
+	bool native_cal_load(const u8 *data, size_t n);
+	size_t native_cal_count() const { return m_ndrv.cal_count(); }
+
+	struct native_why { u64 total, by_note, by_sysex, by_other, by_learn, by_midi; };
+	native_why native_why_counts() const
+	{
+		return { m_ne_samples.load(std::memory_order_relaxed),
+		         m_ne_by_note.load(std::memory_order_relaxed),
+		         m_ne_by_sysex.load(std::memory_order_relaxed),
+		         m_ne_by_other.load(std::memory_order_relaxed),
+		         m_ne_by_learn.load(std::memory_order_relaxed),
+		         m_ne_by_midi.load(std::memory_order_relaxed) };
+	}
 
 	// native の口が、いま firmware を回している割合（0-1。小さいほど軽い）
 	double native_firmware_share() const
@@ -405,6 +433,11 @@ private:
 	// firmware が鳴らしている音の数（パートごと）。0 でなければベンドも firmware へ回す
 	u8   m_fw_notes[64] = {};
 	u32  m_fw_note_total = 0;
+	// firmware の音のために回すのは、いちばん新しい音から この長さだけ。
+	// フィルタ・LFO の包絡線はそのころには落ち着いている。
+	// 3 秒でも試験の 7 曲は 1 つも変わらなかったが、長い音のために余裕を見る
+	static constexpr u64 FW_NOTE_RUN = 44100 * 5;   // 1.2 秒
+	u64  m_fw_note_until = 0;
 	u64  m_learn_drum = 0;         // ドラムのとき、覚える鍵
 	native_stats m_ne_stats;
 

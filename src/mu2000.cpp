@@ -992,7 +992,9 @@ void mu2000::set_native_engine(int mode)
 	for (u8 &c : m_fw_notes)
 		c = 0;
 	m_fw_note_total = 0;
+	m_fw_note_until = 0;
 	m_nq.clear();
+	m_sx_pos = -1;
 	m_traj_rec = false;
 	m_traj_left = 0;
 	m_traj_cals = nullptr;
@@ -1004,6 +1006,12 @@ void mu2000::set_native_engine(int mode)
 		n = nmidi();
 	m_ne_samples.store(0, std::memory_order_relaxed);
 	m_ne_fw_samples.store(0, std::memory_order_relaxed);
+	m_ne_by_note.store(0, std::memory_order_relaxed);
+	m_ne_by_sysex.store(0, std::memory_order_relaxed);
+	m_ne_by_other.store(0, std::memory_order_relaxed);
+	m_ne_by_learn.store(0, std::memory_order_relaxed);
+	m_ne_by_midi.store(0, std::memory_order_relaxed);
+	m_fw_why = 0;
 	m_ne_stats = native_stats();
 	if (!mode) {
 		set_swp_watch(nullptr);
@@ -1049,7 +1057,10 @@ void mu2000::native_learn_start(u32 rec)
 		case 0x1ce: m_learn_mask = (m_learn_mask & ~(u64(0xffff) << 16)) | (u64(value) << 16); break;
 		case 0x1cf: m_learn_mask = (m_learn_mask & ~u64(0xffff)) | value; break;
 		case 0x20e:
-			m_learn_keyed |= m_learn_mask;
+			// **要素のぶんだけ**。速い曲では、写し取りの窓の中に次の音の
+			// 引き金が入ってしまい、余計なスロットまで拾っていた
+			if (__builtin_popcountll(m_learn_keyed) < m_learn_want)
+				m_learn_keyed |= m_learn_mask;
 			if (m_learn_first.empty())
 				m_learn_first = m_learn_last;
 			// 鳴り始めたら、あと少しだけ見て終える（0x01 が落ち着くぶん）。
@@ -1087,10 +1098,17 @@ void mu2000::native_learn_finish()
 			}
 			if (!cal.has(0x16) || !cal.has(0x17))
 				continue;
+			if (int(cals.size()) >= m_learn_want)
+				break;
 			cal.cal_vel  = m_learn_vel;
 			cal.cal_vol  = m_ndrv.part_vol(m_learn_part);
 			cal.cal_expr = m_ndrv.part_expr(m_learn_part);
 			cal.cal_pan  = m_ndrv.part_pan(m_learn_part);
+			cal.cal_mod  = m_ndrv.part_mod(m_learn_part);
+			cal.cal_rev  = m_ndrv.part_rev(m_learn_part);
+			cal.cal_cho  = m_ndrv.part_cho(m_learn_part);
+			cal.cal_bri  = m_ndrv.part_bri(m_learn_part);
+			cal.cal_res  = m_ndrv.part_res(m_learn_part);
 			cal.have = true;
 			cals.push_back(cal);
 		}
@@ -1118,6 +1136,8 @@ void mu2000::native_learn_finish()
 	for (int ch = 0; ch < 64; ch++) {
 		if (!(m_learn_keyed & (u64(1) << ch)))
 			continue;
+		if (int(cals.size()) >= nel)     // 要素より多く拾わない
+			break;
 		xg::nv::voice_cal cal;
 		for (int i = 0; i < 0x40; i++) {
 			// 0x05・0x0a・0x11 は LFO が動かし続けるので引き金の瞬間、
@@ -1137,7 +1157,7 @@ void mu2000::native_learn_finish()
 				if (used_elem & (1u << k))
 					continue;
 				const u8 *e2 = xg::nv::element(rom, m_learn_rec, k);
-				const u8 *w2 = xg::nv::wave_entry(rom, xg::nv::wave_set(e2), m_learn_note);
+				const u8 *w2 = xg::nv::wave_entry(rom, xg::nv::wave_set(e2), xg::nv::wave_note(e2, m_learn_note));
 				if (w2 && xg::nv::read_wave(w2).format_addr == want) {
 					idx = k;
 					used_elem |= 1u << k;
@@ -1154,6 +1174,11 @@ void mu2000::native_learn_finish()
 		cal.cal_vol  = m_ndrv.part_vol(m_learn_part);
 		cal.cal_expr = m_ndrv.part_expr(m_learn_part);
 		cal.cal_pan  = m_ndrv.part_pan(m_learn_part);
+		cal.cal_mod  = m_ndrv.part_mod(m_learn_part);
+		cal.cal_rev  = m_ndrv.part_rev(m_learn_part);
+		cal.cal_cho  = m_ndrv.part_cho(m_learn_part);
+		cal.cal_bri  = m_ndrv.part_bri(m_learn_part);
+		cal.cal_res  = m_ndrv.part_res(m_learn_part);
 		cal.have = true;
 		cals.push_back(cal);
 	}
@@ -1164,7 +1189,7 @@ void mu2000::native_learn_finish()
 		for (int k = 0; k < ncal; k++) {
 			const xg::nv::voice_cal &c = cals[size_t(k)];
 			const u8 *e2 = xg::nv::element(rom, m_learn_rec, k);
-			const u8 *w2 = xg::nv::wave_entry(rom, xg::nv::wave_set(e2), m_learn_note);
+			const u8 *w2 = xg::nv::wave_entry(rom, xg::nv::wave_set(e2), xg::nv::wave_note(e2, m_learn_note));
 			std::fprintf(stderr, "  写し%d 0x11=%04x 0x32=%04x 0x09=%04x 波形=%08x"
 			                     " / 式 0x11=%04x 要素b18=%d b0=%d b1=%d\n",
 			             k, c.reg[0x11], c.reg[0x32], c.reg[0x09], c.wave_addr(),
@@ -1182,6 +1207,137 @@ void mu2000::native_learn_finish()
 	traj_start(m_learn_rec, 0, ncal);
 }
 
+
+// ---- 写し取りをファイルに残す・戻す（voicecache.h）
+//
+// 形は「頭 → 記録ごと」。記録 1 つぶんは
+//   種類(1) 鍵(8) 写しの数(2) ／ 写しごとに
+//   覚えたレジスタの印(8)・素の音量(2)・写したときの強さ/音量/表現/パン(2 ずつ)
+//   ・印の立っているレジスタの値(2 ずつ)・包絡線の段数(2)・段ごとに 時刻(4) 番地(1) 値(2)
+
+namespace {
+
+constexpr u32 CAL_MAGIC = 0x43563253u;   // "S2VC"
+constexpr u32 CAL_VERSION = 4;
+
+void put8(std::vector<u8> &v, u8 x) { v.push_back(x); }
+void put16v(std::vector<u8> &v, u16 x) { v.push_back(u8(x)); v.push_back(u8(x >> 8)); }
+void put32v(std::vector<u8> &v, u32 x) { for (int i = 0; i < 4; i++) v.push_back(u8(x >> (i * 8))); }
+void put64v(std::vector<u8> &v, u64 x) { for (int i = 0; i < 8; i++) v.push_back(u8(x >> (i * 8))); }
+
+struct rd {
+	const u8 *p, *e;
+	bool ok = true;
+	u8 g8() { if (p + 1 > e) { ok = false; return 0; } return *p++; }
+	u16 g16() { const u8 a = g8(), b = g8(); return u16(a | (b << 8)); }
+	u32 g32() { u32 x = 0; for (int i = 0; i < 4; i++) x |= u32(g8()) << (i * 8); return x; }
+	u64 g64() { u64 x = 0; for (int i = 0; i < 8; i++) x |= u64(g8()) << (i * 8); return x; }
+};
+
+void write_cals(std::vector<u8> &out, u8 kind, u64 key, const std::vector<xg::nv::voice_cal> &cals)
+{
+	put8(out, kind);
+	put64v(out, key);
+	put16v(out, u16(cals.size()));
+	for (const xg::nv::voice_cal &c : cals) {
+		put64v(out, c.mask);
+		put16v(out, u16(c.base_level));
+		put16v(out, u16(c.cal_vel));
+		put16v(out, u16(c.cal_vol));
+		put16v(out, u16(c.cal_expr));
+		put16v(out, u16(c.cal_pan));
+		put16v(out, u16(c.cal_mod));
+		put16v(out, u16(c.cal_rev));
+		put16v(out, u16(c.cal_cho));
+		put16v(out, u16(c.cal_bri));
+		put16v(out, u16(c.cal_res));
+		for (int i = 0; i < 0x40; i++)
+			if (c.mask & (u64(1) << i))
+				put16v(out, c.reg[i]);
+		const u16 n = u16(std::min<size_t>(c.filter_env.size(), 4096));
+		put16v(out, n);
+		for (int i = 0; i < n; i++) {
+			put32v(out, c.filter_env[i].at);
+			put8(out, c.filter_env[i].reg);
+			put16v(out, c.filter_env[i].v);
+		}
+	}
+}
+
+} // namespace
+
+std::vector<u8> mu2000::native_cal_save() const
+{
+	const auto &cal = m_ndrv.cal_map();
+	const auto &drum = m_ndrv.drum_map();
+	if (cal.empty() && drum.empty())
+		return {};
+	std::vector<u8> out;
+	put32v(out, CAL_MAGIC);
+	put32v(out, CAL_VERSION);
+	put32v(out, u32(cal.size() + drum.size()));
+	for (const auto &kv : cal)
+		write_cals(out, 0, kv.first, kv.second);
+	for (const auto &kv : drum)
+		write_cals(out, 1, kv.first, kv.second);
+	return out;
+}
+
+bool mu2000::native_cal_load(const u8 *data, size_t n)
+{
+	rd r{ data, data + n };
+	if (r.g32() != CAL_MAGIC || r.g32() != CAL_VERSION || !r.ok)
+		return false;
+	const u32 count = r.g32();
+	if (count > 100000)
+		return false;
+	for (u32 k = 0; k < count && r.ok; k++) {
+		const u8 kind = r.g8();
+		const u64 key = r.g64();
+		const u16 ncal = r.g16();
+		if (ncal > 8 || !r.ok)
+			return false;
+		std::vector<xg::nv::voice_cal> cals;
+		for (u16 c2 = 0; c2 < ncal && r.ok; c2++) {
+			xg::nv::voice_cal c;
+			c.mask = r.g64();
+			c.base_level = s16(r.g16());
+			c.cal_vel = s16(r.g16());
+			c.cal_vol = s16(r.g16());
+			c.cal_expr = s16(r.g16());
+			c.cal_pan = s16(r.g16());
+			c.cal_mod = s16(r.g16());
+			c.cal_rev = s16(r.g16());
+			c.cal_cho = s16(r.g16());
+			c.cal_bri = s16(r.g16());
+			c.cal_res = s16(r.g16());
+			for (int i = 0; i < 0x40; i++)
+				if (c.mask & (u64(1) << i))
+					c.reg[i] = r.g16();
+			const u16 steps = r.g16();
+			if (steps > 4096 || !r.ok)
+				return false;
+			c.filter_env.reserve(steps);
+			for (u16 i = 0; i < steps && r.ok; i++) {
+				xg::nv::fstep s;
+				s.at = r.g32();
+				s.reg = r.g8();
+				s.v = r.g16();
+				c.filter_env.push_back(s);
+			}
+			c.have = true;
+			cals.push_back(std::move(c));
+		}
+		if (!r.ok)
+			return false;
+		if (kind == 0)
+			m_ndrv.learn(u32(key), std::move(cals));
+		else
+			m_ndrv.learn_drum(key, std::move(cals));
+	}
+	return true;
+}
+
 // 写し取った音が鳴っている間、firmware がフィルタ（0x00・0x01・0x04）を
 // どう動かすかを録る。あとの音でも同じように動かせば、音色の動きまで揃う
 void mu2000::traj_start(u32 rec, u64 drum_key, int ncal)
@@ -1197,6 +1353,7 @@ void mu2000::traj_start(u32 rec, u64 drum_key, int ncal)
 		m_traj_chan[ch] = (m_learn_keyed & (u64(1) << ch)) ? n++ : -1;
 	m_traj_n = 0;
 	m_traj_rec = true;
+	m_ndrv.set_recording(true);
 	m_traj_rec_key = rec;
 	m_traj_drum_key = drum_key;
 	m_traj_start = m_ne_clock;
@@ -1232,6 +1389,7 @@ void mu2000::traj_finish()
 {
 	set_swp_watch(nullptr);
 	m_traj_rec = false;
+	m_ndrv.set_recording(false);
 	if (std::getenv("SMU2000_NATIVE_DEBUG"))
 		std::fprintf(stderr, "traj rec=%06x drum=%llx 段 %u%c", m_traj_rec_key,
 		             (unsigned long long)m_traj_drum_key, m_traj_n, 10);
@@ -1270,22 +1428,62 @@ bool mu2000::native_midi(u8 byte, int port)
 	if (byte & 0x80) {
 		if (byte >= 0xf0) {              // SysEx など。以後は firmware に任せる
 			n.status = 0;
-			// **長めに回す**。エフェクトの種類を変える SysEx は、MEG のプログラムを
-			// 1 万件以上書き直す。その途中で止めると音が出なくなる
-			m_fw_hold = 44100 / 2;
+			if (byte == 0xf0) {
+				// 頭を見て決めるので、まずは短く。0x0b 番目までに分かる
+				m_sx_pos = 0;
+				m_fw_hold = std::max(m_fw_hold, u32(44100 / 30));
+			} else {
+				m_sx_pos = -1;
+				m_fw_hold = std::max(m_fw_hold, u32(44100 / 30));
+			}
+			if (m_fw_why != 1)
+				m_fw_why = 2;
 			return false;
 		}
 		n.status = byte;
 		n.have = 0;
+		// アフタータッチは native では何も起きないので、そのパートは firmware に任せる
+		if ((byte & 0xf0) == 0xd0 || (byte & 0xf0) == 0xa0)
+			m_ndrv.aftertouch((byte & 0x0f) + port * 16, 1);
 		// 鍵の上げ下げ・CC・ベンドはこちらで見る。残り（音色の指定など）は firmware へ
 		const u8 kind = byte & 0xf0;
 		if (kind != 0x80 && kind != 0x90 && kind != 0xb0 && kind != 0xe0) {
 			m_ne_stats.other++;
-			m_fw_hold = 44100 / 50;
+			// 音色の指定。ワーク RAM に入るのは 30 サンプル（0.68ms）で済むが
+			// （nativeplay --ccwatch）、firmware の中の下ごしらえはもっとかかる。
+			// 10ms だと piano の残差が -58dB から -54dB に落ちたので 20ms 見る
+			m_fw_hold = std::max(m_fw_hold, u32(44100 / 50));
+			if (m_fw_why != 1)
+				m_fw_why = 2;
 			return false;
 		}
 		return true;                     // 状態のバイトは飲み込む
 	}
+	// SysEx の中身。エフェクトの種類を変えるものだけ長く回す（MEG のプログラムを
+	// 1 万件以上書き直すので、途中で止めると音が出なくなる）。
+	// パートの設定（08 pp xx）やドラムの設定は短くてよい
+	if (m_sx_pos >= 0) {
+		// 長い SysEx（MEG のプログラムなど）の間は待ちを切らさない
+		m_fw_hold = std::max(m_fw_hold, u32(44100 / 200));
+		if (m_sx_pos < 5)
+			m_sx[m_sx_pos] = byte;
+		if (++m_sx_pos == 5) {
+			const bool yamaha_param = m_sx[0] == 0x43 && (m_sx[1] & 0xf0) == 0x10;
+			// 43 1n 4C hh … の hh。00 システム / 02 エフェクト / 03 インサーション
+			const u8 hh = m_sx[3];
+			const bool heavy = !yamaha_param || hh == 0x00 || hh == 0x02 || hh == 0x03;
+			if (heavy) {
+				// 実測（nativeplay --ccwatch）で SWP30 を触り終わるまで
+				// XG On が 224ms、リバーブの種類が 168ms、インサーションが 176ms。
+				// 余裕を見て 300ms（前は 500ms だった）
+				m_fw_hold = std::max(m_fw_hold, u32(44100 * 3 / 10));
+				m_fw_why = 1;
+			}
+			m_sx_pos = -1;
+		}
+		return false;
+	}
+
 	const u8 kind = n.status & 0xf0;
 	if (kind != 0x80 && kind != 0x90 && kind != 0xb0 && kind != 0xe0)
 		return false;
@@ -1302,7 +1500,7 @@ bool mu2000::native_midi(u8 byte, int port)
 	if (kind == 0xe0) {
 		m_nq.push_back({ fire, 3, u8(part), u8(n.d0 & 0x7f), u8(byte & 0x7f) });
 		if (m_fw_notes[part]) {
-			m_fw_hold = std::max(m_fw_hold, u32(44100 / 500));
+			m_fw_hold = std::max(m_fw_hold, u32(44100 / 200));
 			replay_note(n.status, n.d0, byte, port);
 		}
 		return true;
@@ -1317,7 +1515,16 @@ bool mu2000::native_midi(u8 byte, int port)
 			m_nq.push_back({ fire, 2, u8(part), u8(n.d0 & 0x7f), u8(byte & 0x7f) });
 		else
 			m_ndrv.control(part, n.d0 & 0x7f, byte & 0x7f);   // 音を全部切るなどは待たない
-		m_fw_hold = std::max(m_fw_hold, u32(mine ? 44100 / 500 : 44100 / 50));
+		// こちらでさばける CC（音量・パン・ダンパー）は firmware に渡すだけなので短く。
+		// 知らない CC は firmware がすべてやるので、処理が終わるまで見る
+		// （5ms に詰めたら bend の残差が -35.8dB から -14dB に落ちた）
+		// こちらでさばける CC は渡すだけなので短く。ただし **そのパートを
+		// firmware が鳴らしている間**は、firmware に効かせてもらうので長く見る
+		// （渡したバイトは列に並ぶので、写し取りで回すときに順に処理される）
+		// まだ写し取っていないパートは、1 音目を firmware が鳴らすので、
+		// CC も firmware に効かせてもらう
+		const bool quick = mine && !m_fw_notes[part] && m_ndrv.part_learned(part);
+		m_fw_hold = std::max(m_fw_hold, u32(quick ? 44100 / 500 : 44100 / 50));
 		replay_note(n.status, n.d0, byte, port);
 		return true;
 	}
@@ -1334,6 +1541,7 @@ bool mu2000::native_midi(u8 byte, int port)
 			if (m_fw_note_total)
 				m_fw_note_total--;
 		}
+		m_fw_hold = std::max(m_fw_hold, u32(44100 / 50));    // 離しの下ごしらえまで
 		replay_note(n.status, u8(note), u8(vel), port);
 		return true;
 	}
@@ -1353,12 +1561,15 @@ bool mu2000::native_midi(u8 byte, int port)
 		m_learn_part = part;
 		m_ne_stats.learn++;
 		native_learn_start(rec);
+		if (m_fw_why != 1)
+			m_fw_why = 3;
 	}
 	m_fw_hold = std::max(m_fw_hold, u32(44100 / 20));
 	if (m_fw_notes[part] < 255) {
 		m_fw_notes[part]++;
 		m_fw_note_total++;
 	}
+	m_fw_note_until = m_ne_clock + FW_NOTE_RUN;
 	replay_note(n.status, u8(note), u8(vel), port);
 	return true;
 }
@@ -1373,8 +1584,9 @@ void mu2000::replay_note(u8 status, u8 d0, u8 d1, int port)
 	midi_in(d0, port);
 	midi_in(d1, port);
 	m_native_engine = save;
-	if (m_fw_hold < 44100 / 50)
-		m_fw_hold = 44100 / 50;
+	// **待ちはここでは置かない。** 以前はここで一律 20ms 回していて、
+	// CC を 1 つ渡すたびに 20ms 走らせることになっていた（曲の出だしの重さの正体）。
+	// 要るぶんは呼ぶ側が置く
 }
 
 // S-MU2000: 軽量モードの入り切り（doc/native-dsp.md）
@@ -1555,20 +1767,38 @@ void mu2000::run_sample(s32 &left, s32 &right)
 	bool run_cpu = m_cpu_enabled;
 	if (m_native_engine) {
 		m_ne_samples.fetch_add(1, std::memory_order_relaxed);
-		if (midi_pending())
-			m_fw_hold = std::max(m_fw_hold, u32(44100 / 500));   // 溜まっている間は回す
 		// firmware が鳴らしている音がある間は止めない。LFO・包絡線・ベンドの
-		// 追従をやっているのは firmware なので、止めるとその音だけ変わってしまう
-		if (m_fw_note_total)
+		// 追従をやっているのは firmware なので、止めるとその音だけ変わってしまう。
+		// MIDI の溜まり具合は、止まっているときだけ見る（毎サンプル数えると重い）
+		if (m_fw_note_total && m_ne_clock < m_fw_note_until)
 			m_fw_hold = std::max(m_fw_hold, u32(2));
+		// 「溜まっている間は回す」はやめた。渡した MIDI は 1 バイト 14 サンプルかけて
+		// 線を流れるので、それを待つだけで実時間の 2 割を SH-2 に持っていかれていた。
+		// メッセージごとに置く待ち（下の native_midi）で足りる
 		if (m_fw_hold) {
-			if (--m_fw_hold == 0)
-				m_ndrv.sync_cc();       // 止める前に、つまみの位置を取り直す
+			if (--m_fw_hold == 0) {
+				// つまみの位置を RAM から取り直す。こちらが動かした値は
+				// 上書きしない（native_driver::sync_cc）。ベンド幅のように
+				// こちらが持たない値は、ここで拾う
+				m_ndrv.sync_cc();
+				m_fw_why = 0;
+			}
 		} else {
 			run_cpu = false;
 		}
-		if (run_cpu)
+		if (run_cpu) {
 			m_ne_fw_samples.fetch_add(1, std::memory_order_relaxed);
+			if (m_fw_note_total)
+				m_ne_by_note.fetch_add(1, std::memory_order_relaxed);
+			else if (m_fw_why == 1)
+				m_ne_by_sysex.fetch_add(1, std::memory_order_relaxed);
+			else if (m_fw_why == 3)
+				m_ne_by_learn.fetch_add(1, std::memory_order_relaxed);
+			else if (m_fw_why == 4)
+				m_ne_by_midi.fetch_add(1, std::memory_order_relaxed);
+			else
+				m_ne_by_other.fetch_add(1, std::memory_order_relaxed);
+		}
 		if (m_learning && m_learn_left && --m_learn_left == 0)
 			native_learn_finish();
 		m_ne_clock++;
