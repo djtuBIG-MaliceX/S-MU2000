@@ -257,7 +257,7 @@ def step_native_engine(rep, roms, cases):
     同じ大きさで鳴るか。1 音ずつの波形までは合わないので、大きさ（rms）と
     低域比で見る。写し取りはこの試験の中では残さない（SMU2000_NO_VOICECACHE）"""
     import math
-    env = None
+    env = {"SMU2000_NO_VOICECACHE": "1"}   # 試験は毎回まっさらから
     worst = 0.0
     worst_name = ""
     bad = []

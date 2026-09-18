@@ -10,6 +10,7 @@
 #endif
 
 #include "xg/ram.h"
+#include "xg/voices.h"
 #include "xg/fx_params.h"
 
 #include <algorithm>
@@ -991,6 +992,8 @@ void mu2000::set_native_engine(int mode)
 	m_learn_left = 0;
 	for (u8 &c : m_fw_notes)
 		c = 0;
+	for (part_prog &p : m_prog_sel)
+		p = part_prog();
 	m_fw_note_total = 0;
 	m_fw_note_until = 0;
 	m_nq.clear();
@@ -1042,6 +1045,8 @@ void mu2000::native_learn_start(u32 rec)
 	}
 	m_learn_first.clear();
 	m_learn_last.clear();
+	m_learn_traj.clear();
+	m_learn_key_clock = 0;
 	m_learn_mask = m_learn_keyed = 0;
 	// レジスタは鍵を押した所でまとめて書かれるので、短くてよい。
 	// 長くすると、その間の音が全部 firmware に回ってしまう。
@@ -1051,6 +1056,14 @@ void mu2000::native_learn_start(u32 rec)
 		if (!master)
 			return;
 		m_learn_last[reg] = value;
+		// 鍵を押したあとのフィルタ・LFO の動きを、時刻つきで控えておく
+		if (m_learn_key_clock) {
+			const int r2 = int(reg % 64);
+			if ((r2 == 0x00 || r2 == 0x01 || r2 == 0x04 || r2 == 0x05 || r2 == 0x0a) &&
+			    reg < 0x1000 && m_learn_traj.size() < 512)
+				m_learn_traj.push_back({ int(reg / 64),
+				    xg::nv::fstep{ u32(m_ne_clock - m_learn_key_clock), u8(r2), value } });
+		}
 		switch (reg) {
 		case 0x18e: m_learn_mask = (m_learn_mask & ~(u64(0xffff) << 48)) | (u64(value) << 48); break;
 		case 0x18f: m_learn_mask = (m_learn_mask & ~(u64(0xffff) << 32)) | (u64(value) << 32); break;
@@ -1063,6 +1076,8 @@ void mu2000::native_learn_start(u32 rec)
 				m_learn_keyed |= m_learn_mask;
 			if (m_learn_first.empty())
 				m_learn_first = m_learn_last;
+			if (!m_learn_key_clock)
+				m_learn_key_clock = m_ne_clock;
 			// 鳴り始めたら、あと少しだけ見て終える（0x01 が落ち着くぶん）。
 			// ただし**要素がそろうまでは待つ**。MusicBox のように 2 つ目の要素を
 			// 37ms 遅れて鳴らす音色があり、打ち切ると片方しか写し取れない。
@@ -1109,6 +1124,7 @@ void mu2000::native_learn_finish()
 			cal.cal_cho  = m_ndrv.part_cho(m_learn_part);
 			cal.cal_bri  = m_ndrv.part_bri(m_learn_part);
 			cal.cal_res  = m_ndrv.part_res(m_learn_part);
+			cal.cal_ctx  = m_ndrv.part_ctx(m_learn_part);
 			cal.have = true;
 			cals.push_back(cal);
 		}
@@ -1179,13 +1195,15 @@ void mu2000::native_learn_finish()
 		cal.cal_cho  = m_ndrv.part_cho(m_learn_part);
 		cal.cal_bri  = m_ndrv.part_bri(m_learn_part);
 		cal.cal_res  = m_ndrv.part_res(m_learn_part);
+		cal.cal_ctx  = m_ndrv.part_ctx(m_learn_part);
 		cal.have = true;
 		cals.push_back(cal);
 	}
 	const int ncal = int(cals.size());
 	if (std::getenv("SMU2000_NATIVE_DEBUG")) {
-		std::fprintf(stderr, "learn rec=%06x 要素 %d 写し %d 鍵いた %d\n", m_learn_rec, nel, ncal,
-		             __builtin_popcountll(m_learn_keyed));
+		std::fprintf(stderr, "learn rec=%06x 要素 %d 写し %d 鍵いた %d part=%d ctx=%08x\n",
+		             m_learn_rec, nel, ncal, __builtin_popcountll(m_learn_keyed),
+		             m_learn_part, m_ndrv.part_ctx(m_learn_part));
 		for (int k = 0; k < ncal; k++) {
 			const xg::nv::voice_cal &c = cals[size_t(k)];
 			const u8 *e2 = xg::nv::element(rom, m_learn_rec, k);
@@ -1218,7 +1236,7 @@ void mu2000::native_learn_finish()
 namespace {
 
 constexpr u32 CAL_MAGIC = 0x43563253u;   // "S2VC"
-constexpr u32 CAL_VERSION = 4;
+constexpr u32 CAL_VERSION = 6;
 
 void put8(std::vector<u8> &v, u8 x) { v.push_back(x); }
 void put16v(std::vector<u8> &v, u16 x) { v.push_back(u8(x)); v.push_back(u8(x >> 8)); }
@@ -1251,6 +1269,7 @@ void write_cals(std::vector<u8> &out, u8 kind, u64 key, const std::vector<xg::nv
 		put16v(out, u16(c.cal_cho));
 		put16v(out, u16(c.cal_bri));
 		put16v(out, u16(c.cal_res));
+		put32v(out, c.cal_ctx);
 		for (int i = 0; i < 0x40; i++)
 			if (c.mask & (u64(1) << i))
 				put16v(out, c.reg[i]);
@@ -1311,6 +1330,7 @@ bool mu2000::native_cal_load(const u8 *data, size_t n)
 			c.cal_cho = s16(r.g16());
 			c.cal_bri = s16(r.g16());
 			c.cal_res = s16(r.g16());
+			c.cal_ctx = r.g32();
 			for (int i = 0; i < 0x40; i++)
 				if (c.mask & (u64(1) << i))
 					c.reg[i] = r.g16();
@@ -1344,19 +1364,31 @@ void mu2000::traj_start(u32 rec, u64 drum_key, int ncal)
 {
 	if (!ncal)
 		return;
-	m_traj_cals = drum_key ? m_ndrv.drum_cals_of(drum_key) : m_ndrv.cals_of(rec);
+	m_traj_cals = drum_key ? m_ndrv.drum_cals_of(drum_key) : m_ndrv.cals_of(rec, m_learn_part);
 	if (!m_traj_cals)
 		return;
 	// 写し取ったチャンネルの順が、そのまま写し取りの並び
 	int n = 0;
 	for (int ch = 0; ch < 64; ch++)
 		m_traj_chan[ch] = (m_learn_keyed & (u64(1) << ch)) ? n++ : -1;
+	// 鍵を押した瞬間からの控えを、まず入れる
+	{
+		int n2 = 0;
+		int idx[64];
+		for (int ch = 0; ch < 64; ch++)
+			idx[ch] = (m_learn_keyed & (u64(1) << ch)) ? n2++ : -1;
+		for (const auto &e : m_learn_traj)
+			if (e.first < 64 && idx[e.first] >= 0 &&
+			    size_t(idx[e.first]) < m_traj_cals->size())
+				(*m_traj_cals)[idx[e.first]].filter_env.push_back(e.second);
+	}
+	m_learn_traj.clear();
 	m_traj_n = 0;
 	m_traj_rec = true;
 	m_ndrv.set_recording(true);
 	m_traj_rec_key = rec;
 	m_traj_drum_key = drum_key;
-	m_traj_start = m_ne_clock;
+	m_traj_start = m_learn_key_clock ? m_learn_key_clock : m_ne_clock;
 	m_traj_left = 44100;                 // 1 秒ぶん見る
 	set_swp_watch([this](bool master, u32 reg, u16 value) {
 		if (!master)
@@ -1394,6 +1426,26 @@ void mu2000::traj_finish()
 		std::fprintf(stderr, "traj rec=%06x drum=%llx 段 %u%c", m_traj_rec_key,
 		             (unsigned long long)m_traj_drum_key, m_traj_n, 10);
 	m_traj_cals = nullptr;
+}
+
+// バンクとプログラムから音色の記録を引いて、native の口に渡す。
+// firmware がワーク RAM に入れるのを待たなくて済む（引き方は
+// xg::voice_rom::lookup。旋律系のバンク 640 音色で firmware と食い違い 0）
+void mu2000::native_select_voice(int part)
+{
+	if (part < 0 || part >= 64 || !m_prog)
+		return;
+	const part_prog &p = m_prog_sel[part];
+	const bool drum = (p.msb == 127 || p.msb == 126);
+	if (drum) {
+		m_ndrv.set_record(part, 0, 1);
+		return;
+	}
+	const xg::voice_rom vr(m_prog);
+	const int mode = m_ram.size() > xg::ram::VOICE_MODE ? m_ram[xg::ram::VOICE_MODE] : 1;
+	const int set  = m_ram.size() > xg::ram::VOICE_SET  ? m_ram[xg::ram::VOICE_SET]  : 1;
+	const u32 rec = vr.lookup(mode, set, p.msb, p.lsb, p.prog);
+	m_ndrv.set_record(part, rec, rec ? 0 : -1);
 }
 
 // 待っている native の出来事を、時が来たものから実行する
@@ -1442,11 +1494,14 @@ bool mu2000::native_midi(u8 byte, int port)
 		}
 		n.status = byte;
 		n.have = 0;
-		// アフタータッチは native では何も起きないので、そのパートは firmware に任せる
+		// アフタータッチ。**割り当て（CAT / PAT）が既定なら音に何も起きない**ので、
+		// そのときは firmware に任せなくてよい（doc/native-engine.md の 6.43）
 		if ((byte & 0xf0) == 0xd0 || (byte & 0xf0) == 0xa0)
-			m_ndrv.aftertouch((byte & 0x0f) + port * 16, 1);
+			m_ndrv.aftertouch((byte & 0x0f) + port * 16, (byte & 0xf0) == 0xa0);
 		// 鍵の上げ下げ・CC・ベンドはこちらで見る。残り（音色の指定など）は firmware へ
 		const u8 kind = byte & 0xf0;
+		if (kind == 0xc0)
+			return true;                     // 音色の指定は下でバイトを見る
 		if (kind != 0x80 && kind != 0x90 && kind != 0xb0 && kind != 0xe0) {
 			m_ne_stats.other++;
 			// 音色の指定。ワーク RAM に入るのは 30 サンプル（0.68ms）で済むが
@@ -1485,6 +1540,24 @@ bool mu2000::native_midi(u8 byte, int port)
 	}
 
 	const u8 kind = n.status & 0xf0;
+	// 音色の指定（1 バイト）。自分で記録を引いて、firmware にも渡す
+	if (kind == 0xc0) {
+		const int part2 = (n.status & 0x0f) + port * 16;
+		m_prog_sel[part2].prog = byte & 0x7f;
+		native_select_voice(part2);
+		m_ne_stats.other++;
+		// 記録はこちらで引けたが、firmware も自分の下ごしらえに時間が要る
+		// （5ms に詰めると piano の残差が -58dB から -53dB に落ちる）
+		m_fw_hold = std::max(m_fw_hold, u32(44100 / 50));
+		if (m_fw_why != 1)
+			m_fw_why = 2;
+		const int save2 = m_native_engine;
+		m_native_engine = 0;
+		midi_in(n.status, port);
+		midi_in(byte, port);
+		m_native_engine = save2;
+		return true;
+	}
 	if (kind != 0x80 && kind != 0x90 && kind != 0xb0 && kind != 0xe0)
 		return false;
 	if (n.have == 0) {
@@ -1510,6 +1583,9 @@ bool mu2000::native_midi(u8 byte, int port)
 	// 回す時間は短くてよい
 	if (kind == 0xb0) {
 		m_ne_stats.other++;
+		const int cc = n.d0 & 0x7f;
+		if (cc == 0x00) { m_prog_sel[part].msb = byte & 0x7f; native_select_voice(part); }
+		if (cc == 0x20) { m_prog_sel[part].lsb = byte & 0x7f; native_select_voice(part); }
 		const bool mine = m_ndrv.handles_cc(n.d0 & 0x7f);
 		if (mine)
 			m_nq.push_back({ fire, 2, u8(part), u8(n.d0 & 0x7f), u8(byte & 0x7f) });
@@ -1551,10 +1627,14 @@ bool mu2000::native_midi(u8 byte, int port)
 		return true;
 	}
 	m_ne_stats.note_fw++;
+	// firmware が鳴らす音でも、最後に押した鍵は覚えておく
+	// （つぎの音のポルタメントの出発点になる）
+	m_ndrv.note_fw(part, note);
 	// まだ写し取っていない音（ドラムは音ごと）。firmware に鳴らさせて覚える
 	const u32 rec = m_ndrv.record_of(part);
 	const bool drum = m_ndrv.is_drum(part);
-	if ((rec || drum) && !m_learning) {
+	// 知らない CC で firmware に任せているパートは、写し取っても使わない
+	if ((rec || drum) && !m_learning && !m_ndrv.delegated(part)) {
 		m_learn_note = note;
 		m_learn_vel = vel;
 		m_learn_drum = drum ? m_ndrv.drum_key(part, note) : 0;

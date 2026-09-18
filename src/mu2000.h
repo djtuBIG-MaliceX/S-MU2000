@@ -336,6 +336,7 @@ public:
 	std::vector<u8> native_cal_save() const;
 	bool native_cal_load(const u8 *data, size_t n);
 	size_t native_cal_count() const { return m_ndrv.cal_count(); }
+	int native_peak_slots() const { return m_ndrv.peak_slots(); }
 
 	struct native_why { u64 total, by_note, by_sysex, by_other, by_learn, by_midi; };
 	native_why native_why_counts() const
@@ -380,6 +381,10 @@ private:
 	u32  m_learn_rec = 0;
 	std::map<u32, u16> m_learn_first, m_learn_last;
 	u64  m_learn_mask = 0, m_learn_keyed = 0;
+	// 写し取りの間の、フィルタ・LFO の動き（鍵を押した瞬間からの時刻つき）。
+	// 写し取りが終わってから録り始めると、**最初の数十 ms が抜ける**
+	u64  m_learn_key_clock = 0;
+	std::vector<std::pair<int, xg::nv::fstep>> m_learn_traj;
 	int  m_learn_left = 0;         // 残りサンプル数
 	int  m_learn_want = 1;         // 鳴るはずの要素の数（そろうまで待つ）
 	// **実機と同じだけ遅らせる**（doc/native-engine.md の 6.16）。
@@ -424,6 +429,12 @@ private:
 		if (on) m_nown[part][(note >> 5) & 3] |= u32(1) << (note & 31);
 		else    m_nown[part][(note >> 5) & 3] &= ~(u32(1) << (note & 31));
 	}
+
+	// **音色を自分で引く**（firmware の RAM を待たずに済む）。
+	// バンクとプログラムをパートごとに覚えて、xg::voice_rom::lookup に渡す
+	struct part_prog { u8 msb = 0, lsb = 0, prog = 0; };
+	part_prog m_prog_sel[64];
+	void native_select_voice(int part);
 
 	// 口ごとの MIDI の読み取り
 	struct nmidi { u8 status = 0; u8 d0 = 0; int have = 0; };

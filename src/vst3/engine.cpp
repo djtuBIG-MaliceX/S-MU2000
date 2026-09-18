@@ -566,8 +566,8 @@ void engine::boot()
 	// **firmware を走らせない口**（doc/native-engine.md）。鍵・つまみを自分でさばき、
 	// SH-2 は必要なときだけ回す。2.3〜2.9 倍軽い。plugin.ini に native_engine=1 で入る
 	int native_engine = 0;
-	// 写し取りをファイルに残す（voicecache.h）。別の曲で取った写しは
-	// その曲の音にならないので既定は切
+	// 写し取りをファイルに残す（voicecache.h）。経路の印が付いているので
+	// 別の曲の写しが混ざっても安全。plugin.ini の voicecache=0 で切る
 	int voicecache = 0;
 	if (const std::string local = smu2000::config_dir(); !local.empty())
 		if (std::FILE *f = std::fopen(smu2000::join(local, "plugin.ini").c_str(), "rb")) {

@@ -1224,6 +1224,19 @@ int main(int argc, char **argv)
 	// 一覧の窓で、音色の名前と楽器の絵を利用者の ROM から読む（xg/voices.h）
 	ui::xgui::set_voice_rom(eng.mu.program_rom());
 
+	// **既定は USB の口**（実機を PC に繋ぐときと同じ姿）。口 C・D は実機では
+	// USB だけの口で、firmware は HOST SELECT が USB のときしか通さない。
+	// USB のときは A・B も USB 側を通る（実機で DIN が黙るのと同じ）。
+	// --host-midi を付けると DIN の口 A・B だけになる。
+	//
+	// **起動より前に決めること**。reset() が「ホストが居る」の知らせ
+	// （F4 03 01 01 01）を積むかどうかはここで決まる。--shot は下で先に
+	// 起動して return するので、この行が後ろにあると絵だけ DIN の姿で
+	// 撮れてしまっていた
+	eng.mu.set_usb_host(usb_host);
+	std::printf(usb_host ? "MIDI は USB の口（A-D の 64 パート）\n"
+	                     : "--host-midi: DIN の口 A・B だけ（パート 1-32）\n");
+
 	// 絵だけ、ただし起動後の LCD が欲しい場合
 	if (!shot_path.empty()) {
 		if (!eng.boot()) { std::fprintf(stderr, "%s\n", eng.message.c_str()); return 1; }
@@ -1317,14 +1330,6 @@ int main(int argc, char **argv)
 		if (analog)
 			std::printf("音の出口: アナログ（直流を切る）\n");
 		g_win.play_file.set_fold_extra_ports(fold34);
-
-		// **既定は USB の口**（実機を PC に繋ぐときと同じ姿）。口 C・D は実機では
-		// USB だけの口で、firmware は HOST SELECT が USB のときしか通さない。
-		// USB のときは A・B も USB 側を通る（実機で DIN が黙るのと同じ）。
-		// --host-midi を付けると DIN の口 A・B だけになる
-		eng.mu.set_usb_host(usb_host);
-		std::printf(usb_host ? "MIDI は USB の口（A-D の 64 パート）\n"
-		                     : "--host-midi: DIN の口 A・B だけ（パート 1-32）\n");
 	}
 
 	eng.publish();

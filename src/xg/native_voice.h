@@ -135,6 +135,22 @@ inline int elem_tune(const u8 *elem)
 	return (int(elem[17]) - 64) * 100 + (int(elem[18]) - 64);
 }
 
+// **ポルタメントの速さ**（doc/native-engine.md の 6.41）。
+// ROM の表 0x1E6698（16bit・128 語）を CC5 で直に引く。目盛りが 2 通りある:
+//   CC5 24-127 … 表 ÷ 128 = 10ms あたりのセント
+//   CC5  0-23  … 表 × 2   = 10ms あたりのセント（256 倍の目盛り）
+// 返すのは**セント × 256**（そのまま足し引きできる細かさ）
+constexpr u32 PORTA_TAB = 0x1E6698;
+constexpr u32 PORTA_TICK = 441;            // firmware は 10ms ごとに足す
+
+inline int porta_step(const u8 *rom, int cc5)
+{
+	if (!rom || cc5 < 0 || cc5 > 127)
+		return 0;
+	const int raw = int(rd16(rom, PORTA_TAB + u32(cc5) * 2));
+	return cc5 < 24 ? raw * 512 : raw * 2;
+}
+
 inline u16 pitch_reg(const wave_info &w, int note, int follow = 100, int cents_extra = 0)
 {
 	// 整数で計算する（firmware と同じ丸めになる。0 の側へ切り捨て）。
@@ -373,6 +389,10 @@ struct voice_cal {
 	int  cal_vol = 100, cal_expr = 127, cal_pan = 64, cal_mod = 0;
 	int  cal_rev = 40, cal_cho = 0;      // 写し取ったときの送り（CC91・CC93）
 	int  cal_bri = 64, cal_res = 64;     // 写し取ったときの明るさ・共振（CC74・CC71）
+	// **写し取ったときのパートの「経路」**（素通しの量・バリエーション送り・
+	// パートの EQ・インサーションの掛かり先）をまとめた印。
+	// ここが違うと、写し取った 0x20-0x2b・0x32-0x37 はそのまま使えない
+	u32  cal_ctx = 0;
 	u16  reg[0x40] = {};       // 基準の鍵・強さでの値
 	u64  mask = 0;             // 覚えているレジスタ
 
