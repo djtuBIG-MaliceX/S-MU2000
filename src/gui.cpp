@@ -264,6 +264,7 @@ enum : UINT {
 	ID_PLAY_FILE = 5100, ID_STOP_FILE = 5101, ID_PORTS34_FOLD = 5102, ID_PORTS34_DROP = 5103,
 	ID_FACTORY = 5200,
 	ID_NATIVE_FX = 5215,     // エフェクトを C++ で鳴らす（軽量モード）
+	ID_NATIVE_ENGINE = 5216, // firmware を走らせない口（聞き比べ用）
 	ID_PC_EDITOR = 5201,
 	ID_OVERVIEW = 5202,
 	ID_OUTPUT_DIGITAL = 5300, ID_OUTPUT_ANALOG = 5301,
@@ -372,6 +373,9 @@ void show_port_menu(HWND hwnd, POINT screen)
 	const bool ready = g_win.eng && g_win.eng->state.load() == 1;
 	add_item(top, MF_STRING | (g_win.eng->native_fx.load() ? MF_CHECKED : 0), ID_NATIVE_FX,
 	         "エフェクトを C++ で鳴らす（軽い・音は実機と違う）");
+	add_item(top, MF_STRING | (g_win.eng->native_engine.load() ? MF_CHECKED : 0),
+	         ID_NATIVE_ENGINE,
+	         "firmware を走らせずに鳴らす（速い・まだ音が違う）\tF4");
 	add_item(top, MF_STRING | (ready ? 0 : MF_GRAYED), ID_FACTORY, "工場出荷状態に戻す...");
 
 	TrackPopupMenu(top, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON,
@@ -903,6 +907,8 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 		}
 		else if (id == ID_NATIVE_FX)
 			g_win.eng->want_native_fx.store(g_win.eng->native_fx.load() ? 0 : 2);
+		else if (id == ID_NATIVE_ENGINE)
+			g_win.eng->want_native_engine.store(g_win.eng->native_engine.load() ? 0 : 1);
 		else if (id == ID_FACTORY) choose_factory_reset(hwnd);
 		else if (id == ID_PC_EDITOR) open_window(hwnd, g_win.pc);
 		else if (id == ID_OVERVIEW) open_window(hwnd, g_win.list);
@@ -974,6 +980,10 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 		}
 		if (wp == VK_F3) {                      // 一覧
 			open_window(hwnd, g_win.list);
+			return 0;
+		}
+		if (wp == VK_F4 && g_win.eng) {         // firmware を走らせない口の入切
+			g_win.eng->want_native_engine.store(g_win.eng->native_engine.load() ? 0 : 1);
 			return 0;
 		}
 		if (wp == VK_F5) {                      // 配置を読み直す
@@ -1361,6 +1371,7 @@ int main(int argc, char **argv)
 		// 起動が終わってから入れる（起動には firmware が要る）
 		if (native_engine) {
 			eng.mu.set_native_engine(native_engine);
+			eng.native_engine.store(native_engine);
 			if (std::getenv("SMU2000_VOICECACHE"))
 				smu2000::voicecache::load(eng.mu, smu2000::voicecache::key(eng.mu));
 		}
@@ -1493,6 +1504,7 @@ int main(int argc, char **argv)
 	flush_card();      // 音はもう止まっている。SmartMedia に書いたものを残す
 	save_settings();   // VOLUME のつまみの位置
 	// 音はもう止まっている。起動できていたときだけ残す
+	eng.settle_for_save();
 	if (eng.state.load() == 1 && !smu2000::nvram::save(eng.mu))
 		std::fprintf(stderr, "設定を残せなかった: %s\n", smu2000::nvram::path(eng.mu).c_str());
 	// 残した設定で起動した写しも用意しておく（src/bootcache.h）。無いと、

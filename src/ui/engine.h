@@ -69,6 +69,11 @@ struct engine {
 	// 画面からはここへ頼むだけで、切り替えは音声の糸が fill() の頭で行う
 	std::atomic<int>  want_native_fx{-1};
 	std::atomic<int>  native_fx{0};
+	// **firmware を走らせない口**（doc/native-engine.md の段 2）。0 切 / 1 入。
+	// まだ音が実機とはっきり違うので、聞き比べのために窓から入切できるようにしてある。
+	// 軽量モードと同じく、切り替えは音声の糸が fill() の頭で行う
+	std::atomic<int>  want_native_engine{-1};
+	std::atomic<int>  native_engine{0};
 	std::string      message = "起動中...";
 
 	driver drv;
@@ -117,6 +122,23 @@ struct engine {
 			std::printf("起動の写しを残した: %s\n", smu2000::bootcache::path(key).c_str());
 		publish();
 		return true;
+	}
+
+	// **NVRAM を残す前に、firmware を落ち着かせる。**
+	// NVRAM はワーク RAM 256KB を丸ごと残すので、firmware の生きた状態も
+	// 一緒に残る。native の口では firmware をほとんど回さないため、
+	// そのまま残すと firmware から見て中途半端な状態が保存され、
+	// 次に開いたときは曲の頭からおかしくなる。
+	// native を切って（鳴っている音は離される）、少し回してから残す
+	void settle_for_save()
+	{
+		if (!mu.native_engine())
+			return;
+		mu.set_native_engine(0);
+		native_engine.store(0);
+		s32 l, r;
+		for (int i = 0; i < int(0.5 * AUDIO_RATE); i++)
+			mu.run_sample(l, r);
 	}
 
 	// 工場出荷状態に戻す。覚えている設定を捨てて電源を入れ直す。
@@ -175,6 +197,12 @@ struct engine {
 		if (const int want = want_native_fx.exchange(-1); want >= 0) {
 			mu.set_native_fx(want);
 			native_fx.store(want);
+		}
+		// native の口の入切も同じところで。入れ直すと写し取りは白紙に戻るので、
+		// その音色の 1 音目はまた firmware が鳴らす
+		if (const int want = want_native_engine.exchange(-1); want >= 0) {
+			mu.set_native_engine(want);
+			native_engine.store(want);
 		}
 
 		guard_a.refill(n, AUDIO_RATE);

@@ -1398,6 +1398,7 @@ int main(int argc, char **argv)
 	gui.flush_card();        // the sound has stopped; keep what was written to the card
 	gui.remember();          // the audio port, the A/D input and the VOLUME knob's position
 	// The sound has stopped by now. Keep the machine's settings only if it came up
+	eng.settle_for_save();
 	if (eng.state.load() == 1 && !smu2000::nvram::save(eng.mu))
 		std::fprintf(stderr, "設定を残せなかった: %s\n", smu2000::nvram::path(eng.mu).c_str());
 	gui.play.stop();

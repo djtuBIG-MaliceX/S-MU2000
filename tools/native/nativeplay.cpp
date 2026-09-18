@@ -180,6 +180,10 @@ int main(int argc, char **argv)
 	bool atwatch = false;
 	int catoff = -1;
 	bool xgmap = false;
+	const char *sxsettle = nullptr;
+	bool egwatch = false;
+	bool slotalloc = false;
+	bool levelcheck = false;
 	for (int i = 3; i < argc; i++) {
 		if (!std::strcmp(argv[i], "-b") && i + 1 < argc)
 			std::sscanf(argv[++i], "%d,%d,%d", &msb, &lsb, &prog);
@@ -206,6 +210,10 @@ int main(int argc, char **argv)
 		else if (!std::strcmp(argv[i], "--portasweep") && i + 1 < argc) portasweep = std::atoi(argv[++i]);
 		else if (!std::strcmp(argv[i], "--at")) atwatch = true;
 		else if (!std::strcmp(argv[i], "--xgmap")) xgmap = true;
+		else if (!std::strcmp(argv[i], "--sxsettle") && i + 1 < argc) sxsettle = argv[++i];
+		else if (!std::strcmp(argv[i], "--egwatch")) egwatch = true;
+		else if (!std::strcmp(argv[i], "--slotalloc")) slotalloc = true;
+		else if (!std::strcmp(argv[i], "--levelcheck")) levelcheck = true;
 		else if (!std::strcmp(argv[i], "--catoff") && i + 1 < argc) catoff = int(std::strtol(argv[++i], nullptr, 0));
 		else if (!std::strcmp(argv[i], "--sweep") && i + 1 < argc) sweep = std::atoi(argv[++i]);
 		else if (!std::strcmp(argv[i], "--volsweep") && i + 1 < argc) volsweep = std::atoi(argv[++i]);
@@ -468,7 +476,7 @@ int main(int argc, char **argv)
 			for (int ch = 0; ch < 64; ch++)
 				if (keyed & (u64(1) << ch)) {
 					std::printf("%3d", v);
-					for (int rr = 0; rr < 0x20; rr++) {
+					for (int rr = 0; rr < 0x40; rr++) {
 						const auto it = seen.find(u32(ch) * 64 + u32(rr));
 						std::printf(" %04x", it == seen.end() ? 0xffff : it->second);
 					}
@@ -675,6 +683,231 @@ int main(int argc, char **argv)
 			if (o.vel == 100 && o.cut >= 0)
 				std::printf("CUT 鍵 %3d 強さ %3d  0x00=%04x 切る高さ %4d（表との差 %+d） 0x04=%04x%c",
 				            o.note, o.vel, o.cut, o.cut & 0x7ff, (o.cut & 0x7ff) - tab, o.res, 10);
+		return 0;
+	}
+
+	// --levelcheck: **音量の式を実機と並べる**。
+	// まず鍵 60・強さ 100 で 1 音鳴らして校正し（写し取りと同じ）、
+	// そのあと鍵と強さを振って、実機が 0x09 に入れる値とこちらの式を比べる
+	if (levelcheck) {
+		auto play_att = [&](int nn, int vv) -> int {
+			u64 mask = 0, keyed = 0;
+			int got = -1;
+			std::map<u32, u16> last;
+			mu.set_swp_watch([&](bool master, u32 r2, u16 v2) {
+				if (!master) return;
+				switch (r2) {
+				case 0x18e: mask = (mask & ~(u64(0xffff) << 48)) | (u64(v2) << 48); break;
+				case 0x18f: mask = (mask & ~(u64(0xffff) << 32)) | (u64(v2) << 32); break;
+				case 0x1ce: mask = (mask & ~(u64(0xffff) << 16)) | (u64(v2) << 16); break;
+				case 0x1cf: mask = (mask & ~u64(0xffff)) | v2; break;
+				case 0x20e: keyed |= mask; break;
+				default:
+					if (r2 < 0x1000 && (r2 % 64) == 9)
+						last[r2] = v2;
+					break;
+				}
+			});
+			for (u8 bb : { u8(0x90), u8(nn & 0x7f), u8(vv & 0x7f) })
+				mu.midi_in(bb, 0);
+			for (u32 i = 0; i < RATE / 20; i++)
+				mu.run_sample(l, r);
+			for (int ch = 0; ch < 64; ch++)
+				if ((keyed & (u64(1) << ch)) && last.count(u32(ch) * 64 + 9)) {
+					got = int(last[u32(ch) * 64 + 9] & 0xff);
+					break;
+				}
+			for (u8 bb : { u8(0x80), u8(nn & 0x7f), u8(64) })
+				mu.midi_in(bb, 0);
+			for (u32 i = 0; i < RATE / 20; i++)
+				mu.run_sample(l, r);
+			mu.set_swp_watch(nullptr);
+			return got;
+		};
+		const u8 *el = xg::nv::element(rom, rec, 0);
+		const int ref = play_att(60, 100);
+		if (ref < 0) {
+			std::fprintf(stderr, "校正の音が鳴らなかった%c", 10);
+			return 1;
+		}
+		const int base = xg::nv::calibrate_level(rom, el, ref, 60, 100);
+		std::printf("== 音量の式くらべ（鍵 60・強さ 100 で校正。素の音量 %d）%c", base, 10);
+		std::printf("   鍵  強さ   実機   こちら   ずれ   曲線  段の音量  目盛り%c", 10);
+		int bad = 0, n = 0;
+		for (int nn : { 36, 48, 60, 72, 84, 96 })
+			for (int vv : { 20, 60, 100, 127 }) {
+				const int got = play_att(nn, vv);
+				if (got < 0)
+					continue;
+				const int mine = xg::nv::volume_att(rom, el, base, nn, vv);
+				n++;
+				if (got != mine)
+					bad++;
+				const int cv = xg::nv::level_key_curve(rom, el, nn);
+				const int wl = xg::nv::wave_level(rom, el, nn);
+				std::printf("  %3d  %3d   %4d   %4d   %+4d %-6s %+4d  %4d  %4d%c", nn, vv, got, mine,
+				            mine - got, got == mine ? "" : "← 違う", cv, wl, base + cv, 10);
+			}
+		std::printf("ずれた点: %d / %d%c", bad, n, 10);
+		return 0;
+	}
+
+	// --slotalloc: firmware が「どのスロットを使っているか」を持っている場所を
+	// ワーク RAM から探す。音を 1 つずつ足していき、そのたびに
+	// **鳴っているスロットの 64bit のマスク**と同じ並びが RAM に無いかを見る。
+	// 見つかれば、native が使うスロットもそこに立てておけば firmware が避ける
+	if (slotalloc) {
+		const std::vector<u8> &wr = mu.nvram();
+		u64 mask = 0, live = 0;
+		mu.set_swp_watch([&](bool master, u32 r2, u16 v2) {
+			if (!master) return;
+			switch (r2) {
+			case 0x18e: mask = (mask & ~(u64(0xffff) << 48)) | (u64(v2) << 48); break;
+			case 0x18f: mask = (mask & ~(u64(0xffff) << 32)) | (u64(v2) << 32); break;
+			case 0x1ce: mask = (mask & ~(u64(0xffff) << 16)) | (u64(v2) << 16); break;
+			case 0x1cf: mask = (mask & ~u64(0xffff)) | v2; break;
+			case 0x20e: live |= mask; break;
+			default: break;
+			}
+		});
+		// 候補を全部の位置で持ち、合わなくなったら落としていく
+		std::vector<size_t> cand;
+		const int STEPS = 10;
+		for (int step = 0; step < STEPS; step++) {
+			for (u8 bb : { u8(0x90), u8((40 + step * 3) & 0x7f), u8(vel & 0x7f) })
+				mu.midi_in(bb, 0);
+			for (u32 i = 0; i < RATE / 5; i++)
+				mu.run_sample(l, r);
+			// いま鳴っているスロットの並びを、8 バイトの窓として作る
+			u8 want[8];
+			for (int b = 0; b < 8; b++)
+				want[b] = u8(live >> (b * 8));
+			u8 wantr[8];                      // バイトの順が逆のもの
+			for (int b = 0; b < 8; b++)
+				wantr[b] = want[7 - b];
+			if (step == 0) {
+				for (size_t o = 0; o + 8 <= wr.size(); o++)
+					if (!std::memcmp(&wr[o], want, 8) || !std::memcmp(&wr[o], wantr, 8))
+						cand.push_back(o);
+			} else {
+				std::vector<size_t> keep;
+				for (size_t o : cand)
+					if (!std::memcmp(&wr[o], want, 8) || !std::memcmp(&wr[o], wantr, 8))
+						keep.push_back(o);
+				cand.swap(keep);
+			}
+			std::printf("  %2d 音目: 鳴っているスロット %d 個（%016llx）候補 %zu%c",
+			            step + 1, __builtin_popcountll(live),
+			            (unsigned long long)live, cand.size(), 10);
+			if (cand.empty())
+				break;
+		}
+		mu.set_swp_watch(nullptr);
+		std::printf("== 64bit のマスクとして持っていそうな場所%c", 10);
+		for (size_t o : cand)
+			std::printf("  RAM %08x%c", unsigned(0x400000 + o), 10);
+		if (cand.empty())
+			std::printf("  見つからなかった（64bit のまとまりでは持っていないらしい）%c", 10);
+		for (u8 bb : { u8(0xb0), u8(0x78), u8(0) })
+			mu.midi_in(bb, 0);
+		return 0;
+	}
+
+	// --egwatch: 1 音鳴らして、**包絡線のレジスタ（0x06/0x07/0x08/0x09）を
+	// firmware がいつ書くか**を鍵を押した時刻からの相対で出す。
+	// 写し取りの窓（鳴り始めてから 5ms）がこれを取り切れているかを見るための口
+	if (egwatch) {
+		u64 mask = 0, keyed = 0, t = 0, t0 = 0;
+		struct ev { u64 t; u8 ch, reg; u16 v; };
+		std::vector<ev> log;
+		mu.set_swp_watch([&](bool master, u32 r2, u16 v2) {
+			if (!master) return;
+			switch (r2) {
+			case 0x18e: mask = (mask & ~(u64(0xffff) << 48)) | (u64(v2) << 48); break;
+			case 0x18f: mask = (mask & ~(u64(0xffff) << 32)) | (u64(v2) << 32); break;
+			case 0x1ce: mask = (mask & ~(u64(0xffff) << 16)) | (u64(v2) << 16); break;
+			case 0x1cf: mask = (mask & ~u64(0xffff)) | v2; break;
+			case 0x20e: keyed |= mask; if (!t0) t0 = t; break;
+			default: {
+				const u32 rr = r2 % 64;
+				if (r2 < 0x1000 && ((rr >= 0x06 && rr <= 0x09) || rr == 0x00 || rr == 0x04))
+					log.push_back({ t, u8(r2 / 64), u8(rr), v2 });
+				break;
+			}
+			}
+		});
+		for (u8 bb : { u8(0x90), u8(note & 0x7f), u8(vel & 0x7f) })
+			mu.midi_in(bb, 0);
+		for (; t < RATE / 2; t++)
+			mu.run_sample(l, r);
+		const u64 key_at = t0;
+		for (u8 bb : { u8(0x80), u8(note & 0x7f), u8(64) })
+			mu.midi_in(bb, 0);
+		for (u32 i = 0; i < RATE / 2; i++) { mu.run_sample(l, r); t++; }
+		mu.set_swp_watch(nullptr);
+		{
+			const std::vector<u8> &wr2 = mu.nvram();
+			std::printf("== 全体に効く値: 0x4226A8=%d 0x4226BC=%d 0x4226A9=%d%c",
+			            wr2[0x226A8], wr2[0x226BC], wr2[0x226A9], 10);
+		}
+		std::printf("== 包絡線のレジスタを書いた時刻（鍵を押した時点を 0 とする）%c", 10);
+		std::printf("   写し取りの窓は「鳴り始めから 5ms」= +5.0ms まで%c", 10);
+		int n = 0;
+		for (const ev &e : log) {
+			if (!(keyed & (u64(1) << e.ch)))
+				continue;
+			const double ms = (double(s64(e.t)) - double(s64(key_at))) * 1000.0 / RATE;
+			std::printf("  %+9.2f ms  スロット%2d  0x%02x = %04x%s%c", ms, int(e.ch),
+			            int(e.reg), e.v, ms > 5.0 && ms < 300.0 ? "   ← 窓の外" : "", 10);
+			if (++n > 60)
+				break;
+		}
+		std::printf("  書いた回数 %d%c", int(log.size()), 10);
+		return 0;
+	}
+
+	// --sxsettle hh,mm,ll,dd[,dd...]: その XG パラメータチェンジを送って、
+	// **firmware が SWP30 を触り終わるまで**の時間を測る。
+	// 「種類を変える」と「値だけ変える」で桁が違うかを見るための口。
+	// 毎サンプル書き替わるレジスタ（MEG の戻りのミキサ 0x38-0x3F と 0x0E/0x0F）は
+	// 数えない。数えると永久に落ち着かない
+	if (sxsettle) {
+		std::vector<u8> body;
+		for (const char *p = sxsettle; *p; ) {
+			body.push_back(u8(std::strtol(p, nullptr, 16)));
+			const char *c = std::strchr(p, ',');
+			if (!c)
+				break;
+			p = c + 1;
+		}
+		if (body.size() < 4) {
+			std::fprintf(stderr, "--sxsettle は hh,mm,ll,dd の形で（16 進）%c", 10);
+			return 1;
+		}
+		u32 last = 0, n2 = 0;
+		mu.set_swp_watch([&](bool master, u32 r2, u16) {
+			if (!master)
+				return;
+			const u32 rr = r2 % 64;
+			if (r2 < 0x1000 && (rr == 0x0e || rr == 0x0f || (rr >= 0x38 && rr <= 0x3f)))
+				return;              // 毎サンプル書き替わるので数えない
+			last = n2;
+		});
+		std::vector<u8> msg = { 0xf0, 0x43, 0x10, 0x4c };
+		u32 sum = 0;
+		for (u8 b : body) { msg.push_back(b); sum += b; }
+		msg.push_back(u8((0x80 - (sum & 0x7f)) & 0x7f));
+		msg.push_back(0xf7);
+		for (u8 b : msg)
+			mu.midi_in(b, 0);
+		for (; n2 < RATE * 2; n2++)
+			mu.run_sample(l, r);
+		mu.set_swp_watch(nullptr);
+		std::printf("== 08 xx …: ");
+		for (u8 b : body)
+			std::printf("%02X ", b);
+		std::printf("%c   SWP30 を触り終わるまで %u サンプル（%.1f ms）%c",
+		            10, last, double(last) * 1000.0 / RATE, 10);
 		return 0;
 	}
 
@@ -984,7 +1217,24 @@ int main(int argc, char **argv)
 		}
 		std::printf("== CC%d で動くワーク RAM のバイト%c", ccbyte, 10);
 		int shown = 0;
+		// **パートの塊を先に出す**（ほかの所は毎サンプル動く雑音が多く、
+		// 上限をそれで使い切ってしまう）
+		for (u32 q = 0; q < 0x200; q++) {
+			bool same = true;
+			for (size_t k = 1; k < snap.size(); k++)
+				if (snap[k][part0 + q] != snap[0][part0 + q])
+					same = false;
+			if (same)
+				continue;
+			std::printf("  パート+0x%02x :", q);
+			for (size_t k = 0; k < snap.size(); k++)
+				std::printf(" cc%d=%d", ccs[k], snap[k][part0 + q]);
+			std::printf("%c", 10);
+			shown++;
+		}
 		for (size_t o = 0; o < wr.size() && shown < 40; o++) {
+			if (o >= part0 && o < part0 + 0x200)
+				continue;
 			bool same = true;
 			for (size_t k = 1; k < snap.size(); k++)
 				if (snap[k][o] != snap[0][o])

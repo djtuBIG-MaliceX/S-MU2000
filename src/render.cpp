@@ -180,6 +180,14 @@ int main(int argc, char **argv)
 	const char *card_path = nullptr;   // 差す SmartMedia
 	const char *replay = nullptr;      // --replay-swp。記録したレジスタ列を SH-2 無しで流す
 	int native_engine = 0;             // --native-engine。firmware を走らせない口
+	// --native-off 秒: その時刻で native の口を切る。窓の F4（聞き比べ）と
+	// 同じ道を通るので、切ったときに音が鳴りっぱなしにならないかを数で確かめられる
+	double native_off = -1.0;
+	// --midi-block フレーム: MIDI を**そのブロックの頭でまとめて**渡す。
+	// 窓やプラグインは音声のブロック単位で MIDI を配るので、同じ時刻に
+	// たくさんの音が重なる。render は既定でサンプル単位に散らすため、
+	// その並びでしか出ない不具合が再現できない
+	int midi_block = 0;
 	// 写し取りをファイルに残す・読む（voicecache.h）。経路の印が付いているので
 	// 別の曲の写しが混ざっても安全。--no-voicecache で切る
 	bool voicecache = false;
@@ -220,6 +228,10 @@ int main(int argc, char **argv)
 			native_fx = 1;
 		else if (!std::strcmp(argv[i], "--native-engine"))
 			native_engine = 1;
+		else if (!std::strcmp(argv[i], "--native-off") && i + 1 < argc)
+			native_off = std::atof(argv[++i]);
+		else if (!std::strcmp(argv[i], "--midi-block") && i + 1 < argc)
+			midi_block = std::atoi(argv[++i]);
 		else if (!std::strcmp(argv[i], "--voicecache"))
 			voicecache = true;
 		else if (!std::strcmp(argv[i], "--no-voicecache"))
@@ -409,6 +421,11 @@ int main(int argc, char **argv)
 				std::fclose(sf);
 			}
 		}
+		if (native_engine && native_off >= 0.0 &&
+		    i == size_t(boot * rate) + size_t(native_off * rate)) {
+			mu.set_native_engine(0);
+			std::printf("%.3f 秒で native の口を切った\n", native_off);
+		}
 		// native の口は、起動が終わってから入れる（起動には firmware が要る）
 		if (native_engine && i == boot_samples) {
 			mu.set_native_engine(native_engine);
@@ -420,7 +437,15 @@ int main(int argc, char **argv)
 
 		// 起動ぶんは**整数で引く**。double(i)/rate - boot と書くと桁落ちで
 		// 1e-12 秒ずれ、イベントの時刻がちょうど境に乗ったときに 1 サンプル動く
-		const double t = (double(i) - double(boot_samples)) / rate;
+		double t = (double(i) - double(boot_samples)) / rate;
+		// ブロック単位で配るときは、そのブロックの**終わりまで**の分を
+		// ブロックの頭でまとめて渡す（窓やプラグインと同じ並びになる）
+		if (midi_block > 1) {
+			const long long s2 = (long long)i - (long long)boot_samples;
+			if (s2 >= 0 && (s2 % midi_block) != 0)
+				goto after_midi;
+			t = (double(s2) + double(midi_block) - 1.0) / rate;
+		}
 		while (next < events.size() && events[next].time <= t) {
 			const std::vector<u8> &ev = events[next].bytes;
 			if (ev.size() == 2 && ev[0] == 0xf5)
@@ -442,6 +467,7 @@ int main(int argc, char **argv)
 			}
 			next++;
 		}
+	after_midi:
 
 		if (!adc_l.empty()) {
 			const double tin = t * rate;
@@ -544,15 +570,25 @@ int main(int argc, char **argv)
 		const mu2000::native_why w = mu.native_why_counts();
 		if (w.total)
 			std::printf("  内訳: firmware の音 %.1f%% / SysEx %.1f%% / 写し取り %.1f%% / "
-			            "MIDI の受け取り %.1f%% / そのほか %.1f%%\n",
+			            "MIDI の受け取り %.1f%% / 細く回す %.1f%% / そのほか %.1f%%\n",
 			            100.0 * double(w.by_note) / double(w.total),
 			            100.0 * double(w.by_sysex) / double(w.total),
 			            100.0 * double(w.by_learn) / double(w.total),
 			            100.0 * double(w.by_midi) / double(w.total),
+			            100.0 * double(w.by_keep) / double(w.total),
 			            100.0 * double(w.by_other) / double(w.total));
 	}
 	if (native_engine) {
 		std::printf("  いちばん多いときのスロット: %d / 64\n", mu.native_peak_slots());
+		if (const u32 stomp = mu.native_fw_stomp())
+			std::printf("  **firmware がこちらの鳴っているスロットに書いた %u 回**\n", stomp);
+		if (const u32 wrong = mu.native_learn_wrong())
+			std::printf("  **写し取りで別の音のスロットを掴んで捨てた %u 回**\n", wrong);
+		if (const u32 dirty = mu.native_learn_dirty())
+			std::printf("  **写し取りが汚れた %u 回**（窓の中で別の音が同じ"
+			            "スロットに鳴り始めた）\n", dirty);
+		if (const u32 clash = mu.native_slot_clash())
+			std::printf("  **スロットの奪い合い %u 回**（写し取りのとき firmware がこちらの鳴っているスロットを取った）\n", clash);
 		const mu2000::native_stats st = mu.native_counts();
 		std::printf("  鍵: native %llu / firmware %llu（うち写し取り %llu）、そのほかの MIDI %llu\n",
 		            (unsigned long long)st.note_native, (unsigned long long)st.note_fw,

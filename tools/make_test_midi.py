@@ -240,6 +240,26 @@ def case_at():
     return [track(seq(ev))], 6.5
 
 
+def case_sxparam():
+    """エフェクトの**パラメータ**を鳴らしながら流す曲。種類は頭で 1 回決めるだけ。
+    実機は種類を変えるとき MEG のプログラムを書き直して 176-212ms 掛かるが、
+    値を変えるだけなら 0-4ms で終わる（nativeplay --sxsettle）。native の口は
+    そこを見分けて SH-2 を長く回さない（doc/native-engine.md の 6.44）。
+    音を短く並べてあるのは、長い音を 1 つ伸ばすと「firmware の音」で
+    回しっぱなしになって SysEx のぶんが埋もれてしまうため"""
+    ev = head()
+    ev += [(1.0, b'\xc0\x30')]                        # Strings
+    ev += [(1.0, xg([0x02, 0x01, 0x00, 0x01, 0x00])), # リバーブ Hall1（種類＝重い）
+           (1.05, b'\xb0\x5b\x7f')]                   # CC91 リバーブ送り
+    # 1 音目だけ写し取り、あとは native で鳴る
+    for i in range(12):
+        ev += note(0, 60 + i, 100, 1.4 + i * 0.35, 0.3)
+    # その間、リバーブのパラメータだけを振る（種類は変えない）
+    for i in range(12):
+        ev += [(1.6 + i * 0.35, xg([0x02, 0x01, 0x02, 0x08 + i]))]
+    return [track(seq(ev))], 6.5
+
+
 CASES = {
     "piano":   case_piano,
     "chord":   case_chord,
@@ -252,6 +272,7 @@ CASES = {
     "egcc":    case_egcc,
     "porta":   case_porta,
     "at":      case_at,
+    "sxparam": case_sxparam,
 }
 
 

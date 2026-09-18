@@ -80,8 +80,12 @@ public:
 			s = slot_use();
 		for (auto &c : m_cc)
 			c = part_cc();
+		for (auto &s : m_seen)
+			s = ram_seen();
 		for (auto &r : m_recsel)
 			r = 0;
+		for (u64 &t : m_fw_touch)
+			t = 0;
 		for (auto &d : m_recsel_drum)
 			d = -1;
 		m_clock = 0;
@@ -137,6 +141,35 @@ public:
 	const std::unordered_map<u64, std::vector<nv::voice_cal>> &drum_map() const { return m_drum; }
 	size_t cal_count() const { return m_cal.size() + m_drum.size(); }
 	int peak_slots() const { return m_peak; }
+
+	// **firmware が最近触ったスロット**を覚える。firmware はこちらの使用中を
+	// 知らないので、避けないと「firmware が自分の音の続きを書く」ときに
+	// こちらの音が壊れる（doc/native-engine.md の 6.47）。
+	// 呼ぶのは mu2000 のバス書き込みの所（firmware の書き込みだけが通る）
+	void mark_fw_slots(u64 mask)
+	{
+		for (int i = 0; i < SLOTS; i++)
+			if ((mask >> i) & 1)
+				m_fw_touch[i] = m_clock + 1;   // 0 は「触っていない」
+	}
+
+	// そのスロットを firmware がまだ使っていそうか
+	bool fw_recent(int slot) const
+	{
+		const u64 t = m_fw_touch[slot];
+		return t && m_clock + 1 - t < FW_KEEP;
+	}
+
+	// いまこちらが鳴らしているスロットの印。firmware が写し取りのために
+	// 鳴らすとき、ここと重なっていないかを見るのに使う
+	u64 slot_mask() const
+	{
+		u64 m = 0;
+		for (int i = 0; i < SLOTS; i++)
+			if (m_slot[i].on)
+				m |= u64(1) << i;
+		return m;
+	}
 
 	// 写し取りの最中は、段が後から増えるので毎サンプル見る
 	void set_recording(bool on) { m_rec = on; m_traj_next = 0; }
@@ -242,6 +275,23 @@ public:
 			return;
 		m_recsel[part] = rec;
 		m_recsel_drum[part] = s8(drum);
+		// **音色を替えると firmware がつまみを音色の既定値で上書きする**
+		// （XG の決まり）。実測: 曲が CC91=40 を送っていても、そのあとの
+		// プログラムチェンジでパートの塊 +0x13 が 33 や 31 になっていた。
+		// こちらが CC の生値を握ったままだと、送りの差分が丸ごと狂う。
+		// -1 に戻して、firmware が処理し終えたあと sync_cc() で読み直す
+		forget_cc(part);
+	}
+
+	// そのパートの「こちらが覚えているつまみ」を捨てて、ワーク RAM から
+	// 読み直させる（firmware が書き替えたかもしれないとき）
+	void forget_cc(int part)
+	{
+		if (part < 0 || part >= PARTS)
+			return;
+		part_cc &p = m_cc[part];
+		p.vol = p.expr = p.pan = p.mod = -1;
+		p.rev = p.cho = p.bri = p.res = -1;
 	}
 
 	// パートの音色の記録。自分で引けていればそれを、そうでなければワーク RAM を読む
@@ -285,30 +335,40 @@ public:
 
 	// firmware を回したあとに、パートの音量・表現・パンをワーク RAM から取り直す。
 	// SysEx やパネルで変えられた場合も、これで追い付く
+	// ワーク RAM のその値を、こちらの控えに取り込むか決める。
+	//
+	// 前は「こちらが触っていない（-1）ものだけ拾う」だった。それだと
+	// **firmware が裏で書き替えたとき**に気づけない。実際、音色を替えると
+	// firmware はパートのつまみを音色の既定値で上書きする（XG の決まり）。
+	// 曲が CC91=40 を送っていても、そのあとのプログラムチェンジで
+	// パートの塊 +0x13 は 33 になっていた。こちらが 40 を握ったままだと
+	// 送りの差分が丸ごと狂う（実測でリバーブ送りが 5 段ずれた）。
+	//
+	// そこで**前に見た RAM の値**を覚えておき、RAM が動いていたら
+	// 「firmware が書き替えた」とみなして取り込む。動いていなければ
+	// こちらの値（まだ firmware が処理していない新しい CC）を残す
+	void take_ram(int &mine, u8 &seen, u8 now)
+	{
+		if (mine < 0 || now != seen)
+			mine = now;
+		seen = now;
+	}
+
 	void sync_cc()
 	{
 		if (!m_ram)
 			return;
 		for (int p = 0; p < PARTS; p++) {
 			const u8 *b = m_ram + ram::part_base(p);
-			// **こちらが動かした値は上書きしない**（firmware がまだ処理して
-			// いない古い値で潰してしまう）。触っていない（-1）ものだけ拾う
-			if (m_cc[p].vol < 0)
-				m_cc[p].vol = b[0x0b];
-			if (m_cc[p].expr < 0)
-				m_cc[p].expr = b[ram::PART_EXP];
-			if (m_cc[p].pan < 0)
-				m_cc[p].pan = b[0x0e];
-			if (m_cc[p].mod < 0)
-				m_cc[p].mod = b[ram::PART_MOD];
-			if (m_cc[p].rev < 0)
-				m_cc[p].rev = b[0x13];
-			if (m_cc[p].cho < 0)
-				m_cc[p].cho = b[0x12];
-			if (m_cc[p].bri < 0)
-				m_cc[p].bri = b[0x18];
-			if (m_cc[p].res < 0)
-				m_cc[p].res = b[0x19];
+			ram_seen &s = m_seen[p];
+			take_ram(m_cc[p].vol,  s.vol,  b[0x0b]);
+			take_ram(m_cc[p].expr, s.expr, b[ram::PART_EXP]);
+			take_ram(m_cc[p].pan,  s.pan,  b[0x0e]);
+			take_ram(m_cc[p].mod,  s.mod,  b[ram::PART_MOD]);
+			take_ram(m_cc[p].rev,  s.rev,  b[0x13]);
+			take_ram(m_cc[p].cho,  s.cho,  b[0x12]);
+			take_ram(m_cc[p].bri,  s.bri,  b[0x18]);
+			take_ram(m_cc[p].res,  s.res,  b[0x19]);
 			// ベンド幅（08 pp 23。64 が 0 半音）。RPN でも SysEx でもここに入る
 			const int r2 = int(b[0x23]) - 64;
 			m_cc[p].range = r2 < 0 ? 0 : (r2 > 24 ? 24 : r2);
@@ -584,11 +644,13 @@ private:
 		const part_cc &p = m_cc[part];
 		const nv::voice_cal *c = s.cal;
 		int a = s.att;
-		if (c) {
-			if (p.vol >= 0)
-				a += nv::cc_vol_att(m_rom, p.vol) - nv::cc_vol_att(m_rom, c->cal_vol);
-			if (p.expr >= 0)
-				a += nv::cc_vol_att(m_rom, p.expr) - nv::cc_vol_att(m_rom, c->cal_expr);
+		if (c && (p.vol >= 0 || p.expr >= 0)) {
+			// **掛けてから一度だけ減衰に直す**（nv::vol_gain を見よ）。
+			// 触られていない側は写し取ったときの値のまま
+			const int now = nv::vol_gain(p.vol >= 0 ? p.vol : c->cal_vol,
+			                             p.expr >= 0 ? p.expr : c->cal_expr);
+			const int was = nv::vol_gain(c->cal_vol, c->cal_expr);
+			a += nv::gain_att(m_rom, now) - nv::gain_att(m_rom, was);
 		}
 		return nv::clamp_att(a);
 	}
@@ -824,6 +886,25 @@ public:
 	}
 
 	// そのパートの音を全部止める
+	// **こちらで鳴らしている音を全部離す**（native の口を切るときに呼ぶ）。
+	// 切ったあとは firmware がこのスロットを知らないので、離しておかないと
+	// 鳴りっぱなしになる。ぶつ切りではなく離しの速さで鳴り終わらせる
+	void silence()
+	{
+		for (int i = 0; i < SLOTS; i++) {
+			slot_use &s = m_slot[i];
+			if (!s.on)
+				continue;
+			if (s.elem && m_rom && m_poke)
+				m_poke(u32(i) * 64 + 9, nv::release_reg(m_rom, s.elem, s.note, s.att));
+			s.on = false;
+			s.held = false;
+		}
+		m_pend.clear();
+		m_traj = false;
+		m_traj_next = 0;
+	}
+
 	void all_off(int part)
 	{
 		for (int i = 0; i < SLOTS; i++)
@@ -912,23 +993,36 @@ private:
 	// **上から**取る（firmware は下から使うため）
 	int take_slot(int part, int note)
 	{
-		int oldest = -1;
-		u64 oldest_age = ~u64(0);
-		for (int n2 = 0; n2 < SLOTS - FW_SLOTS; n2++) {
-			const int i = SLOTS - 1 - n2;
-			if (!m_slot[i].on) {
-				m_slot[i] = fresh(part, note);
-				return i;
+		// **firmware が最近触ったスロットは避ける**。下 8 個を空けるだけでは
+		// 足りなかった（声が増えると firmware は上の方も使う）。
+		// 窓やプラグインのように MIDI がブロック単位で届くと、同時に鳴る音が
+		// 増えて firmware が上まで伸びる。避けないと、firmware が自分の音の
+		// 続きを書いたときにこちらの音の包絡線が書き替わって壊れる
+		for (int pass = 0; pass < 2; pass++) {
+			const bool avoid = pass == 0;
+			int oldest = -1;
+			u64 oldest_age = ~u64(0);
+			for (int n2 = 0; n2 < SLOTS - FW_SLOTS; n2++) {
+				const int i = SLOTS - 1 - n2;
+				if (avoid && fw_recent(i))
+					continue;
+				if (!m_slot[i].on) {
+					m_slot[i] = fresh(part, note);
+					return i;
+				}
+				if (m_slot[i].age < oldest_age) {
+					oldest_age = m_slot[i].age;
+					oldest = i;
+				}
 			}
-			if (m_slot[i].age < oldest_age) {
-				oldest_age = m_slot[i].age;
-				oldest = i;
+			// 避けた結果どこも空いていなければ、2 周目で避けずに探す
+			// （音が出ないより、稀にぶつかる方がまし）
+			if (oldest >= 0) {
+				m_slot[oldest] = fresh(part, note);
+				return oldest;
 			}
 		}
-		if (oldest < 0)
-			return -1;
-		m_slot[oldest] = fresh(part, note);
-		return oldest;
+		return -1;
 	}
 
 	void write_slot(int slot, const nv::slot_regs &r)
@@ -953,7 +1047,14 @@ private:
 	std::unordered_map<u64, std::vector<nv::voice_cal>> m_drum;
 	std::array<slot_use, SLOTS> m_slot;
 	std::array<part_cc, PARTS> m_cc;
+	// 前に sync_cc() で見たワーク RAM の値。ここから動いていれば
+	// firmware が書き替えたということ
+	struct ram_seen { u8 vol = 0, expr = 0, pan = 0, mod = 0, rev = 0, cho = 0, bri = 0, res = 0; };
+	std::array<ram_seen, PARTS> m_seen{};
 	// 自分で引いた音色（0 なら引けていない）と、ドラムかどうか（-1 なら分からない）
+	// firmware がそのスロットに最後に書いた時刻（+1。0 は触っていない）
+	u64 m_fw_touch[SLOTS] = {};
+	static constexpr u64 FW_KEEP = 44100 * 2;   // 2 秒は firmware のものとみなす
 	std::array<u32, PARTS> m_recsel{};
 	std::array<s8, PARTS> m_recsel_drum{};
 	u64 m_clock = 0;
