@@ -13,10 +13,11 @@
 #     principle: the 32-bit emitter is validated (tools/x64asm32_test.cpp + MSVC x86 A/B,
 #     bit-exact) and the x64 path is GCC+Clang-proven here. No SSE is emitted in either
 #     mode, so no win32 stack-alignment/SSE flags are needed or set anywhere below.
-#   - DEV-BOX CAVEAT: the mingw-w64-i686 gcc on this machine is INOPERABLE (cc1plus loads
-#     and silently exits; modifying anything under C:\msys64 is forbidden), so the win32
-#     MinGW leg cannot be executed here — vs-win32 (MSVC amd64_x86, tools/msvc32_build.ps1
-#     for native tools) is the supported Win32 plugin build. Never attempt mingw32 repairs.
+#   - DEV-BOX STATUS (updated 2026-09): the MSYS2 i686 toolchain WORKS here (gcc 16.1
+#     Rev5; the old cc1plus-silent-death breakage is gone). Full mingw-ci-win32 builds
+#     run locally; keep using the `mingw-win32`/`mingw-ci-win32` presets with
+#     C:\msys64\mingw32\bin first on PATH (bare g++ without it dies STATUS_DLL_NOT_FOUND).
+#     Win32 plugin MODULE links need the i686 SEH fix below (Rev5 CRT packaging bug).
 #   - Default build is GRAPHICS-FREE (SMU2000_ENABLE_GUI=OFF): no IGraphics/NanoVG.
 #     The GUI-ON path keeps the sw10 NanoVG/GL2 notes (nanovg.c+glad.c unity-built
 #     inside IGraphicsWin.cpp; glad LoadLibrary()s opengl32.dll; no prebuilt MSVC
@@ -59,6 +60,52 @@ string(APPEND CMAKE_CXX_FLAGS
 # the graphics-free default (SMU2000_ENABLE_GUI=OFF) links NONE (hard rule #6).
 if(SMU2000_ENABLE_GUI)
   link_libraries(gdi32 comdlg32 user32)
+endif()
+
+# ---------------------------------------------------------------------------
+# smu_mingw_seh_i686 — MSYS2 mingw-w64-i686-gcc 16.1.0 Rev5 (2026-08) CRT packaging bug.
+# Any shared/MODULE target that transitively pulls libmsvcrt.a's i386 beginthreadex
+# thunk (member lib32_libmsvcrt_extra_a-i386__beginthreadex.o — every std::thread /
+# winpthread user does it: IPlugTimer, engine async boot) fails to link: that thunk
+# calls __mingw_SEH_error_handler, defined only in libmingw32.a's crt_handler member,
+# and with this Rev5 archive layout ld never resolves it for DLL links (exe links are
+# fine; a late -lmingw32 on the command line does NOT help — the archive has already
+# been scanned). Every plugin MODULE link dies with
+#   "undefined reference to `__mingw_SEH_error_handler`".
+# Fix: extract the correct member from libmingw32.a at configure time into the build
+# tree (C:\msys64 stays read-only — hard rules) and pass the .o directly on the
+# plugin MODULE link lines. Drop this whole block when an MSYS2 update fixes the
+# packaging. x64 is unaffected (no such member in the x86_64 libmsvcrt).
+# ---------------------------------------------------------------------------
+set(SMU_MINGW_SEH_OBJ "")
+if(CMAKE_SIZEOF_VOID_P EQUAL 4)
+  set(_seh_dir "${CMAKE_BINARY_DIR}/_seh")
+  file(MAKE_DIRECTORY "${_seh_dir}")
+  set(SMU_MINGW_SEH_OBJ "${_seh_dir}/mingw_seh_crt_handler.o")
+  if(NOT EXISTS "${SMU_MINGW_SEH_OBJ}")
+    execute_process(COMMAND ${CMAKE_CXX_COMPILER} -print-file-name=libmingw32.a
+                    OUTPUT_VARIABLE _libmingw32 OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(NOT IS_ABSOLUTE "${_libmingw32}" OR NOT EXISTS "${_libmingw32}")
+      message(FATAL_ERROR "SMU2000/mingw: cannot locate libmingw32.a via ${CMAKE_CXX_COMPILER} -print-file-name")
+    endif()
+    # Discover the crt_handler member under this archive's own naming (the 'lib32_'
+    # prefix comes from the multilib build) instead of hardcoding it.
+    execute_process(COMMAND ${CMAKE_AR} t "${_libmingw32}"
+                    OUTPUT_VARIABLE _seh_members OUTPUT_STRIP_TRAILING_WHITESPACE
+                    COMMAND_ERROR_IS_FATAL ANY)
+    string(REGEX MATCH "[^\n;]*crt_handler\\.o" _seh_member "${_seh_members}")
+    if(NOT _seh_member)
+      message(FATAL_ERROR "SMU2000/mingw: crt_handler member not found in ${_libmingw32}")
+    endif()
+    # ar x extracts under the member name into CWD; run it in the build dir, rename.
+    execute_process(COMMAND ${CMAKE_AR} x "${_libmingw32}" "${_seh_member}"
+                    WORKING_DIRECTORY "${_seh_dir}" COMMAND_ERROR_IS_FATAL ANY)
+    if(NOT EXISTS "${_seh_dir}/${_seh_member}")
+      message(FATAL_ERROR "SMU2000/mingw: ar x extracted no ${_seh_member} into ${_seh_dir}")
+    endif()
+    file(RENAME "${_seh_dir}/${_seh_member}" "${SMU_MINGW_SEH_OBJ}")
+  endif()
+  message(STATUS "SMU2000/mingw: i686 SEH link fix active -> ${SMU_MINGW_SEH_OBJ}")
 endif()
 
 # ---------------------------------------------------------------------------

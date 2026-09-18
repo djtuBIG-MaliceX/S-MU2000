@@ -97,7 +97,7 @@
     {
       "name": "mingw-win32",
       "displayName": "MinGW-w64 Win32 (GCC, Release)",
-      "description": "MSYS2 MINGW32 shell required (mingw-w64-i686 toolchain). Ninja + gcc. JIT compiled-in since 2026-09-16 (dual-mode JITs; see CPU32_LEDGER.md). (toolchain broken on this box — use vs-win32). Artifacts in build-cmake/<api>/Win32-mingw/Release/.",
+      "description": "MSYS2 MINGW32 shell required (mingw-w64-i686 toolchain). Ninja + gcc. JIT compiled-in since 2026-09-16 (dual-mode JITs; see CPU32_LEDGER.md). CI builds this via build-native.yml (build-mingw matrix); verified working on the dev box with MSYS2 gcc 16.1 Rev5. Artifacts in build-cmake/<api>/Win32-mingw/Release/.",
       "inherits": "mingw-base",
       "cacheVariables": {
         "CMAKE_C_COMPILER": "gcc",
@@ -109,6 +109,16 @@
       "displayName": "MinGW-w64 x64 CI (GCC)",
       "description": "CI: SDK dirs from env (VST2_SDK_DIR), no ROM staging. MSYS2 MINGW64 shell.",
       "inherits": "mingw-x64",
+      "cacheVariables": {
+        "SMU2000_VST2_SDK_DIR": "$env{VST2_SDK_DIR}",
+        "SMU2000_COPY_ROMS": "OFF"
+      }
+    },
+    {
+      "name": "mingw-ci-win32",
+      "displayName": "MinGW-w64 Win32 CI (GCC)",
+      "description": "CI: SDK dirs from env (VST2_SDK_DIR), no ROM staging. MSYS2 MINGW32 shell.",
+      "inherits": "mingw-win32",
       "cacheVariables": {
         "SMU2000_VST2_SDK_DIR": "$env{VST2_SDK_DIR}",
         "SMU2000_COPY_ROMS": "OFF"
@@ -127,6 +137,7 @@
     { "name": "mingw-x64-release", "configurePreset": "mingw-x64" },
     { "name": "mingw-clang-x64-release", "configurePreset": "mingw-clang-x64" },
     { "name": "mingw-win32-release", "configurePreset": "mingw-win32" },
-    { "name": "mingw-ci-x64-release", "configurePreset": "mingw-ci-x64" }
+    { "name": "mingw-ci-x64-release", "configurePreset": "mingw-ci-x64" },
+    { "name": "mingw-ci-win32-release", "configurePreset": "mingw-ci-win32" }
   ]
 }

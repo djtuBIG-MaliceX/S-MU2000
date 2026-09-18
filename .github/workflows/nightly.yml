@@ -88,26 +88,59 @@ jobs:
         }
       shell: pwsh
 
-    - name: "Gate: PE machine + loadable DLL (${{ matrix.arch }})"
-      # Cheap headless smoke of the clean-room ABI build: PE header must show
-      # the expected machine type, LoadLibrary must succeed (catches broken
-      # imports), and VSTPluginMain must be exported. The DLL is NOT booted
-      # (no ROMs on CI, and the ctor boots synchronously).
+    - name: "Gate: PE machine + VSTPluginMain export (${{ matrix.arch }})"
+      # Headless smoke of the clean-room ABI build, BITNESS-AGNOSTIC on purpose:
+      # ParseMachine + the PE export directory straight out of the file. (A WOW64
+      # LoadLibrary smoke for Win32 is impossible from the 64-bit pwsh host -
+      # ERROR_BAD_EXE_FORMAT 193 - which sank run #2's Win32 leg.) Real
+      # LoadLibrary + GetProcAddress still runs for x64, where bitness matches.
+      # The DLL is NOT booted (no ROMs on CI; hard rule #1).
       run: |
         $ErrorActionPreference = 'Stop'
         $dll = "build-cmake/vst2/${{ matrix.arch }}/Release/SMU2000_VST2.dll"
         $b = [IO.File]::ReadAllBytes((Resolve-Path $dll))
         $peOff = [BitConverter]::ToInt32($b, 0x3C)
-        $machine = ('{0:x4}' -f [BitConverter]::ToUInt16($b, $peOff + 4))
+        if ([BitConverter]::ToUInt32($b, $peOff) -ne 0x00004550) { throw "no PE signature" }
+        $machine = ('{0:x}' -f [BitConverter]::ToUInt16($b, $peOff + 4))
+        # NB: no field width — 0x014c must render "14c" to match the matrix
+        # ('x4' would pad to "014c" and sink every Win32 leg, run #2 finding).
         if ($machine -ne '${{ matrix.pe_machine }}') {
           throw "PE machine 0x$machine != expected 0x${{ matrix.pe_machine }} for ${{ matrix.arch }}"
         }
-        Add-Type -Namespace Win32 -Name Native -MemberDefinition '[DllImport("kernel32", SetLastError=true)] public static extern IntPtr LoadLibrary(string name); [DllImport("kernel32", SetLastError=true)] public static extern IntPtr GetProcAddress(IntPtr h, string proc);'
-        $h = [Win32.Native]::LoadLibrary((Resolve-Path $dll).Path)
-        if ($h -eq [IntPtr]::Zero) { throw "LoadLibrary failed: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())" }
-        $p = [Win32.Native]::GetProcAddress($h, "VSTPluginMain")
-        if ($p -eq [IntPtr]::Zero) { throw "VSTPluginMain not exported" }
-        Write-Host "PE 0x$machine OK; DLL loads; VSTPluginMain exported."
+        $optOff = $peOff + 24
+        $magic = [BitConverter]::ToUInt16($b, $optOff)
+        $ddOff = switch ($magic) { 0x10b { $optOff + 96 } 0x20b { $optOff + 112 } default { throw "unknown PE magic 0x$($magic.ToString('x'))" } }
+        $nSec = [BitConverter]::ToUInt16($b, $peOff + 6)
+        $secOff = $optOff + [BitConverter]::ToUInt16($b, $peOff + 20)
+        function script:RvaToOff([int]$rva) {
+          for ($i = 0; $i -lt $nSec; $i++) {
+            $o = $secOff + $i * 40
+            $va = [BitConverter]::ToInt32($b, $o + 12); $vs = [BitConverter]::ToInt32($b, $o + 8)
+            if ($rva -ge $va -and $rva -lt ($va + $vs)) { return $rva - $va + [BitConverter]::ToInt32($b, $o + 20) }
+          }
+          throw "RVA 0x$($rva.ToString('x')) not in any section"
+        }
+        $expRva = [BitConverter]::ToInt32($b, $ddOff)   # data directory[0] = export
+        if ($expRva -eq 0) { throw "no export directory" }
+        $exp = RvaToOff $expRva
+        $nNames = [BitConverter]::ToInt32($b, $exp + 24)
+        $nameOff = RvaToOff ([BitConverter]::ToInt32($b, $exp + 32))
+        $found = $false
+        for ($i = 0; $i -lt $nNames; $i++) {
+          $no = RvaToOff ([BitConverter]::ToInt32($b, $nameOff + 4 * $i))
+          $end = $no; while ($b[$end] -ne 0) { $end++ }
+          if ([Text.Encoding]::ASCII.GetString($b, $no, $end - $no) -eq 'VSTPluginMain') { $found = $true; break }
+        }
+        if (-not $found) { throw "VSTPluginMain not exported" }
+        Write-Host "PE 0x$machine OK; VSTPluginMain in export table."
+        if ($machine -eq '8664') {
+          Add-Type -Namespace Win32 -Name Native -MemberDefinition '[DllImport("kernel32", SetLastError=true)] public static extern IntPtr LoadLibrary(string name); [DllImport("kernel32", SetLastError=true)] public static extern IntPtr GetProcAddress(IntPtr h, string proc);'
+          $h = [Win32.Native]::LoadLibrary((Resolve-Path $dll).Path)
+          if ($h -eq [IntPtr]::Zero) { throw "LoadLibrary failed: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())" }
+          $p = [Win32.Native]::GetProcAddress($h, "VSTPluginMain")
+          if ($p -eq [IntPtr]::Zero) { throw "GetProcAddress(VSTPluginMain) failed" }
+          Write-Host "x64 LoadLibrary + GetProcAddress OK."
+        }
       shell: pwsh
 
     - name: Stage ROM-REQUIRED stub (paths only — ROMs are not redistributable)

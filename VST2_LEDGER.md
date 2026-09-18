@@ -338,8 +338,10 @@ MinGW appends `-mingw`/`-mingw-clang`). Static `/MT` CRT everywhere.
 - Add presets `mingw-win32`, `mingw-x64`, `mingw-clang-x64`, `mingw-ci-*` (Ninja + gcc/clang, MSYS2 MINGW32/MINGW64 shell).
 - On MinGW **win64**, `__x86_64__` IS defined → JIT path turns ON; verify `x64asm.h` assembles under
   GCC **and** Clang. On MinGW **win32** JIT stays off (interpreter), like MSVC-win32.
-  *(2026-09-16: JIT support is now compiled-in for MinGW-win32 too (dual-mode JITs), but the
-  i686 toolchain is broken on this box — use `vs-win32`; see `CPU32_LEDGER.md`.)*
+  *(2026-09-19 update: i686 toolchain now WORKS on this box (cc1plus needs
+  `C:\msys64\mingw32\bin` on PATH). Win32 MinGW builds green incl. JIT32 — see
+  "Nightly run #2 gate fix" status entry for the SEH link fix. `vs-win32` remains
+  the MSVC win32 path.)*
 - Import-lib name remaps + static runtime handled in `mingw_compat.cmake` (submodule untouched).
 - **Accept:** VST2 + CLAP build under **MSYS2 GCC and Clang** (x64, and win32 where the toolchain exists),
   self-contained (system DLL imports only), entry exports present.
@@ -640,5 +642,29 @@ this harness. No plugin/GUI/editor regression observed on any arch.
       MSVC `/MAP` (P2 aid) now behind `SMU2000_LINK_MAP` (default OFF) → Release dirs
       and CI uploads binary-only. CI-equivalent `ci-win64`+`ci-win32` `PREFER_COMPAT=ON`
       builds + x64 smoke gates re-verified green locally after the fix.
+- [x] Nightly run #2 gate fix + full VST2 delivery wave — **DONE 2026-09-19**.
+      Run #2: x64 leg fully green (artifact uploaded); Win32 leg died in the old gate
+      (`'{0:x4}' -f 0x014c` = "014c" != "14c"; plus LoadLibrary of a Win32 DLL from a
+      64-bit pwsh always fails). Gate rewritten bitness-proof: parse PE header +
+      export directory straight from the file (`VSTPluginMain` lookup; export dir
+      fields nNames=+24 / AddressOfNames=+32 — verified against real MSVC+MinGW PEs
+      both arches), LoadLibrary smoke kept only on the x64 leg.
+      `build-native.yml`: MSVC job now builds VST2 **ON** via clean-room
+      (`PREFER_COMPAT=ON`) and uploads vst2+clap paths explicitly (old glob clap-only
+      upload was the "artifacts have no .dll" bug); `build-mingw` is now an
+      x64/Win32 matrix (MINGW64/MINGW32, `mingw-ci-{x64,win32}`, nm-gated,
+      vst2+clap uploads).
+      **MinGW i686 MODULE link fix** (this box's gcc 16.1 Rev5): every shared/MODULE
+      link died `undefined reference to __mingw_SEH_error_handler` — libmsvcrt.a's
+      i386 beginthreadex thunk (pulled by any std::thread/winpthread user) references
+      it, and ld never resolves the libmingw32.a `crt_handler` member for DLL links
+      in this Rev5 layout (exes fine; late `-lmingw32` no-op). Fix =
+      `cmake/mingw_compat.cmake` extracts that member via `ar x` at configure time
+      into `<build>/_seh/mingw_seh_crt_handler.o` (C:\msys64 untouched) and
+      `SMU2000_VST2/CMakeLists.txt` appends the .o to the two MODULE link lines only
+      (adding it to exe links WOULD collide — archive member resolves there).
+      Local proof: `mingw-ci-win32` + `mingw-ci-x64` full builds green; PE gates
+      0x14c/0x8664 + `VSTPluginMain` (vst2) + `clap_entry` (clap) all pass. Supersedes
+      the "i686 toolchain broken" caveats in AGENTS.md / P5 / msvc32 notes.
 
 

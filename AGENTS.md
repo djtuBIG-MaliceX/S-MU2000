@@ -95,12 +95,14 @@ Legacy native exes (unchanged, MSYS2 g++): `make`, `make test`, `make vst3`.
    behavior; default is synchronous ctor boot), `bootcache=0` / `SMU2000_BOOT_CACHE=0` →
    disable the `<config_dir>\bootcache.bin` post-boot snapshot (see ledger §Boot gating).
    Native win32 tool harness = `tools/msvc32_build.ps1` (MSVC `amd64_x86`);
-  `tools/x64asm32_test.cpp` = the 32-bit encoding gate. **On THIS box the MinGW-w64 Win32 toolchain
-  is broken (cc1plus loads and silently no-ops) — use the `vs-win32` preset and NEVER attempt
-  mingw32 repairs or any write under `C:\msys64`.**
+  `tools/x64asm32_test.cpp` = the 32-bit encoding gate.
 - MinGW GCC **and** Clang compatibility is its own phase (see ledger P5); zero submodule edits.
-  (x64 legs work; the win32 MinGW leg is compiled-in in principle but the i686 toolchain is broken
-  on this box — see the Win32 bullet above.)
+  (Both toolchain legs WORK on this box: x64 (mingw64 gcc) and Win32 (i686 gcc 16.1 Rev5) build
+  VST2+CLAP locally. Win32 MODULE links REQUIRE the i686 SEH fix in `cmake/mingw_compat.cmake`
+  (Rev5 CRT packaging bug: `__mingw_SEH_error_handler` unresolvable in DLL links; auto-extracts
+  the CRT member into the build tree at configure time). Run `g++`/`cmake` with
+  `C:\msys64\{mingw64,mingw32}\bin` first on PATH — bare invocations die STATUS_DLL_NOT_FOUND.
+  CI runs both legs via the `build-mingw` matrix in `build-native.yml`.)
 
 ## Status
 

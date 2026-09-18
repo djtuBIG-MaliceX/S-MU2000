@@ -245,3 +245,17 @@ else()
     set_target_properties(smu2000_clap PROPERTIES ARCHIVE_OUTPUT_NAME "SMU2000_VST2_clap")
   endif()
 endif()
+
+# MinGW i686 ONLY: append the configure-time-extracted libmsvcrt SEH handler object
+# (cmake/mingw_compat.cmake -> SMU_MINGW_SEH_OBJ) to the two plugin MODULE links.
+# Rev5 of mingw-w64-i686-gcc 16.1 cannot resolve __mingw_SEH_error_handler in DLL
+# links otherwise. Standalone .o objects are position-independent for ld, so it is
+# safe exactly here and nowhere else (exes already resolve the archive member —
+# passing the .o to an exe link WOULD be a multiple definition).
+if(MINGW AND SMU_MINGW_SEH_OBJ)
+  foreach(_seh_t smu2000_vst2 smu2000_clap)
+    if(TARGET ${_seh_t})
+      target_link_options(${_seh_t} PRIVATE "${SMU_MINGW_SEH_OBJ}")
+    endif()
+  endforeach()
+endif()
