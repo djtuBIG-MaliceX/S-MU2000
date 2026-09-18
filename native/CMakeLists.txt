@@ -141,6 +141,8 @@ target_sources(smu2000_gui_app PRIVATE
   ${CMAKE_SOURCE_DIR}/src/ui/fx_editor.cpp
   ${CMAKE_SOURCE_DIR}/src/ui/fx_help.cpp
   ${CMAKE_SOURCE_DIR}/src/ui/part_shapes.cpp
+  ${CMAKE_SOURCE_DIR}/src/ui/master_editor.cpp
+  ${CMAKE_SOURCE_DIR}/src/ui/fx_icons.cpp
   # IMGUI_SRCS (vendored, untouched — hard rule: third_party/ is read-only)
   ${SMU2000_IMGUI_DIR}/imgui.cpp
   ${SMU2000_IMGUI_DIR}/imgui_draw.cpp
