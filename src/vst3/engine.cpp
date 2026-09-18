@@ -466,11 +466,11 @@ void engine::start(bool block)
 	// だからプラグインは block=true で呼んで、造る糸のまま起動を済ませる。
 	// plugin.ini の boot=async か SMU2000_SYNC_BOOT=0 の時だけ裏スレッド
 	if (block && sync_boot_wanted()) {
-		boot(true);
+		boot();
 		return;
 	}
 	if (!m_thread.joinable())
-		m_thread = std::thread([this] { boot(false); });
+		m_thread = std::thread([this] { boot(); });
 }
 
 bool engine::wait_ready(int ms)
@@ -677,8 +677,6 @@ void engine::boot()
 
 	const double wall = std::chrono::duration<double>(
 	    std::chrono::steady_clock::now() - t_boot).count();
-	logf("boot: %s, cache %s, wall %.2f s", sync ? "sync" : "async",
-	     restored ? "hit" : "miss", wall);
 	// 次からはここまでを飛ばせるように残す
 	if (bootcache::save(*mu, boot_key))
 		logf("起動の写しを残した: %s", bootcache::path(boot_key).c_str());

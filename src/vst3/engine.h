@@ -163,9 +163,7 @@ private:
 	mutable std::mutex m_card_mutex;        // m_card_path を守る
 	std::string m_card_path;
 
-	// sync は「呼んだスレッドで起動している」印。記録に残すだけ
-	// （false なら裏スレッド）。起動の途中に m_abort が入ったら途中でやめる
-	void boot(bool sync);
+	void boot();
 	void apply_deferred_state();   // 起動前に来た状態を戻す（m_machine を持って呼ぶ）
 	// 機械まるごとの状態を戻す。読めなければ XG の値の控えを流す（m_machine を持って呼ぶ）
 	bool restore(const uint8_t *p, size_t n, const std::vector<uint8_t> &setup);
