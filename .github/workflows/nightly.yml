@@ -33,7 +33,10 @@ env:
 
 jobs:
   build-windows:
-    name: ${{ env.PROJECT_NAME }} windows ${{ matrix.arch }}
+    # NOTE: literal here on purpose - the `env` context is NOT allowed in a
+    # job's `name:` (workflow fails to plan with zero jobs). PROJECT_NAME env
+    # is only usable from step-level keys below.
+    name: SMU2000_VST2 windows ${{ matrix.arch }}
     runs-on: windows-latest
     strategy:
       fail-fast: false

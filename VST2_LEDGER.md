@@ -439,6 +439,24 @@ the "VST2 gated OFF on CI" line in P6 for the nightly workflow).
   hard rule #1 → `ROM-REQUIRED.txt` ships), per-arch zips → rolling `nightly`
   prerelease (delete-then-recreate tag, `contents: write`, concurrency serialized).
   `build-native.yml` untouched (general PR/branch check).
+- **Nightly run #1 post-mortem (commit `92cc15c`, 2026-09-19): FAILED with ZERO jobs.**
+  The API confirmed the run planned no check-runs at all — GitHub rejects the whole
+  workflow when a job-level key references a context it may not use. Culprit:
+  `jobs.build-windows.name: ${{ env.PROJECT_NAME }} …` — the `env` context is legal in
+  STEP keys but NOT in `jobs.<id>.name` ("Unrecognized named-value: 'env'"). Generic
+  YAML lint passes; only GH's parser catches it. Fixed: job name is a literal now
+  (workflow-level `name:`/step names unchanged). Lesson for any future workflow:
+  job names may use only github/vars/secrets/inputs/matrix.
+- **`.map` in artifacts root-cause:** build-native.yml uploads the WHOLE
+  `build-cmake/clap/<arch>/Release/` dir, and every MSVC plugin link had unconditional
+  `/MAP` (leftover P2 crash-symbolization aid) → `.map` shipped next to the `.clap`.
+  Now gated behind `SMU2000_LINK_MAP` (default **OFF**, `SMU2000_VST2/CMakeLists.txt`);
+  re-enable locally with `-DSMU2000_LINK_MAP=ON`. Nightly zips were never affected
+  (file-by-file staging), and forced-relink test on ci-win64 output confirms no map
+  regenerates. Locally-stale maps from P2-era builds were trashed.
+- CI-equivalent rerun (2026-09-19, post-fix): `ci-win64` + `ci-win32` with
+  `PREFER_COMPAT=ON` (no `VST2_SDK_DIR`) both build VST2+CLAP clean; x64 gates
+  (PE 0x8664, LoadLibrary, `VSTPluginMain` export) PASS locally on the compat DLL.
 
 ## Boot gating + snapshot cache (2026-09-16) — sync boot so the song head isn't eaten
 
@@ -616,5 +634,11 @@ this harness. No plugin/GUI/editor regression observed on any arch.
       facts x 2 arches, editor probe PASS Win32+x64 on compat-built DLLs.
       `nightly.yml` YAML-validated; first real run happens on push to GitHub
       (nothing pushed yet).
+- [x] Nightly CI fix wave — **DONE 2026-09-19** (post-first-run). Run #1 failed with
+      ZERO jobs: `env` context is illegal in a job `name:` (GH workflow validator;
+      generic YAML lint misses it) → job name now literal. `.map` removal: unconditional
+      MSVC `/MAP` (P2 aid) now behind `SMU2000_LINK_MAP` (default OFF) → Release dirs
+      and CI uploads binary-only. CI-equivalent `ci-win64`+`ci-win32` `PREFER_COMPAT=ON`
+      builds + x64 smoke gates re-verified green locally after the fix.
 
 

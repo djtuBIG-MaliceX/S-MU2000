@@ -11,6 +11,11 @@ set(SMU2000_PROJECT_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
 # P2 landed the real plugin sources; the MODULE targets are created below.
 set(SMU2000_HAS_PLUGIN_SOURCES TRUE)
 
+# /MAP link maps were a P2 crash-symbolization debug aid, but they polluted the
+# published artifact folders (.map shipped in CI uploads). OFF by default now;
+# re-enable on the dev box with -DSMU2000_LINK_MAP=ON when symbolizing a crash.
+option(SMU2000_LINK_MAP "Add MSVC /MAP to the plugin link steps (debug aid)" OFF)
+
 # Phase 7 — native GDI editor lib (smu2000_gui): src/ui/{panel,editor,effects,layout,svg}
 # + src/xg/model.cpp + ui/SMU2000Editor.cpp. Built only when GUI is ON; it does NOT pull
 # IGraphics (raw GDI), so GUI-ON stays graphics-free just like the default GUI-OFF path.
@@ -92,9 +97,11 @@ else()
       # engine.h pulls Japanese-commented ui/*.h; /utf-8 is PRIVATE on the engine and
       # does not propagate — set it here too (misread DBCS tails can eat newlines).
       target_compile_options(smu2000_vst2 PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
-      # link map next to the artifacts = cheap crash-address symbolization for the load
-      # probes (P2 debug aid; keep for P3/P4). (/Z7+/DEBUG are also available if needed.)
-      target_link_options(smu2000_vst2 PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/MAP>)
+      # Link map was the P2 crash-symbolization debug aid — now opt-in via
+      # SMU2000_LINK_MAP (OFF) so Release folders ship binary-only.
+      if(SMU2000_LINK_MAP)
+        target_link_options(smu2000_vst2 PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/MAP>)
+      endif()
       target_link_libraries(smu2000_vst2 PRIVATE smu2000_engine iPlug2::IPlug)
       set_target_properties(smu2000_vst2 PROPERTIES
         OUTPUT_NAME "SMU2000_VST2" PREFIX "" SUFFIX ".dll")
@@ -131,7 +138,9 @@ else()
         SAMPLE_TYPE_FLOAT)
       target_compile_features(smu2000_vst2 PRIVATE cxx_std_20)
       target_compile_options(smu2000_vst2 PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
-      target_link_options(smu2000_vst2 PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/MAP>)
+      if(SMU2000_LINK_MAP)
+        target_link_options(smu2000_vst2 PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/MAP>)
+      endif()
       target_link_libraries(smu2000_vst2 PRIVATE
         smu2000_engine smu2000_gui iPlug2::IPlug)   # smu2000_gui brings gdi32/comdlg32/user32 PUBLIC
       set_target_properties(smu2000_vst2 PROPERTIES
@@ -176,7 +185,9 @@ else()
         SAMPLE_TYPE_FLOAT)
       target_compile_features(smu2000_clap PRIVATE cxx_std_20)
       target_compile_options(smu2000_clap PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
-      target_link_options(smu2000_clap PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/MAP>)
+      if(SMU2000_LINK_MAP)
+        target_link_options(smu2000_clap PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/MAP>)
+      endif()
       target_link_libraries(smu2000_clap PRIVATE smu2000_engine iPlug2::IPlug)
       set_target_properties(smu2000_clap PROPERTIES
         OUTPUT_NAME "SMU2000_VST2" PREFIX "" SUFFIX ".clap")
@@ -209,7 +220,9 @@ else()
         SAMPLE_TYPE_FLOAT)
       target_compile_features(smu2000_clap PRIVATE cxx_std_20)
       target_compile_options(smu2000_clap PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
-      target_link_options(smu2000_clap PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/MAP>)
+      if(SMU2000_LINK_MAP)
+        target_link_options(smu2000_clap PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/MAP>)
+      endif()
       target_link_libraries(smu2000_clap PRIVATE
         smu2000_engine smu2000_gui iPlug2::IPlug)   # smu2000_gui brings gdi32/comdlg32/user32 PUBLIC
       set_target_properties(smu2000_clap PROPERTIES
