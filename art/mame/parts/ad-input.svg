@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" width="1640" height="680" viewBox="0 0 433.91666 179.91666">
+  <g id="ad-input" inkscape:groupmode="layer" inkscape:label="A/D INPUT の 2 つのジャックと括り線">
+    <path id="ad-input-1" style="opacity:1;fill:#404040;fill-opacity:1;stroke:none;stroke-width:0.26486;stroke-linecap:round;stroke-linejoin:round" transform="matrix(0.607428,-0.794375,0.831804,0.55507,81.557198,-72.18201)"
+          d="M -112.37438 24.345477 c -2.62382 -3.754701 -7.93804 -4.470876 -11.8697 -1.599628 -3.93178 2.871067 -4.99233 8.242437 -2.3688 11.997348 2.62369 3.755038 7.93816 4.471412 11.86999 1.60004 3.93195 -2.871191 4.99239 -8.242863 2.36851 -11.99776 z M -114.457 25.866317 c 1.85622 2.656485 1.10601 6.456698 -1.67564 8.488012 -2.78165 2.031311 -6.54139 1.524508 -8.39761 -1.131977 -1.85622 -2.656484 -1.10601 -6.456692 1.67564 -8.488006 2.78165 -2.031312 6.54139 -1.524511 8.39761 1.131971 z" />
+    <path id="ad-input-2" style="opacity:1;fill:#404040;fill-opacity:1;stroke:none;stroke-width:0.26486;stroke-linecap:round;stroke-linejoin:round" transform="matrix(0.607428,-0.794375,0.831804,0.55507,81.557198,-72.18201)"
+          d="M -141.00282 45.251516 c -2.62382 -3.754701 -7.93804 -4.470876 -11.8697 -1.599628 -3.93178 2.871067 -4.99233 8.242437 -2.3688 11.997348 2.62369 3.755038 7.93816 4.471412 11.86999 1.60004 3.93195 -2.871191 4.99239 -8.242863 2.36851 -11.99776 z M -143.08544 46.772355 c 1.85622 2.656485 1.10601 6.456699 -1.67564 8.488013 -2.78165 2.031311 -6.54139 1.524507 -8.39761 -1.131978 -1.85622 -2.656484 -1.10601 -6.456692 1.67564 -8.488005 2.78165 -2.031312 6.54139 -1.524512 8.39761 1.13197 z" />
+    <path id="ad-input-3" style="fill:none;fill-opacity:1;stroke:#404040;stroke-width:0.79375;stroke-linecap:butt;stroke-linejoin:miter;stroke-dasharray:0.79375, 0.79375;stroke-dashoffset:0;stroke-opacity:1" transform="matrix(1,0,0,1,81.557198,-105.50975)"
+          d="M -44.356045 162.64756 l 20.380038 -0.0872" />
+    <path id="ad-input-4" style="fill:none;fill-opacity:1;stroke:#404040;stroke-width:0.79375;stroke-linecap:butt;stroke-linejoin:miter;stroke-dasharray:0.79375, 0.79375;stroke-dashoffset:0;stroke-opacity:1" transform="matrix(1,0,0,1,81.557198,-105.50975)"
+          d="M -44.319484 197.4678 l 16.269377 -0.0872 v -34.33009" />
+    <path id="ad-input-5" style="fill:none;stroke:#404040;stroke-width:0.529167;stroke-linecap:butt;stroke-linejoin:miter;stroke-dasharray:none;stroke-opacity:1" transform="matrix(1,0,0,1,81.557198,-105.50975)"
+          d="M -37.085418 144.94012 c 0.000001 6.03262 -4.890405 10.92303 -10.923028 10.92303 -6.032623 0 -10.923029 -4.89041 -10.923028 -10.92303 0.000004 -6.03262 4.890409 -10.92302 10.923028 -10.92302 6.032619 0 10.923024 4.8904 10.923028 10.92302 z" />
+    <path id="ad-input-6" style="fill:none;stroke:#404040;stroke-width:0.529167;stroke-linecap:butt;stroke-linejoin:miter;stroke-dasharray:none;stroke-opacity:1" transform="matrix(1,0,0,1,81.557198,-105.50975)"
+          d="M -37.085418 179.28615 c 0.000001 6.03262 -4.890405 10.92303 -10.923028 10.92303 -6.032623 0 -10.923029 -4.89041 -10.923028 -10.92303 -0.000001 -6.03262 4.890405 -10.92303 10.923028 -10.92303 6.032623 0 10.923029 4.89041 10.923028 10.92303 z" />
+  </g>
+</svg>

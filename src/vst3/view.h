@@ -73,6 +73,7 @@ public:
 	void key(int code, bool down);          // code is a plug_key
 	void focus_lost();
 	void mouse_right(int x, int y);         // the card slot answers a right click
+	void log_line(const char *text);        // one line to the engine's log
 
 	// ---- SmartMedia (the card slot on the front panel)
 	//

@@ -53,6 +53,48 @@ inline void cpu_pause() noexcept
 #endif
 }
 
+// Flush-to-zero / denormals-are-zero for the span of one audio block.
+//
+// The light mode (doc/native-dsp.md) does its work in float. A denormal (a
+// value too close to zero) makes some instructions tens of times slower, and a
+// decaying reverb tail produces plenty of them. Setting FTZ/DAZ avoids that.
+//
+// It has to be done **per block on the thread that runs the machine**: a host
+// may hand the audio callback to a different thread at any time, and the mode
+// is per thread, so setting it once when the light mode is switched on is not
+// enough. And because the bits belong to the host's thread, they are put back
+// on the way out -- a plug-in should not change how the rest of the host's
+// graph treats denormals.
+//
+// The emulator's own arithmetic is integer, so this changes nothing about what
+// is computed in the default mode.
+class denormals_off
+{
+public:
+	denormals_off() noexcept
+	{
+#if defined(__SSE2__) || defined(_M_X64) || defined(__x86_64__)
+		m_saved = _mm_getcsr();
+		_mm_setcsr(m_saved | 0x8040);   // FTZ (bit 15) | DAZ (bit 6)
+#endif
+	}
+
+	~denormals_off() noexcept
+	{
+#if defined(__SSE2__) || defined(_M_X64) || defined(__x86_64__)
+		_mm_setcsr(m_saved);
+#endif
+	}
+
+	denormals_off(const denormals_off &) = delete;
+	denormals_off &operator=(const denormals_off &) = delete;
+
+private:
+#if defined(__SSE2__) || defined(_M_X64) || defined(__x86_64__)
+	unsigned m_saved = 0;
+#endif
+};
+
 // A monotonic counter and its frequency, so that elapsed ticks can be turned
 // into seconds. This is the same idea as QueryPerformanceCounter() /
 // QueryPerformanceFrequency(), and on Windows it *is* those two calls, so a

@@ -13,6 +13,7 @@
 #include "panel.h"
 #include "draw.h"
 #include "xg/ram.h"
+#include "xg_state.h"
 
 #include <algorithm>
 #include <cmath>
@@ -93,25 +94,8 @@ bool panel::tick(bridge &br)
 	if (m_ram.serial == m_ram_serial)
 		return false;
 	m_ram_serial = m_ram.serial;
-	const u64 now = br.audio_ms();
-	m_xg.load(xg::pack(0x00, 0x00, 0x00), m_ram.system, XG_SYSTEM_SIZE, now);
-	for (const xg::ram::block &blk : xg::ram::EFFECTS)
-		m_xg.load(xg::pack(blk.hi, blk.mid, blk.lo), m_ram.effect + (blk.ram - xg::ram::EFFECT), blk.size, now);
-	for (int p = 0; p < XG_PARTS; p++) {
-		m_xg.load(xg::pack(0x08, u8(p), 0x00), m_ram.parts[p], xg::ram::PART_XG_SIZE, now);
-		m_xg.load(xg::pack(0x08, u8(p), xg::ram::PART_EQ_XG), m_ram.parts[p] + xg::ram::PART_EQ_RAM, xg::ram::PART_EQ_SIZE, now);
-	}
-	// インサーションのパラメータ 1-10 は、RAM では 16bit の数。XG の 2 バイトの番地（30-43）の形に崩して入れる
-	for (int n = 0; n < 4; n++) {
-		const u8 *w = m_ram.effect + (xg::ram::INS_BLOCK[n] - xg::ram::EFFECT) + xg::ram::INS_WIDE;
-		u8 bytes[20];
-		for (int i = 0; i < 10; i++) {
-			const int v = w[2 * i] << 8 | w[2 * i + 1];
-			bytes[2 * i] = u8((v >> 7) & 0x7f);
-			bytes[2 * i + 1] = u8(v & 0x7f);
-		}
-		m_xg.load(xg::pack(0x03, u8(n), 0x30), bytes, sizeof(bytes), now);
-	}
+	// インサーションのパラメータ 1-10 の 16bit の数も、XG の 2 バイトの番地の形にして入れる（xg_state.h）
+	load_model(m_xg, m_ram, br.audio_ms());
 	return true;
 }
 
@@ -257,6 +241,13 @@ bool panel::press(int x, int y, bridge &br)
 			m_wheel_angle = (m_wheel_angle + 345) % 360;
 		return true;
 
+	case spot_kind::wheel:
+		// 掴んで上下に動かす（drag）。掴んだだけでは回さない
+		m_held = sp;
+		m_drag_y = y;
+		m_dial_rest = 0.0;
+		return true;
+
 	case spot_kind::volume:
 		m_held = sp;
 		m_drag_x = x;
@@ -311,6 +302,9 @@ bool panel::drag(int x, int y, bridge &br)
 	if (!m_held)
 		return false;
 
+	if (m_held->kind == spot_kind::wheel)
+		return dial_follow(y, br);
+
 	if (m_held->kind == spot_kind::volume) {
 		// 横でも縦でも動かせるように、動いた量の大きいほうを取る。
 		// 丸いつまみは縦で動かしたくなるので
@@ -343,6 +337,24 @@ bool panel::release(bridge &br)
 	if (m_held->kind == spot_kind::button)
 		br.press(m_held->button, false);
 	m_held = nullptr;
+	return true;
+}
+
+// ダイヤルを掴んで上下に動かす。上へ動かすと +、下へ動かすと −（ホイールと同じ向き）。
+// 動かした距離に比例して目盛りを送り（1 目盛りは VALUE −/+ を 1 回押したのと同じ）、
+// 絵のダイヤルもホイールと同じく 1 目盛りで 15° 回す。1 目盛りは DIAL_PIXELS 画素（窓の大きさに合わせて伸び縮みする）
+bool panel::dial_follow(int y, bridge &br)
+{
+	static constexpr double DIAL_PIXELS = 4.0;
+	m_dial_rest += double(m_drag_y - y);
+	m_drag_y = y;
+	const double per = DIAL_PIXELS * m_scale;
+	const int steps = int(m_dial_rest / per);      // 0 の側へ切り捨て。余りは次へ持ち越す
+	if (!steps)
+		return false;
+	m_dial_rest -= steps * per;
+	br.turn(steps);
+	m_wheel_angle = ((m_wheel_angle + steps * 15) % 360 + 360) % 360;
 	return true;
 }
 

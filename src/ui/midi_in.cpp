@@ -179,7 +179,7 @@ void midi_in::on_short(u32 p1)
 	int n = 3;
 	const u8 kind = status & 0xf0;
 	if (kind == 0xc0 || kind == 0xd0) n = 2;
-	if (status == 0xf1 || status == 0xf3) n = 2;
+	if (status == 0xf1 || status == 0xf3 || status == 0xf5) n = 2;   // F5 nn はケーブルメッセージ
 	else if (status == 0xf2) n = 3;
 	else if (status >= 0xf4 && status < 0xf8) n = 1;
 

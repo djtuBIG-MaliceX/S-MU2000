@@ -18,6 +18,7 @@
 #include "compat/mamecompat.h"
 
 #include <deque>
+#include <functional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -102,6 +103,14 @@ public:
 	// 書く前に頼んだ読み返しが届いて古い値へ戻って見えるのを防ぐ
 	std::vector<u8> set(const param &p, int part, int value);
 
+	// 書いた（set した）ことを知らせる先。画面で値を触ったのを、プラグインがホストの
+	// オートメーションへ伝えるのに使う。写しに入ってきた値（load・feed）では呼ばない
+	using edit_listener = std::function<void(const param &p, int part, int value)>;
+	void set_edit_listener(edit_listener f) { m_edit = std::move(f); }
+	// set_raw（定義表に無い番地。インサーションのパラメータなど）で書いたときの知らせ先
+	using raw_listener = std::function<void(u32 addr, int size, int value)>;
+	void set_raw_listener(raw_listener f) { m_edit_raw = std::move(f); }
+
 	// ワーク RAM から写した塊を入れる（画面はこれで値を得る。xg/ram.h）。
 	// 書いた直後の値は、feed と同じく少しの間は上書きしない。now_ms は音源の時計
 	void load(u32 addr, const u8 *data, size_t n, u64 now_ms)
@@ -149,6 +158,8 @@ private:
 	int  m_tries = 0;
 
 	u64 m_accepted = 0, m_rejected = 0;
+	edit_listener m_edit;
+	raw_listener m_edit_raw;
 };
 
 } // namespace xg

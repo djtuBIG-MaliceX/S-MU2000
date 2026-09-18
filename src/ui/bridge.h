@@ -82,6 +82,11 @@ public:
 	void set_gain(float g) { m_gain.store(g, std::memory_order_relaxed); }
 	float gain() const     { return m_gain.load(std::memory_order_relaxed); }
 
+	// 音声の処理にかかっている CPU（1 回の締め切りに対する割合、%）。音声を自分で回している
+	// gui が書き、PC の窓が読んで出す。プラグインのようにホストが回すときは書かない（負のまま）
+	void set_cpu(float percent) { m_cpu.store(percent, std::memory_order_relaxed); }
+	float cpu() const             { return m_cpu.load(std::memory_order_relaxed); }
+
 	void read(snapshot &out) const
 	{
 		for (;;) {
@@ -209,6 +214,7 @@ private:
 	std::atomic<u64>      m_buttons{0};
 	std::atomic<int>      m_wheel{0};
 	std::atomic<float>    m_gain{1.0f};
+	std::atomic<float>    m_cpu{-1.0f};
 	std::atomic<unsigned> m_seq{0};
 	snapshot              m_snap;
 	std::atomic<unsigned> m_xg_seq{0};

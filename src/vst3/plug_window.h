@@ -74,10 +74,16 @@ public:
 	// Say something went wrong (the panel has nowhere to put it)
 	virtual void alert(const std::string &text) = 0;
 
-	// PC で触る窓（一覧・エディタ・インサーション・パートの音色）を 1 コマ描く。
-	// gui.exe と同じ ui::pc_window で、パネルの右クリックから開く。
-	// **中身を持つのは Windows だけ**（macOS の窓はまだ）。
-	// 画面の糸から、パネルを描き直すのと同じ周期で呼ばれる
+	// A right click that missed the card slot. The GUI front end opens its
+	// settings menu there; a plug-in has no settings of its own, so by
+	// default there is no menu. Platforms with PC windows of their own
+	// offer those here instead
+	virtual void panel_menu(int x, int y) {}
+
+	// Drive the PC windows (overview, editor, insertion, part voice) one
+	// frame. Same ui::pc_window as gui.exe, opened from the panel's
+	// right-click menu. Called from the GUI thread at the panel's repaint
+	// rate; does nothing while no window is visible
 	virtual void pc_frame(::xg::model &, const ::ui::xg_snapshot &, ::ui::bridge &) {}
 };
 

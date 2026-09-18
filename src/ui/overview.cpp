@@ -3,6 +3,7 @@
 #include "overview.h"
 
 #include "eq_curve.h"
+#include "fx_icons.h"
 
 #include "imgui.h"
 #include "imgui_internal.h"
@@ -73,6 +74,20 @@ int key_at(ImVec2 pos, float w, float h, ImVec2 at, int &vel)
 	return -1;
 }
 
+// 鍵の横の範囲（白鍵なら白鍵の幅、黒鍵なら黒鍵の幅）と、下の端
+void key_span(ImVec2 pos, float w, float h, int note, float &x0, float &x1, float &bottom)
+{
+	const float fs = ImGui::GetFontSize();
+	const float pad = fs * 0.2f;
+	const float top = pos.y + pad;
+	static const bool BLACK[12] = { 0, 1, 0, 1, 0, 0, 1, 0, 1, 0, 1, 0 };
+	static const float WHITE_POS[12] = { 0, 0.6f, 1, 1.6f, 2, 3, 3.6f, 4, 4.6f, 5, 5.6f, 6 };
+	const float kw = (w - pad * 2) / 75;
+	x0 = pos.x + pad + (note / 12 * 7 + WHITE_POS[note % 12]) * kw;
+	x1 = x0 + (BLACK[note % 12] ? kw * 0.8f : kw - 1);
+	bottom = BLACK[note % 12] ? top + (pos.y + h - pad - top) * 0.6f : pos.y + h - pad;
+}
+
 // 128 鍵の鍵盤。color は鍵ごとの色（0 なら押さえていない）
 template <typename F>
 void draw_keys(ImDrawList *dl, ImVec2 pos, float w, float h, F color)
@@ -101,8 +116,8 @@ void draw_keys(ImDrawList *dl, ImVec2 pos, float w, float h, F color)
 
 } // namespace
 
-// 小さなマスの説明に足す一言
-constexpr const char *BIG_HINT = "\nダブルクリックで大きな窓に出す";
+// 小さなマスの説明に足す一言。一覧の小さな絵は見るだけで、触るのは大きな窓で
+constexpr const char *BIG_HINT = "\nダブルクリックで大きな窓に出して触る";
 
 struct overview::column {
 	const char *title;
@@ -162,9 +177,9 @@ void overview::cell(const column &c, int part, xg::model &m, const xg_snapshot &
 				eq_cell(part, m, br, w, h, true);
 			else
 				vib_cell(part, m, br, w, h, true);
-			// 小さなマスでは点をつまみにくいので、ダブルクリックでパートの音色の窓に大きく出す
+			// 小さなマスは見るだけ。ダブルクリックでパートの音色の窓に大きく出して、そこで触る
 			if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
-				m_part = part;
+				select_part(part);
 				request_part(part);
 			}
 		}
@@ -382,17 +397,19 @@ void fx_menu(int part, xg::model &m, bridge &br)
 } // namespace
 
 
-void overview::ins_cell(int part, xg::model &m, bridge &br, float h)
+void overview::ins_cell(int part, xg::model &m, bridge &br, float h, bool names, fx_which which)
 {
 	const float fs = ImGui::GetFontSize();
 	ImDrawList *dl = ImGui::GetWindowDrawList();
 
-	struct on_part { const fx_slot *slot; std::string name; };
+	struct on_part { const fx_slot *slot; std::string name; int msb; };
 	std::vector<on_part> on;
 	for (const fx_slot &f : FX_SLOTS) {
+		if ((which == fx_which::insertions && f.id == 5) || (which == fx_which::variation && f.id != 5))
+			continue;
 		int type = 0;
 		if (fx_target(f, m) == part && m.get(P(f.type_key), 0, type))
-			on.push_back({ &f, xg::fx_name(type) });
+			on.push_back({ &f, xg::fx_name(type), type >> 7 });
 	}
 
 	const ImVec2 pos = ImGui::GetCursorScreenPos();
@@ -418,19 +435,29 @@ void overview::ins_cell(int part, xg::model &m, bridge &br, float h)
 		ImGui::SetItemTooltip("右クリックでエフェクトを掛ける");
 
 	dl->PushClipRect(pos, ImVec2(pos.x + w, pos.y + h), true);
+	// 一覧では印（1-4、V）だけを横に並べる。names（パートの音色の窓）なら印の後ろに種類の名前も出し、
+	// 幅が足りなければ次の行へ折り返す
 	const float line = fs * 1.05f;
-	for (size_t i = 0; i < on.size() && i < 2; i++) {
-		const float y = pos.y + fs * 0.1f + line * float(i);
-		const float bw = fs * 1.0f;
+	const float bw = fs * 1.0f;
+	const float left = pos.x + fs * 0.2f;
+	float x = left;
+	float y = names ? pos.y + fs * 0.1f : pos.y + (h - fs) * 0.5f;
+	if (names && on.empty() && which != fx_which::variation)
+		dl->AddText(ImVec2(left, y), col(ImGuiCol_TextDisabled), "掛かっていない（右クリックで掛ける）");
+	for (size_t i = 0; i < on.size(); i++) {
 		const fx_slot &f = *on[i].slot;
-		std::string name = on[i].name;
-		if (i == 1 && on.size() > 2)
-			name += " ほか";
+		const std::string &name = on[i].name;
+		const float icon_w = fs * 1.25f;
+		const float item_w = names ? bw + fs * 0.35f + icon_w + ImGui::CalcTextSize(name.c_str()).x + fs * 0.9f : bw + fs * 0.2f;
+		if (names && x > left && x + item_w > pos.x + w) {
+			x = left;
+			y += line;
+		}
 
-		// 印の行はつかめる（ドラッグで移す）
-		ImGui::SetCursorScreenPos(ImVec2(pos.x, y));
+		// 印はつかめる（ドラッグで移す）
+		ImGui::SetCursorScreenPos(ImVec2(x, y));
 		ImGui::PushID(f.id);
-		ImGui::InvisibleButton("##fx", ImVec2(w, line), ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
+		ImGui::InvisibleButton("##fx", ImVec2(names ? item_w - fs * 0.5f : bw, line), ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
 		const bool hot = ImGui::IsItemHovered() || ImGui::IsItemActive();
 		if (f.id <= 4 && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
 			request_fx(f.id);                    // 設定の窓を出す
@@ -449,10 +476,17 @@ void overview::ins_cell(int part, xg::model &m, bridge &br, float h)
 			                                : "%s: %s\nドラッグで別のパートへ・右クリックで種類や外す", f.title, on[i].name.c_str());
 		ImGui::PopID();
 
-		dl->AddRectFilled(ImVec2(pos.x + fs * 0.2f, y + 1), ImVec2(pos.x + fs * 0.2f + bw, y + fs), f.color, 3.0f);
+		dl->AddRectFilled(ImVec2(x, y + 1), ImVec2(x + bw, y + fs), f.color, 3.0f);
+		if (hot)
+			dl->AddRect(ImVec2(x - 1, y), ImVec2(x + bw + 1, y + fs + 1), col(ImGuiCol_Text), 3.0f);
 		const ImVec2 ms = ImGui::CalcTextSize(f.mark);
-		dl->AddText(ImVec2(pos.x + fs * 0.2f + (bw - ms.x) * 0.5f, y), IM_COL32(20, 20, 20, 255), f.mark);
-		dl->AddText(ImVec2(pos.x + fs * 1.5f, y), hot ? col(ImGuiCol_SliderGrabActive) : col(ImGuiCol_Text), name.c_str());
+		dl->AddText(ImVec2(x + (bw - ms.x) * 0.5f, y), IM_COL32(20, 20, 20, 255), f.mark);
+		if (names) {
+			const ImU32 c = hot ? col(ImGuiCol_SliderGrabActive) : col(ImGuiCol_Text);
+			fx_icon(dl, ImVec2(x + bw + fs * 0.3f, y), fs, on[i].msb, c);
+			dl->AddText(ImVec2(x + bw + fs * 0.35f + icon_w, y), c, name.c_str());
+		}
+		x += item_w;
 	}
 	// 落とせる欄を光らせる
 	if (cell_hovered && ImGui::GetDragDropPayload() && ImGui::GetDragDropPayload()->IsDataType(DRAG_FX))
@@ -464,7 +498,7 @@ void overview::ins_cell(int part, xg::model &m, bridge &br, float h)
 
 
 // EG の 1 マス。音量の形（立ち上がり → 落ち着き → 伸ばし → 離して消える）を折れ線で描き、
-// 3 つの点をつまんで横に動かすと、アタック・ディケイ・リリースが変わる。
+// 3 つの点をつまんで横に動かすと、アタック・ディケイ・リリースが変わる（大きな窓だけ。compact なら見るだけ）。
 // XG の値は音色の元の値に対する増減（64 が音色のまま）。形の長さは 2 の (値 - 64) / 24 乗で伸び縮みさせ、
 // 真ん中の値で各区間が同じくらいの長さになるようにした（見た目だけ。実際の秒数ではない）
 void overview::eg_cell(int part, xg::model &m, bridge &br, float w, float h, bool compact)
@@ -481,7 +515,7 @@ void overview::eg_cell(int part, xg::model &m, bridge &br, float w, float h, boo
 	ImGui::InvisibleButton("##eg", ImVec2(w, h), ImGuiButtonFlags_MouseButtonLeft);
 	const ImGuiID id = ImGui::GetItemID();
 	const bool hovered = ImGui::IsItemHovered();
-	const bool active = ImGui::IsItemActive();
+	const bool active = !compact && ImGui::IsItemActive();   // 一覧の小さなマスでは触らせない
 
 	const float pad = fs * 0.25f;
 	const float x0 = pos.x + pad, x1 = pos.x + w - pad;
@@ -503,7 +537,7 @@ void overview::eg_cell(int part, xg::model &m, bridge &br, float w, float h, boo
 	// つかむ点。押した瞬間に一番近い点を選び、離すまで同じ点を動かす
 	ImGuiStorage *st = ImGui::GetStateStorage();
 	int grab = st->GetInt(id, -1);
-	if (ImGui::IsItemActivated() && known) {
+	if (active && ImGui::IsItemActivated() && known) {
 		const float mx = io.MousePos.x;
 		const float dists[3] = { std::fabs(mx - xa), std::fabs(mx - xd), std::fabs(mx - xr) };
 		grab = int(std::min_element(dists, dists + 3) - dists);
@@ -547,14 +581,14 @@ void overview::eg_cell(int part, xg::model &m, bridge &br, float w, float h, boo
 	}
 
 	if ((hovered || active) && known)
-		ImGui::SetItemTooltip("Attack %s   Decay %s   Release %s\n点を横につまんで動かす（右へ長く、左へ短く）%s",
+		ImGui::SetItemTooltip("Attack %s   Decay %s   Release %s%s",
 		                      xg::format(pa, va).c_str(), xg::format(pd, vd).c_str(), xg::format(pr, vr).c_str(),
-		                      compact ? BIG_HINT : "");
+		                      compact ? BIG_HINT : "\n点を横につまんで動かす（右へ長く、左へ短く）");
 	ImGui::PopID();
 }
 
 // フィルタの 1 マス。低い音から高い音への通り方（2 次のローパス）を描き、カットオフの位置の点を
-// つまむ。横に動かすとカットオフ、縦に動かすとレゾナンス（山の高さ）が変わる。
+// つまむ。横に動かすとカットオフ、縦に動かすとレゾナンス（山の高さ）が変わる（大きな窓だけ）。
 // 横軸は値に比例（64 が真ん中 = 音色のまま）で、1 マスの幅が 8 オクターブ。
 // 点の高さは、カットオフでの持ち上がり 20log10(Q) dB。Q = 2 の (値 - 64) / 16 乗なので、
 // 高さも値に比例する。どちらも見た目だけで、実際の周波数や Q ではない
@@ -572,7 +606,7 @@ void overview::filter_cell(int part, xg::model &m, bridge &br, float w, float h,
 	ImGui::InvisibleButton("##filter", ImVec2(w, h), ImGuiButtonFlags_MouseButtonLeft);
 	const ImGuiID id = ImGui::GetItemID();
 	const bool hovered = ImGui::IsItemHovered();
-	const bool active = ImGui::IsItemActive();
+	const bool active = !compact && ImGui::IsItemActive();   // 一覧の小さなマスでは触らせない
 
 	const float pad = fs * 0.25f;
 	const float x0 = pos.x + pad, x1 = pos.x + w - pad;
@@ -589,7 +623,7 @@ void overview::filter_cell(int part, xg::model &m, bridge &br, float w, float h,
 	// a value and write it back
 	ImGuiStorage *st = ImGui::GetStateStorage();
 	float gx = st->GetFloat(id, 0.0f), gy = st->GetFloat(id + 1, 0.0f);
-	if (ImGui::IsItemActivated() && known) {
+	if (active && ImGui::IsItemActivated() && known) {
 		gx = xc - io.MousePos.x;
 		gy = yq - io.MousePos.y;
 		st->SetFloat(id, gx);
@@ -643,8 +677,9 @@ void overview::filter_cell(int part, xg::model &m, bridge &br, float w, float h,
 	}
 
 	if ((hovered || active) && known)
-		ImGui::SetItemTooltip("Cutoff %s   Resonance %s\n点をつまんで、横でカットオフ（右へ明るく）、縦でレゾナンス（上へ強く）%s",
-		                      xg::format(pc, vc).c_str(), xg::format(pq, vq).c_str(), compact ? BIG_HINT : "");
+		ImGui::SetItemTooltip("Cutoff %s   Resonance %s%s",
+		                      xg::format(pc, vc).c_str(), xg::format(pq, vq).c_str(),
+		                      compact ? BIG_HINT : "\n点をつまんで、横でカットオフ（右へ明るく）、縦でレゾナンス（上へ強く）");
 	ImGui::PopID();
 }
 
@@ -667,8 +702,9 @@ struct eq_band {
 };
 
 // EQ の絵の 1 マス。帯ごとの点をつまんで、横で周波数、縦でゲイン。ホイールで Q（あれば）。
-// 戻り値はつかんでいる帯（無ければ -1）
-int eq_plot(const char *id, eq_band *bands, int n, xg::model &m, bridge &br, float w, float h, const char *tip)
+// 戻り値はつかんでいる帯（無ければ -1）。edit が false なら描くだけで、つまみもホイールも効かない
+int eq_plot(const char *id, eq_band *bands, int n, xg::model &m, bridge &br, float w, float h, const char *tip,
+            bool edit)
 {
 	ImGuiIO &io = ImGui::GetIO();
 	const float fs = ImGui::GetFontSize();
@@ -685,7 +721,7 @@ int eq_plot(const char *id, eq_band *bands, int n, xg::model &m, bridge &br, flo
 	ImGui::InvisibleButton("##eq", ImVec2(w, h), ImGuiButtonFlags_MouseButtonLeft);
 	const ImGuiID iid = ImGui::GetItemID();
 	const bool hovered = ImGui::IsItemHovered();
-	const bool active = ImGui::IsItemActive();
+	const bool active = edit && ImGui::IsItemActive();
 
 	const float pad = fs * 0.25f;
 	const float x0 = pos.x + pad, x1 = pos.x + w - pad;
@@ -709,7 +745,7 @@ int eq_plot(const char *id, eq_band *bands, int n, xg::model &m, bridge &br, flo
 		}
 		return best;
 	};
-	if (ImGui::IsItemActivated() && known) {
+	if (active && ImGui::IsItemActivated() && known) {
 		grab = nearest();
 		if (grab >= 0) {
 			const ImVec2 hp = handle(bands[grab]);
@@ -732,7 +768,7 @@ int eq_plot(const char *id, eq_band *bands, int n, xg::model &m, bridge &br, flo
 		if (ng != b.vg) br.send(m.set(*b.gain, b.part, ng));
 	}
 	// ホイールで Q。カーソルに一番近い帯
-	const int hot = hovered && !active ? nearest() : grab;
+	const int hot = !edit ? -1 : hovered && !active ? nearest() : grab;
 	if (hovered && known && hot >= 0 && bands[hot].q) {
 		ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
 		if (io.MouseWheel != 0.0f) {
@@ -790,7 +826,7 @@ int eq_plot(const char *id, eq_band *bands, int n, xg::model &m, bridge &br, flo
 				text += buf;
 			}
 		}
-		ImGui::SetItemTooltip("%s\n%s", text.c_str(), tip);
+		ImGui::SetItemTooltip("%s%s%s", text.c_str(), *tip == '\n' ? "" : "\n", tip);
 	}
 	ImGui::PopID();
 	return grab;
@@ -806,15 +842,14 @@ void overview::eq_cell(int part, xg::model &m, bridge &br, float w, float h, boo
 		{ band_shape::low_shelf,  &P("part.eq_bass_gain"),   &P("part.eq_bass_freq"),   nullptr, part, 64, 12, 0, false },
 		{ band_shape::high_shelf, &P("part.eq_treble_gain"), &P("part.eq_treble_freq"), nullptr, part, 64, 54, 0, false },
 	};
-	eq_plot("eq", bands, 2, m, br, w, h, compact ? "点をつまんで、横で周波数、縦でゲイン（1 が低音、2 が高音）\nダブルクリックで大きな窓に出す"
-	                                            : "点をつまんで、横で周波数、縦でゲイン（1 が低音、2 が高音）");
+	eq_plot("eq", bands, 2, m, br, w, h, compact ? BIG_HINT : "点をつまんで、横で周波数、縦でゲイン（1 が低音、2 が高音）",
+	        !compact);
 }
 
 
 // マスター EQ の 1 マス。5 つの帯。1 と 5 は形（シェルフ／ピーク）を右クリックで選ぶ
-void overview::master_eq_cell(xg::model &m, bridge &br, float h)
+void overview::master_eq_plot(xg::model &m, bridge &br, float w, float h, bool edit)
 {
-	const float w = ImGui::GetContentRegionAvail().x;
 	int s1 = 0, s5 = 0;
 	m.get(P("master_eq.shape1"), 0, s1);
 	m.get(P("master_eq.shape5"), 0, s5);
@@ -826,31 +861,23 @@ void overview::master_eq_cell(xg::model &m, bridge &br, float h)
 		{ s5 ? band_shape::peak : band_shape::high_shelf, &P("master_eq.gain5"), &P("master_eq.freq5"), &P("master_eq.q5"), 0, 64, 52, 7, false },
 	};
 	eq_plot("meq", bands, 5, m, br, w, h,
-	        "点をつまんで、横で周波数、縦でゲイン。ホイールで幅（Q）。右クリックで種類と、両端の帯の形");
-	if (ImGui::BeginPopupContextItem("meqmenu", ImGuiPopupFlags_MouseButtonRight)) {
-		ImGui::TextDisabled("マスター EQ");
-		ImGui::Separator();
-		int type = 0;
-		m.get(P("master_eq.type"), 0, type);
-		const xg::param &pt = P("master_eq.type");
-		for (int t = pt.min; t <= pt.max; t++)
-			if (ImGui::MenuItem(pt.choices[t], nullptr, t == type))
-				br.send(m.set(pt, 0, t));
-		ImGui::Separator();
-		if (ImGui::MenuItem("帯 1 をピークにする", nullptr, s1 == 1))
-			br.send(m.set(P("master_eq.shape1"), 0, s1 ? 0 : 1));
-		if (ImGui::MenuItem("帯 5 をピークにする", nullptr, s5 == 1))
-			br.send(m.set(P("master_eq.shape5"), 0, s5 ? 0 : 1));
-		ImGui::Separator();
-		ImGui::TextDisabled("種類を選ぶと、firmware が 5 つの帯を\nその種類の値に書き換える");
-		ImGui::EndPopup();
-	}
+	        edit ? "点をつまんで、横で周波数、縦でゲイン。点の近くでホイールを回すと幅（Q）"
+	             : "\nダブルクリックでマスターの窓に出して触る",
+	        edit);
+}
+
+// 一覧のマスター EQ は見るだけ。ダブルクリックでマスターの窓（種類・帯の形・値もそこで）
+void overview::master_eq_cell(xg::model &m, bridge &br, float h)
+{
+	master_eq_plot(m, br, ImGui::GetContentRegionAvail().x, h, false);
+	if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+		request_master();
 }
 
 
 // ビブラートの 1 マス。弾いてからの揺れの形。平らな所が掛かり始めるまで（Delay）、
 // そのあとの波の山の点をつまんで、横で速さ（山が近いほど速い）、縦で深さ。
-// 平らな所の終わりの点を横に動かすと Delay。どれも音色の元の値に対する増減（64 が音色のまま）で、
+// 平らな所の終わりの点を横に動かすと Delay（つまめるのは大きな窓だけ）。どれも音色の元の値に対する増減（64 が音色のまま）で、
 // 形は 2 の (値 - 64) / 24 乗で伸び縮みさせた見た目だけのもの
 void overview::vib_cell(int part, xg::model &m, bridge &br, float w, float h, bool compact)
 {
@@ -866,7 +893,7 @@ void overview::vib_cell(int part, xg::model &m, bridge &br, float w, float h, bo
 	ImGui::InvisibleButton("##vib", ImVec2(w, h), ImGuiButtonFlags_MouseButtonLeft);
 	const ImGuiID id = ImGui::GetItemID();
 	const bool hovered = ImGui::IsItemHovered();
-	const bool active = ImGui::IsItemActive();
+	const bool active = !compact && ImGui::IsItemActive();   // 一覧の小さなマスでは触らせない
 
 	const float pad = fs * 0.25f;
 	const float x0 = pos.x + pad, x1 = pos.x + w - pad;
@@ -883,7 +910,7 @@ void overview::vib_cell(int part, xg::model &m, bridge &br, float w, float h, bo
 	ImGuiStorage *st = ImGui::GetStateStorage();
 	int grab = st->GetInt(id, -1);
 	float gx = st->GetFloat(id + 1, 0.0f), gy = st->GetFloat(id + 2, 0.0f);
-	if (ImGui::IsItemActivated() && known) {
+	if (active && ImGui::IsItemActivated() && known) {
 		const float dd = std::fabs(io.MousePos.x - xd) + std::fabs(io.MousePos.y - mid);
 		const float dc = std::fabs(io.MousePos.x - crest.x) + std::fabs(io.MousePos.y - crest.y);
 		grab = dd < dc ? 0 : 1;
@@ -931,9 +958,9 @@ void overview::vib_cell(int part, xg::model &m, bridge &br, float w, float h, bo
 		dl->AddText(ImVec2(pos.x + (w - ts.x) * 0.5f, pos.y + (h - ts.y) * 0.5f), col(ImGuiCol_TextDisabled), "--");
 	}
 	if ((hovered || active) && known)
-		ImGui::SetItemTooltip("Rate %s   Depth %s   Delay %s\n波の山の点: 横で速さ、縦で深さ\n平らな所の終わりの点: 横で掛かり始めるまでの時間%s",
+		ImGui::SetItemTooltip("Rate %s   Depth %s   Delay %s%s",
 		                      xg::format(pr, vr).c_str(), xg::format(pd, vd).c_str(), xg::format(pl, vl).c_str(),
-		                      compact ? BIG_HINT : "");
+		                      compact ? BIG_HINT : "\n波の山の点: 横で速さ、縦で深さ\n平らな所の終わりの点: 横で掛かり始めるまでの時間");
 	ImGui::PopID();
 }
 
@@ -950,10 +977,9 @@ void overview::row(int part, xg::model &m, const xg_snapshot &ram, bridge &br, f
 		const ImVec2 pos = ImGui::GetCursorScreenPos();
 		const float w = ImGui::GetContentRegionAvail().x;
 		ImGui::SetNextItemAllowOverlap();
-		if (ImGui::InvisibleButton("##name", ImVec2(w, h), ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight))
-			m_part = part;
+		ImGui::InvisibleButton("##name", ImVec2(w, h), ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
 		if (ImGui::IsItemClicked(ImGuiMouseButton_Right))
-			m_part = part;
+			select_part(part);
 		if (ImGui::BeginPopupContextItem("program")) {
 			program_menu(part, m, &ram, br);
 			ImGui::EndPopup();
@@ -1057,39 +1083,164 @@ void overview::row(int part, xg::model &m, const xg_snapshot &ram, bridge &br, f
 
 	// ---- 鍵盤。128 鍵を全部並べる
 	ImGui::TableNextColumn();
-	{
-		const ImVec2 pos = ImGui::GetCursorScreenPos();
-		const float w = ImGui::GetContentRegionAvail().x;
-		// 押すと鳴らす（左でも右でも）。押したまま横に動かすと鍵が替わる。離すとノートオフ。
-		// 送り先はこのパートの受信チャンネル（口 B なら口 B へ）
-		ImGui::InvisibleButton("##keys", ImVec2(w, h), ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
-		const bool down = ImGui::IsItemActive() && slot >= 0 &&
-		                  (ImGui::IsMouseDown(ImGuiMouseButton_Left) || ImGui::IsMouseDown(ImGuiMouseButton_Right));
-		int vel = 100;
-		const int want = down ? key_at(pos, w, h, ImGui::GetIO().MousePos, vel) : -1;
-		if (want != m_playing[part]) {
-			auto send = [&](const u8 msg[3]) {
-				br.send_port(m_playing_slot[part] / 16, msg, 3);
-			};
-			if (m_playing[part] >= 0) {
-				const u8 off[3] = { u8(0x80 | (m_playing_slot[part] & 15)), u8(m_playing[part]), 64 };
-				send(off);
-			}
-			m_playing[part] = want;
-			if (want >= 0) {
-				m_playing_slot[part] = slot;
-				const u8 on[3] = { u8(0x90 | (slot & 15)), u8(want), u8(vel) };
-				send(on);
-			}
-		}
-		if (ImGui::IsItemHovered() && !down && slot >= 0)
-			ImGui::SetItemTooltip("押すと鳴らす（左右どちらのボタンでも）。下ほど強く");
-		draw_keys(dl, pos, w, h, [&](int note) -> ImU32 {
-			return slot >= 0 && ((ram.notes[slot][note >> 6] >> (note & 63)) & 1) ? NOTE_ON : 0;
-		});
-	}
+	keys_cell(part, slot, ram, br, ImGui::GetContentRegionAvail().x, h);
 
 	ImGui::PopID();
+}
+
+
+// 1 パートの鍵盤。押さえている鍵が光り、押すと鳴らす（左でも右でも）。押したまま横に動かすと鍵が替わる。
+// 離すとノートオフ。送り先はこのパートの受信チャンネル（slot = 口 × 16 + ch。口 B なら口 B へ）
+void overview::keys_cell(int part, int slot, const xg_snapshot &ram, bridge &br, float w, float h,
+                         bool marker, int pc_low)
+{
+	ImDrawList *dl = ImGui::GetWindowDrawList();
+	const ImVec2 pos = ImGui::GetCursorScreenPos();
+	ImGui::InvisibleButton("##keys", ImVec2(w, h), ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
+	// 目印を置く窓では、右クリックは試聴の鍵を決めるだけ（鳴らさない）
+	if (marker && ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+		int dummy = 0;
+		const int note = key_at(pos, w, h, ImGui::GetIO().MousePos, dummy);
+		if (note >= 0)
+			set_audition_note(note);
+	}
+	const bool down = ImGui::IsItemActive() && slot >= 0 &&
+	                  (ImGui::IsMouseDown(ImGuiMouseButton_Left) || (!marker && ImGui::IsMouseDown(ImGuiMouseButton_Right)));
+	int vel = 100;
+	const int want = down ? key_at(pos, w, h, ImGui::GetIO().MousePos, vel) : -1;
+	if (want != m_playing[part]) {
+		auto send = [&](const u8 msg[3]) {
+			br.send_port(m_playing_slot[part] / 16, msg, 3);
+		};
+		if (m_playing[part] >= 0) {
+			const u8 off[3] = { u8(0x80 | (m_playing_slot[part] & 15)), u8(m_playing[part]), 64 };
+			send(off);
+		}
+		m_playing[part] = want;
+		if (want >= 0) {
+			m_playing_slot[part] = slot;
+			const u8 on[3] = { u8(0x90 | (slot & 15)), u8(want), u8(vel) };
+			send(on);
+		}
+	}
+	if (ImGui::IsItemHovered() && !down && slot >= 0) {
+		if (marker)
+			ImGui::SetItemTooltip("左クリックで鳴らす（下ほど強く）。右クリックで、音色を替えたときに試聴で鳴らす鍵を決める\n"
+			                      "PC のキーボードでも弾ける: A W S E D F T G Y H U J K O L P ; が C から（Z / X でオクターブ）");
+		else
+			ImGui::SetItemTooltip("押すと鳴らす（左右どちらのボタンでも）。下ほど強く");
+	}
+	draw_keys(dl, pos, w, h, [&](int note) -> ImU32 {
+		return slot >= 0 && ((ram.notes[slot][note >> 6] >> (note & 63)) & 1) ? NOTE_ON : 0;
+	});
+	const float fs = ImGui::GetFontSize();
+	// PC のキーボードで弾ける範囲。鍵盤の下に細い線
+	if (pc_low >= 0) {
+		float a0, a1, ab, b0, b1, bb;
+		key_span(pos, w, h, pc_low, a0, a1, ab);
+		key_span(pos, w, h, std::min(127, pc_low + 16), b0, b1, bb);
+		const float y = pos.y + h - std::max(2.0f, fs * 0.12f);
+		dl->AddRectFilled(ImVec2(a0, y), ImVec2(b1, pos.y + h), IM_COL32(90, 170, 255, 200));
+	}
+	// 試聴の鍵の目印。鍵の下の方に丸
+	if (marker && audition_note() >= 0) {
+		float x0, x1, bottom;
+		key_span(pos, w, h, audition_note(), x0, x1, bottom);
+		const float r = std::max(2.0f, std::min((x1 - x0) * 0.45f, fs * 0.3f));
+		const ImVec2 c((x0 + x1) * 0.5f, bottom - r - fs * 0.15f);
+		dl->AddCircleFilled(c, r + 1.0f, IM_COL32(20, 20, 20, 255));
+		dl->AddCircleFilled(c, r, IM_COL32(60, 200, 120, 255));
+	}
+}
+
+void overview::mod_wheel(int part, int slot, const xg_snapshot &ram, bridge &br, float w, float h)
+{
+	ImDrawList *dl = ImGui::GetWindowDrawList();
+	ImGuiIO &io = ImGui::GetIO();
+	const float fs = ImGui::GetFontSize();
+	const ImVec2 pos = ImGui::GetCursorScreenPos();
+	ImGui::InvisibleButton("##modwheel", ImVec2(w, h), ImGuiButtonFlags_MouseButtonLeft);
+	const bool hovered = ImGui::IsItemHovered();
+	const bool active = ImGui::IsItemActive();
+	// 今の値。送ったばかりなら送った値（RAM の写しは 25ms ごとなので、その間は古い）
+	const int ram_value = ram.parts[part][xg::ram::PART_MOD] & 0x7f;
+	const double now = ImGui::GetTime();
+	int v = (now - m_mod_sent_at < 0.3 && m_mod_sent >= 0) ? m_mod_sent : ram_value;
+	int nv = v;
+	if (hovered && slot >= 0) {
+		ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
+		if (io.MouseWheel != 0.0f)
+			nv = std::clamp(nv + (io.MouseWheel > 0 ? 1 : -1) * (io.KeyCtrl ? 10 : 2), 0, 127);
+	}
+	if (active && slot >= 0 && io.MouseDelta.y != 0.0f) {
+		// 上へ動かすと大きく。高さいっぱいで 0-127
+		const float pad = fs * 0.2f;
+		const float frac = 1.0f - (io.MousePos.y - (pos.y + pad)) / std::max(1.0f, h - pad * 2);
+		nv = std::clamp(int(std::lround(frac * 127.0f)), 0, 127);
+	}
+	if (nv != v && slot >= 0) {
+		const u8 cc[3] = { u8(0xb0 | (slot & 15)), 1, u8(nv) };
+		br.send_port(slot / 16, cc, 3);
+		m_mod_sent = nv;
+		m_mod_sent_at = now;
+		v = nv;
+	}
+	// 描く。縦の溝と、下から伸びる棒
+	const float pad = fs * 0.2f;
+	const ImVec2 a(pos.x + pad, pos.y + pad), b(pos.x + w - pad, pos.y + h - pad);
+	dl->AddRectFilled(a, b, col(hovered || active ? ImGuiCol_FrameBgHovered : ImGuiCol_FrameBg), 3.0f);
+	const float y = b.y - (b.y - a.y) * float(v) / 127.0f;
+	dl->AddRectFilled(ImVec2(a.x + 2, y), ImVec2(b.x - 2, b.y - 1), col(ImGuiCol_SliderGrabActive));
+	dl->AddLine(ImVec2(a.x, y), ImVec2(b.x, y), col(ImGuiCol_Text), 2.0f);
+	if (hovered && !active)
+		ImGui::SetItemTooltip("モジュレーション（CC1）  %d\nホイールで回す（Ctrl で大きく）・上下にドラッグ", v);
+}
+
+void overview::pc_keys(int slot, bridge &br)
+{
+	static constexpr ImGuiKey KEYS[17] = {
+		ImGuiKey_A, ImGuiKey_W, ImGuiKey_S, ImGuiKey_E, ImGuiKey_D, ImGuiKey_F, ImGuiKey_T, ImGuiKey_G,
+		ImGuiKey_Y, ImGuiKey_H, ImGuiKey_U, ImGuiKey_J, ImGuiKey_K, ImGuiKey_O, ImGuiKey_L, ImGuiKey_P,
+		ImGuiKey_Semicolon,
+	};
+	ImGuiIO &io = ImGui::GetIO();
+	// 離したキー（窓から外れたときも ImGui がキーを離したことにする）
+	for (int i = 0; i < 17; i++) {
+		if (m_pc_note[i] >= 0 && !ImGui::IsKeyDown(KEYS[i])) {
+			const u8 off[3] = { u8(0x80 | (m_pc_slot[i] & 15)), u8(m_pc_note[i]), 64 };
+			br.send_port(m_pc_slot[i] / 16, off, 3);
+			m_pc_note[i] = -1;
+		}
+	}
+	// 文字を打っている最中（数を打つ箱など）と、Ctrl・Alt を押しているときは弾かない
+	if (io.WantTextInput || io.KeyCtrl || io.KeyAlt || slot < 0)
+		return;
+	if (ImGui::IsKeyPressed(ImGuiKey_Z, false))
+		m_pc_base = std::max(0, m_pc_base - 12);
+	if (ImGui::IsKeyPressed(ImGuiKey_X, false))
+		m_pc_base = std::min(108, m_pc_base + 12);
+	for (int i = 0; i < 17; i++) {
+		if (!ImGui::IsKeyPressed(KEYS[i], false) || m_pc_note[i] >= 0)
+			continue;
+		const int note = m_pc_base + i;
+		if (note > 127)
+			continue;
+		const u8 on[3] = { u8(0x90 | (slot & 15)), u8(note), 100 };
+		br.send_port(slot / 16, on, 3);
+		m_pc_note[i] = note;
+		m_pc_slot[i] = slot;
+	}
+}
+
+void overview::release_pc_keys(bridge &br)
+{
+	for (int i = 0; i < 17; i++) {
+		if (m_pc_note[i] < 0)
+			continue;
+		const u8 off[3] = { u8(0x80 | (m_pc_slot[i] & 15)), u8(m_pc_note[i]), 64 };
+		br.send_port(m_pc_slot[i] / 16, off, 3);
+		m_pc_note[i] = -1;
+	}
 }
 
 
@@ -1289,7 +1440,13 @@ void overview::master_pane(xg::model &m, const xg_snapshot &ram, bridge &br)
 	{
 		const ImVec2 pos = ImGui::GetCursorScreenPos();
 		const float w = ImGui::GetContentRegionAvail().x;
-		ImGui::Dummy(ImVec2(w, h));
+		ImGui::InvisibleButton("##mastername", ImVec2(w, h));
+		if (ImGui::IsItemHovered()) {
+			dl->AddRectFilled(pos, ImVec2(pos.x + w, pos.y + h), col(ImGuiCol_HeaderHovered, 0.4f));
+			if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+				request_master();
+			ImGui::SetItemTooltip("ダブルクリックでマスターの窓（マスターボリューム・移調・エフェクトの戻り・マスター EQ）");
+		}
 		dl->AddText(ImVec2(pos.x + fs * 0.3f, pos.y + fs * 0.1f), col(ImGuiCol_Text), "MASTER");
 		int tr = 0x40, tune = 0x400;
 		char sub[64];
@@ -1344,6 +1501,132 @@ void overview::master_pane(xg::model &m, const xg_snapshot &ram, bridge &br)
 	}
 	ImGui::PopID();
 	ImGui::EndTable();
+}
+
+
+// パートの音色の窓の上のペイン。1 行目に掛かっているエフェクト（名前付き）、
+// 2 行目に VOL〜HOLD と VAR〜REV の棒（一覧と同じく触れる）と、このパートの鍵盤
+void overview::part_strip(int part, xg::model &m, const xg_snapshot &ram, bridge &br)
+{
+	m_wheel_taken = false;
+	const float fs = ImGui::GetFontSize();
+	const float h = fs * 2.3f;
+	const ImGuiStyle &st = ImGui::GetStyle();
+	ImGui::PushID("strip");
+	ImGui::PushID(part);
+
+	// 棒の並び。窓の幅いっぱいに同じ幅で割り振る（VOL〜HOLD の 6 本、間を空けて VAR・CHO・REV の 3 本）
+	static const char *const LEFT[]  = { "VOL", "EXP", "PAN", "P.BEND", "MOD", "HOLD" };
+	static const char *const RIGHT[] = { "VAR", "CHO", "REV" };
+	const float gap = fs * 1.0f;
+	const ImVec2 top = ImGui::GetCursorScreenPos();
+	const float right = ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x;
+	const float unit = std::max(fs * 4.2f, (right - top.x - gap) / 9.0f);
+	const float var_x = top.x + unit * 6.0f + gap;         // VAR の棒の左端
+
+	// ---- 1 行目: 左にインサーション、VAR の棒の真上からバリエーション
+	const float line_h = ImGui::GetFrameHeight();
+	ImGui::SetCursorScreenPos(top);
+	ImGui::AlignTextToFramePadding();
+	ImGui::TextDisabled("インサーション");
+	help_tip("INS");
+	ImGui::SameLine();
+	{
+		const ImVec2 at = ImGui::GetCursorScreenPos();
+		ImGui::SetCursorScreenPos(ImVec2(at.x, top.y));
+		// 印の並びは VAR の手前まで（はみ出す分は切る）
+		ImGui::BeginChild("##ins_row", ImVec2(std::max(fs, var_x - gap * 0.5f - at.x), line_h), ImGuiChildFlags_None,
+		                  ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoBackground);
+		const ImVec2 in = ImGui::GetCursorScreenPos();
+		ImGui::SetCursorScreenPos(ImVec2(in.x, in.y + st.FramePadding.y - fs * 0.1f));
+		ins_cell(part, m, br, fs * 1.25f, true, fx_which::insertions);
+		ImGui::EndChild();
+	}
+	ImGui::SetCursorScreenPos(ImVec2(var_x, top.y));
+	ImGui::AlignTextToFramePadding();
+	ImGui::TextDisabled("バリエーション");
+	help_tip("VARIATION");
+	variation_label(part, m, br, var_x + ImGui::CalcTextSize("バリエーション ").x, top.y + st.FramePadding.y, right);
+
+	// ---- 2 行目: 見出しと棒
+	const float label_h = ImGui::GetTextLineHeight() + fs * 0.15f;
+	const ImVec2 origin(top.x, top.y + line_h + st.ItemSpacing.y);
+	float x = origin.x;
+	auto one = [&](const char *title) {
+		const float w = unit - fs * 0.25f;
+		ImGui::SetCursorScreenPos(ImVec2(x, origin.y));
+		ImGui::TextDisabled("%s", title);
+		help_tip(title);
+		ImGui::SetCursorScreenPos(ImVec2(x, origin.y + label_h));
+		cell(column_of(title), part, m, ram, br, w, h);
+		x += unit;
+	};
+	for (const char *t : LEFT)
+		one(t);
+	x += gap;
+	for (const char *t : RIGHT)
+		one(t);
+
+	// ---- 3 行目: 鍵盤。受信チャンネルから見張りの口×チャンネル（一覧でミュートしていても、この窓は受信チャンネルのまま）
+	const float keys_y = origin.y + label_h + h + st.ItemSpacing.y;
+	int rcv = 127;
+	m.get(P("part.rcv_channel"), part, rcv);
+	const int slot = rcv >= 0 && rcv < PARTS ? rcv : -1;
+	// 左の端にモジュレーションホイール、その右に鍵盤（右クリックで試聴の鍵、PC のキーボードでも弾ける）
+	const float wheel_w = fs * 1.6f;
+	ImGui::SetCursorScreenPos(ImVec2(origin.x, keys_y));
+	mod_wheel(part, slot, ram, br, wheel_w, h);
+	ImGui::SetCursorScreenPos(ImVec2(origin.x + wheel_w + fs * 0.2f, keys_y));
+	keys_cell(part, slot, ram, br, std::max(fs * 8.0f, right - origin.x - wheel_w - fs * 0.2f), h, true, m_pc_base);
+	pc_keys(slot, br);
+
+	ImGui::SetCursorScreenPos(ImVec2(origin.x, keys_y + h));
+	ImGui::Dummy(ImVec2(0, 0));
+	ImGui::PopID();
+	ImGui::PopID();
+}
+
+// バリエーションの種類と繋がり方（パートの帯の 1 行目、VAR の棒の真上）。このパートに INSERTION で掛かっていれば
+// 一覧の INS 欄と同じ V の印（ドラッグ・右クリックで触れる）、そうでなければ文字で（SYSTEM なら送りの棒が効く）
+void overview::variation_label(int part, xg::model &m, bridge &br, float x0, float y, float x1)
+{
+	const float fs = ImGui::GetFontSize();
+	ImDrawList *dl = ImGui::GetWindowDrawList();
+	int type = 0, conn = 1, who = 127;
+	const bool has_type = m.get(P("variation.type"), 0, type);
+	m.get(P("variation.connect"), 0, conn);
+	m.get(P("variation.part"), 0, who);
+	if (conn == 0 && who == part) {
+		ImGui::SetCursorScreenPos(ImVec2(x0 - fs * 0.2f, y));
+		ImGui::PushID("var");
+		const float w = x1 - x0 + fs * 0.2f;
+		ImGui::BeginChild("##varlabel", ImVec2(w, ImGui::GetTextLineHeight() + 2), ImGuiChildFlags_None,
+		                  ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoBackground);
+		ins_cell(part, m, br, ImGui::GetTextLineHeight() + 2, true, fx_which::variation);
+		ImGui::EndChild();
+		ImGui::PopID();
+		return;
+	}
+	char text[96];
+	const std::string name = has_type ? xg::fx_name(type) : std::string("--");
+	if (conn == 0)
+		std::snprintf(text, sizeof(text), "%s（INSERTION → %s）", name.c_str(),
+		              who < PARTS + 2 ? part_name(who).c_str() : "OFF");
+	else
+		std::snprintf(text, sizeof(text), "%s", name.c_str());
+	dl->PushClipRect(ImVec2(x0, y), ImVec2(x1, y + fs * 1.5f), true);
+	if (has_type) {
+		fx_icon(dl, ImVec2(x0, y), fs, type >> 7, col(ImGuiCol_Text));
+		x0 += fs * 1.25f;
+	}
+	dl->AddText(ImVec2(x0, y), col(ImGuiCol_Text), text);
+	dl->PopClipRect();
+}
+
+void overview::select_part(int part)
+{
+	m_part = part;
+	set_shape_window_part(part);
 }
 
 
@@ -1429,6 +1712,105 @@ void overview::hidden(bridge &br)
 }
 
 
+// 上の帯の右端の、同時発音数と CPU の負荷。数字の後ろに棒を敷く。
+// 演奏中に桁が変わっても文字が動かないよう、数字は桁数ぶんの幅の枠に右寄せで置く
+// （0-9 のうち一番広い字の幅 × 桁数。字の幅が違う書体でも位置が揺れない）
+void overview::meters(bridge &br)
+{
+	snapshot s;
+	br.read(s);
+	const int master = s.voices_master, slave = s.voices_slave, total = master + slave;
+	const float cpu = br.cpu();
+
+	float dw = 0.0f;
+	for (char c = '0'; c <= '9'; c++) {
+		const char d[2] = { c, 0 };
+		dw = std::max(dw, ImGui::CalcTextSize(d).x);
+	}
+	// 部品: 文字そのもの（digits == 0）か、digits 桁の枠に右寄せした数
+	struct piece { const char *text; int value; int digits; };
+	auto width = [&](std::initializer_list<piece> ps) {
+		float w = 0.0f;
+		for (const piece &q : ps)
+			w += q.digits ? dw * float(q.digits) : ImGui::CalcTextSize(q.text).x;
+		return w;
+	};
+	ImDrawList *dl = ImGui::GetWindowDrawList();
+	auto put = [&](float x, float y, std::initializer_list<piece> ps) {
+		const ImU32 ink = col(ImGuiCol_Text);
+		for (const piece &q : ps) {
+			if (!q.digits) {
+				dl->AddText(ImVec2(x, y), ink, q.text);
+				x += ImGui::CalcTextSize(q.text).x;
+				continue;
+			}
+			char n[16];
+			std::snprintf(n, sizeof(n), "%d", q.value);
+			const float slot = dw * float(q.digits);
+			dl->AddText(ImVec2(x + slot - ImGui::CalcTextSize(n).x, y), ink, n);
+			x += slot;
+		}
+	};
+
+	const std::initializer_list<piece> voices = {
+		{ "発音 ", 0, 0 }, { nullptr, total, 3 }, { "/128  (M:", 0, 0 }, { nullptr, master, 2 },
+		{ ", S:", 0, 0 }, { nullptr, slave, 2 }, { ")", 0, 0 },
+	};
+	const int cpu_pct = cpu >= 0.0f ? int(std::lround(cpu)) : 0;
+	const std::initializer_list<piece> load = { { "CPU ", 0, 0 }, { nullptr, cpu_pct, 3 }, { "%", 0, 0 } };
+
+	const float fs = ImGui::GetFontSize();
+	const float pad = fs * 0.5f, gap = fs * 0.8f;
+	const float vw = width(voices) + pad * 2.0f;
+	const float cw = cpu >= 0.0f ? width(load) + pad * 2.0f : 0.0f;
+	const float all = vw + (cpu >= 0.0f ? gap + cw : 0.0f);
+	const float h = ImGui::GetFrameHeight();
+
+	ImGui::SameLine(std::max(ImGui::GetCursorPosX() + fs, ImGui::GetWindowContentRegionMax().x - all));
+	const ImVec2 pos = ImGui::GetCursorScreenPos();
+	const float ty = pos.y + (h - fs) * 0.5f;
+	// 枠は角を丸める。中の棒は、枠の端に着いている側だけ枠に合わせて丸め、伸びる先の端は四角いまま
+	const float round = fs * 0.25f;
+	auto bar = [&](ImVec2 a, ImVec2 b, ImU32 c, bool at_left, bool at_right) {
+		const ImDrawFlags corners = (at_left ? ImDrawFlags_RoundCornersLeft : 0) | (at_right ? ImDrawFlags_RoundCornersRight : 0);
+		dl->AddRectFilled(a, b, c, corners ? round : 0.0f, corners ? corners : ImDrawFlags_RoundCornersNone);
+	};
+
+	// 発音数の棒。マスタの分とスレーブの分を色を分けて積む（全体が 128）
+	{
+		const ImVec2 p0 = pos, p1(pos.x + vw, pos.y + h);
+		dl->AddRectFilled(p0, p1, col(ImGuiCol_FrameBg), round);
+		const float xm = p0.x + vw * float(master) / 128.0f;
+		const float xs = xm + vw * float(slave) / 128.0f;
+		if (master)
+			bar(p0, ImVec2(xm, p1.y), IM_COL32(66, 120, 200, 200), true, total >= 128 && !slave);
+		if (slave)
+			bar(ImVec2(xm, p0.y), ImVec2(std::min(xs, p1.x), p1.y), IM_COL32(210, 130, 50, 200), !master, total >= 128);
+		put(p0.x + pad, ty, voices);
+		ImGui::InvisibleButton("##voices", ImVec2(vw, h));
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("発音: 鳴っている声の数（離して消え切るまでを含む）。1 音で 2 つ以上の声を使う音色もある\n"
+			                  "M は SWP30 のマスタ（64 まで、青）、S はスレーブ（64 まで、橙）。マスタが埋まるとスレーブに回る");
+	}
+
+	// CPU の棒。0-100%。重くなるほど黄、赤にする
+	if (cpu >= 0.0f) {
+		ImGui::SameLine(0.0f, gap);
+		const ImVec2 p0 = ImGui::GetCursorScreenPos(), p1(p0.x + cw, p0.y + h);
+		dl->AddRectFilled(p0, p1, col(ImGuiCol_FrameBg), round);
+		const float f = std::clamp(cpu / 100.0f, 0.0f, 1.0f);
+		const ImU32 fill = cpu < 60.0f ? IM_COL32(60, 150, 90, 200) : cpu < 85.0f ? IM_COL32(190, 160, 40, 210)
+		                                                                        : IM_COL32(210, 60, 50, 220);
+		if (f > 0.0f)
+			bar(p0, ImVec2(p0.x + cw * f, p1.y), fill, true, f >= 1.0f);
+		put(p0.x + pad, ty, load);
+		ImGui::InvisibleButton("##cpu", ImVec2(cw, h));
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("CPU: 音声の処理にかかっている時間の、締め切りに対する割合（100%% を越えると音が途切れる）");
+	}
+}
+
+
 void overview::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 {
 	m_wheel_taken = false;
@@ -1460,6 +1842,11 @@ void overview::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 	ImGui::SameLine();
 	ImGui::TextDisabled("表示の大きさ（小さな絵はダブルクリックで大きな窓に出る）");
 
+	// 同時発音数と CPU の負荷は右端へ。発音数は SWP30 2 個の声のスロット（64 ずつ、合わせて 128）のうち鳴っているもの。
+	// firmware はマスタの 64 から使い、埋まるとスレーブに回す（112 音を重ねるとマスタ 64 + スレーブ 48 になった）。
+	// CPU は gui が音声を回しているときだけ出す（プラグインではホストの持ち物なので出さない）
+	meters(br);
+
 	ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * zoom);
 	const float fs = ImGui::GetFontSize();
 	const float h = fs * 2.3f;
@@ -1477,7 +1864,7 @@ void overview::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 		ImGui::TableSetupColumn("VEL", ImGuiTableColumnFlags_WidthFixed, fs * 2.2f);
 		for (const column &c : COLUMNS)
 			ImGui::TableSetupColumn(c.title, ImGuiTableColumnFlags_WidthFixed,
-			                        wide(c.from) ? fs * 7.5f : c.from == src::ins ? fs * 8.5f : fs * 3.4f);
+			                        wide(c.from) ? fs * 3.6f : c.from == src::ins ? fs * 6.2f : fs * 3.4f);
 		ImGui::TableSetupColumn("##keys", ImGuiTableColumnFlags_WidthStretch);   // 見出しは要らない
 		headers_with_help(NCOLS + 3);
 
@@ -1485,6 +1872,12 @@ void overview::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 			ImGui::TableNextRow(0, h);
 			row(part, m, ram, br, h);
 		}
+		// 行のどこを左クリックしても、その行を選ぶ（パートの音色の窓もそのパートに替わる）。
+		// 載っている行は前のコマのもの（0 は見出し）。品書きなどが上に出ているときは窓が載っていない扱い
+		const int hovered_row = ImGui::TableGetHoveredRow();
+		if (hovered_row >= 1 && hovered_row <= PARTS && ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
+		    ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows | ImGuiHoveredFlags_AllowWhenBlockedByActiveItem))
+			select_part(hovered_row - 1);
 		ImGui::EndTable();
 	}
 	ImGui::PopStyleVar();

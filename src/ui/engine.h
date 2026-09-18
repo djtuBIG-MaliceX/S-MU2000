@@ -25,6 +25,7 @@
 #include "midi_guard.h"
 #include "midi_in.h"
 #include "midi_out.h"
+#include "analog_out.h"
 #include "mu2000.h"
 #include "bootcache.h"
 #include "nvram.h"
@@ -62,6 +63,12 @@ struct engine {
 	// SmartMedia を差す・抜く・書き戻す間は、音声の糸が機械を回さないようにする
 	std::mutex card_lock;
 	bool use_nvram = false;           // 覚えている設定で起動するか（窓を出すときだけ）
+	// 音の出口。false = デジタル（S/PDIF と同じ。DPCM の直流も残る）、true = アナログ（直流を切る。analog_out.h）
+	std::atomic<bool> analog{false};
+	// エフェクトを C++ で鳴らす軽量モード（doc/native-dsp.md）。0 切 / 1 / 2。
+	// 画面からはここへ頼むだけで、切り替えは音声の糸が fill() の頭で行う
+	std::atomic<int>  want_native_fx{-1};
+	std::atomic<int>  native_fx{0};
 	std::string      message = "起動中...";
 
 	driver drv;
@@ -152,6 +159,8 @@ struct engine {
 	// 音声デバイスに頼まれた分だけ進める
 	void fill(s16 *out, u32 n)
 	{
+		// 非正規化数を 0 に丸める（軽量モード用。出るときに元へ戻す）
+		const smu2000::denormals_off no_denormals;
 		const std::lock_guard<std::mutex> hold(card_lock);
 		// 先に「触っている」を立ててから state を見る。逆にすると、見た直後に
 		// 起動し直しが始まって、両方が機械に触ってしまう
@@ -160,6 +169,12 @@ struct engine {
 			in_fill.store(false);
 			std::memset(out, 0, size_t(n) * 4);
 			return;
+		}
+
+		// 軽量モードの切り替えは、機械を回していない今のうちに
+		if (const int want = want_native_fx.exchange(-1); want >= 0) {
+			mu.set_native_fx(want);
+			native_fx.store(want);
 		}
 
 		guard_a.refill(n, AUDIO_RATE);
@@ -172,8 +187,7 @@ struct engine {
 
 		u8 b;
 		while (midi.pop(b)) {
-			mu.midi_in(b, 0);
-			drv.watch(b, 0);
+			drv.watch(b, mu.midi_in(b, 0));
 			if (mout && guard_a.pass(b)) mout->send(b);
 		}
 		// B は実機の 2 つめの DIN（内蔵 SCI ch1）。パート 17-32 に届く。
@@ -185,13 +199,17 @@ struct engine {
 			if (!midi_p[p])
 				continue;
 			while (midi_p[p]->pop(b)) {
-				mu.midi_in(b, p);
-				drv.watch(b, p);
+				drv.watch(b, mu.midi_in(b, p));
 				if (p == 1 && mout_b && guard_b.pass(b)) mout_b->send(b);
 			}
 		}
 
 		const float g = br.gain();
+		// アナログにした最初のブロックで、前に使ったときの状態を捨てる
+		const bool to_analog = analog.load(std::memory_order_relaxed);
+		if (to_analog && !m_analog_was)
+			m_dc.reset();
+		m_analog_was = to_analog;
 
 		for (u32 i = 0; i < n; i++) {
 			s32 l = 0, r = 0;
@@ -201,6 +219,11 @@ struct engine {
 				mu.set_audio_input(a1, a2);
 			}
 			mu.run_sample(l, r);
+			// 直流を切るのは音量のつまみより前（DAC のすぐ後ろ）。デジタルのときは何もしない
+			if (to_analog) {
+				l = s32(std::lrint(m_dc.run(0, l)));
+				r = s32(std::lrint(m_dc.run(1, r)));
+			}
 			l = s32(l * g) * 32768 / mu2000::DAC_FULL_SCALE;
 			r = s32(r * g) * 32768 / mu2000::DAC_FULL_SCALE;
 			out[i * 2 + 0] = s16(l < -32768 ? -32768 : l > 32767 ? 32767 : l);
@@ -214,6 +237,10 @@ struct engine {
 		drv.publish(mu, br, n, AUDIO_RATE, true, nullptr);
 		in_fill.store(false);
 	}
+
+private:
+	smu2000::analog_out m_dc{ AUDIO_RATE };
+	bool m_analog_was = false;
 };
 
 } // namespace ui

@@ -15,7 +15,18 @@
 
 #import <Cocoa/Cocoa.h>
 
+#include "ui/fx_editor.h"
+#include "ui/master_editor.h"
+#include "ui/overview.h"
+#include "ui/part_shapes.h"
+#include "ui/pc_editor.h"
+#include "ui/pc_host.h"
+#include "ui/pc_window_mac.h"
+#include "ui/xg_ui.h"
+
 #include <algorithm>
+#include <cstdio>
+#include <memory>
 #include <string>
 
 using namespace Steinberg;
@@ -68,6 +79,9 @@ using smu2000::vst3::plug_view;
 using smu2000::vst3::plug_key_of_char;
 using smu2000::vst3::PLUG_KEY_NONE;
 
+// mac_window, defined below: the card menu's choices open its PC windows
+namespace smu2000 { namespace vst3 { class mac_window; } }
+
 // The panel's view. Flipped, so the CGContext AppKit hands to drawRect already
 // has its origin top-left with y running down -- the space compat/gdi.h assumes
 // and the space the panel's hit testing is written in.
@@ -77,9 +91,13 @@ using smu2000::vst3::PLUG_KEY_NONE;
 	plug_view *_owner;
 @private
 	NSTimer *_timer;
+	int _clicks;
+	int _moves;
+	int _ticks;
 }
 - (instancetype)initWithOwner:(plug_view *)owner width:(int)w height:(int)h;
 - (void)tick:(NSTimer *)timer;
+- (void)ensureTimer;
 - (int)plugKeyForEvent:(NSEvent *)event;
 @end
 
@@ -101,11 +119,29 @@ using smu2000::vst3::PLUG_KEY_NONE;
 - (BOOL)isFlipped { return YES; }
 - (BOOL)acceptsFirstResponder { return YES; }
 
+// A host that keeps a plug-in's editor in a panel which does not take key focus
+// (Waveform does) makes every click into it a "first mouse" click, and AppKit
+// hands that click to the window to activate rather than to the view -- so the
+// panel draws and animates but no button ever fires. Saying yes here is what
+// lets the click through as well as activating the window
+- (BOOL)acceptsFirstMouse:(NSEvent *)event
+{
+	(void)event;
+	return YES;
+}
+
 - (void)drawRect:(NSRect)dirty
 {
 	(void)dirty;
 	if (!_owner)
 		return;
+	// The timer normally starts in viewDidMoveToWindow, but some hosts move
+	// the view around in ways that leave it windowless there and never move
+	// it again: with no timer the panel paints once and freezes. Drawing
+	// always runs on the main thread with a window in place, so a missing
+	// timer is remade here instead of staying missing
+	if (!_timer && [self window])
+		[self ensureTimer];
 	CGContextRef ctx = [[NSGraphicsContext currentContext] CGContext];
 	if (!ctx)
 		return;
@@ -118,33 +154,119 @@ using smu2000::vst3::PLUG_KEY_NONE;
 - (void)tick:(NSTimer *)timer
 {
 	(void)timer;
+	if (_ticks < 3) {
+		_ticks++;
+		if (_owner && _ticks == 1)
+			_owner->log_line("panel timer: first tick");
+	}
 	[self setNeedsDisplay:YES];
+}
+
+// Start the repaint timer unless one already runs. Safe to call twice
+- (void)ensureTimer
+{
+	if (_timer)
+		return;
+	_timer = [NSTimer timerWithTimeInterval:1.0 / 30.0
+	                                 target:self
+	                               selector:@selector(tick:)
+	                               userInfo:nil
+	                                repeats:YES];
+	[[NSRunLoop currentRunLoop] addTimer:_timer forMode:NSRunLoopCommonModes];
 }
 
 - (void)viewDidMoveToWindow
 {
 	[super viewDidMoveToWindow];
-	if ([self window]) {
-		if (!_timer) {
-			_timer = [NSTimer timerWithTimeInterval:1.0 / 30.0
-			                                 target:self
-			                               selector:@selector(tick:)
-			                               userInfo:nil
-			                                repeats:YES];
-			[[NSRunLoop currentRunLoop] addTimer:_timer forMode:NSRunLoopCommonModes];
+	NSWindow *win = [self window];
+	// The key notification is observed per window, and the window is only known
+	// here: a plug-in view is built before the host has put it anywhere, so
+	// asking for [self window] while attaching answers nil -- and nil there means
+	// "every window", which is not the question being asked
+	[[NSNotificationCenter defaultCenter] removeObserver:self
+	                                                name:NSWindowDidResignKeyNotification
+	                                              object:nil];
+	if (win) {
+		if (_moves < 4) {
+			_moves++;
+			if (_owner) {
+				char b[96];
+				std::snprintf(b, sizeof(b), "panel timer: moved to window (%s timer)",
+				              _timer ? "keeping" : "starting");
+				_owner->log_line(b);
+			}
 		}
+		[self ensureTimer];
+		[[NSNotificationCenter defaultCenter] addObserver:self
+		                                         selector:@selector(resignKeyWindow:)
+		                                             name:NSWindowDidResignKeyNotification
+		                                           object:win];
+
+		// Keyboard focus is asked for here and not in attached(), because this is
+		// the first moment the window is known: a view is built before the host
+		// has put it anywhere, so asking [self window] there answers nil and the
+		// ask goes nowhere. Only when the window itself owns the focus -- a host
+		// that keeps another control in the same window keeps it
+		id first = [win firstResponder];
+		if (!first || first == win)
+			[win makeFirstResponder:self];
 	} else {
+		if (_moves < 4) {
+			_moves++;
+			if (_owner)
+				_owner->log_line("panel timer: moved out of window (timer stopped)");
+		}
 		[_timer invalidate];
 		_timer = nil;
 	}
 }
 
+// Window notifications arrive as a message to the observer, and the selector is
+// named above. **NSView has no -resignKeyWindow** (NSWindow does), so without
+// this the notification would send an unrecognised selector and take the host
+// down with it the first time the editor window lost focus
+- (void)resignKeyWindow:(NSNotification *)note
+{
+	(void)note;
+	if (_owner)
+		_owner->focus_lost();
+}
+
 // ---- mouse
+
+// What a host did with a click is not visible from outside the view: the panel
+// draws and animates either way, so "it is on screen, updating, and answering
+// nothing" can only be told apart by writing down what arrived. The first few
+// clicks go to the log with the three answers that name the cases:
+//
+//   key no       the window never takes key focus, so AppKit spends the click
+//                activating it and the view is never asked -- this is the one
+//                -acceptsFirstMouse fixes, and the one that leaves no line here
+//                at all when the host is stubborn
+//   main no      the click came in on a thread that must not touch views
+//   hit other    something the host put on top took the click first
+- (void)noteClick:(NSEvent *)event
+{
+	if (!_owner || _clicks >= 8)
+		return;
+	_clicks++;
+
+	NSWindow *win = [self window];
+	NSView *hit = win ? [[win contentView] hitTest:[event locationInWindow]] : nil;
+	char b[200];
+	std::snprintf(b, sizeof(b), "クリック %d 回目: 窓 %s、key %s、主の糸 %s、当たった先 %s",
+	              _clicks, win ? "あり" : "なし",
+	              (win && [win isKeyWindow]) ? "yes" : "no",
+	              [NSThread isMainThread] ? "yes" : "no",
+	              hit ? NSStringFromClass([hit class]).UTF8String : "なし");
+	_owner->log_line(b);
+}
 
 - (void)mouseDown:(NSEvent *)event
 {
 	if (!_owner)
 		return;
+	[self noteClick:event];
 	NSPoint p = [self convertPoint:[event locationInWindow] fromView:nil];
 	_owner->mouse_down((int)p.x, (int)p.y);
 	[self setNeedsDisplay:YES];
@@ -223,6 +345,7 @@ using smu2000::vst3::PLUG_KEY_NONE;
 {
 	if (!_owner)
 		return;
+	[self noteClick:event];
 	NSPoint p = [self convertPoint:[event locationInWindow] fromView:nil];
 	_owner->mouse_right((int)p.x, (int)p.y);
 }
@@ -237,9 +360,50 @@ using smu2000::vst3::PLUG_KEY_NONE;
 {
 @public
 	plug_view *_owner;
+	smu2000::vst3::mac_window *_win;
 }
 - (void)choose:(id)sender;
 @end
+
+
+namespace smu2000 {
+namespace vst3 {
+
+class mac_window : public plug_window
+{
+public:
+	explicit mac_window(plug_view &owner) : m_owner(owner) {}
+	~mac_window() override { detach(); }
+
+	bool attach(void *parent, int w, int h) override;
+	void detach() override;
+	void set_size(int w, int h) override;
+	void card_menu(int x, int y) override;
+	void panel_menu(int x, int y) override;
+	void alert(const std::string &text) override;
+	void pc_frame(::xg::model &m, const ::ui::xg_snapshot &ram, ::ui::bridge &br) override;
+
+	// Open a PC window (overview/editor), showing an alert when it fails
+	void open_pc(ui::pc_window &w);
+	void open_list() { open_pc(m_list); }
+	void open_editor() { open_pc(m_editor); }
+
+private:
+	plug_view &m_owner;
+	SMUPlugView *m_view = nil;
+	// The PC windows gui.exe shows (overview, editor, insertion, part voice,
+	// master). Same content as on Windows; only the hosting window differs
+	ui::pc_window m_list{ std::make_unique<ui::overview>() };
+	ui::pc_window m_editor{ std::make_unique<ui::pc_editor>() };
+	ui::pc_window m_fx{ std::make_unique<ui::fx_editor>() };
+	ui::pc_window m_shapes{ std::make_unique<ui::part_shapes>() };
+	ui::pc_window m_master{ std::make_unique<ui::master_editor>() };
+};
+
+// Objective-C lives at global scope (see the note on SMUPlugView above);
+// the mac_window methods resume inside the namespaces below
+} // namespace vst3
+} // namespace smu2000
 
 @implementation SMUCardMenu
 
@@ -274,30 +438,16 @@ using smu2000::vst3::PLUG_KEY_NONE;
 
 	if (tag == 10)                                               // 抜く
 		_owner->card_eject();
+	else if (tag == 11 && _win)                                  // 一覧
+		_win->open_list();
+	else if (tag == 12 && _win)                                  // エディタ
+		_win->open_editor();
 }
 
 @end
 
-
 namespace smu2000 {
 namespace vst3 {
-
-class mac_window : public plug_window
-{
-public:
-	explicit mac_window(plug_view &owner) : m_owner(owner) {}
-	~mac_window() override { detach(); }
-
-	bool attach(void *parent, int w, int h) override;
-	void detach() override;
-	void set_size(int w, int h) override;
-	void card_menu(int x, int y) override;
-	void alert(const std::string &text) override;
-
-private:
-	plug_view &m_owner;
-	SMUPlugView *m_view = nil;
-};
 
 void mac_window::alert(const std::string &text)
 {
@@ -317,6 +467,7 @@ void mac_window::card_menu(int x, int y)
 
 	SMUCardMenu *target = [[SMUCardMenu alloc] init];
 	target->_owner = &m_owner;
+	target->_win = this;
 
 	NSMenu *m = [[NSMenu alloc] init];
 	[m setAutoenablesItems:NO];
@@ -354,8 +505,39 @@ void mac_window::card_menu(int x, int y)
 	[item setTag:10];
 	[item setEnabled:path.empty() ? NO : YES];
 
+	// The PC windows, where the Windows menu has them
+	[m addItem:[NSMenuItem separatorItem]];
+	item = [m addItemWithTitle:@"一覧を開く" action:@selector(choose:) keyEquivalent:@""];
+	[item setTarget:target];
+	[item setTag:11];
+	item = [m addItemWithTitle:@"エディタを開く" action:@selector(choose:) keyEquivalent:@""];
+	[item setTarget:target];
+	[item setTag:12];
+
 	// In the view's own coordinates. The view is flipped, which is the space the
 	// panel's hit testing already worked in
+	[m popUpMenuPositioningItem:nil atLocation:NSMakePoint(x, y) inView:m_view];
+}
+
+void mac_window::panel_menu(int x, int y)
+{
+	if (!m_view)
+		return;
+
+	SMUCardMenu *target = [[SMUCardMenu alloc] init];
+	target->_owner = &m_owner;
+	target->_win = this;
+
+	NSMenu *m = [[NSMenu alloc] init];
+	[m setAutoenablesItems:NO];
+
+	NSMenuItem *item = [m addItemWithTitle:@"一覧を開く" action:@selector(choose:) keyEquivalent:@""];
+	[item setTarget:target];
+	[item setTag:11];
+	item = [m addItemWithTitle:@"エディタを開く" action:@selector(choose:) keyEquivalent:@""];
+	[item setTarget:target];
+	[item setTag:12];
+
 	[m popUpMenuPositioningItem:nil atLocation:NSMakePoint(x, y) inView:m_view];
 }
 
@@ -379,18 +561,27 @@ bool mac_window::attach(void *parent, int w, int h)
 	// things around us
 	[host addSubview:m_view];
 	[m_view setFrame:NSMakeRect(0, 0, w, h)];
-	[[m_view window] makeFirstResponder:m_view];
+	// First responder is asked for from viewDidMoveToWindow: the window is not
+	// known here yet (this runs before the host has shown the view), and asking
+	// then answers nil. Waiting until the view is somewhere can tell a host's own
+	// window from ours, which is what keeps the editor from pulling the keyboard
+	// away from whatever the host holds focus with
 
-	// Losing key focus must not leave a panel button held down
-	[[NSNotificationCenter defaultCenter] addObserver:m_view
-	                                         selector:@selector(resignKeyWindow:)
-	                                             name:NSWindowDidResignKeyNotification
-	                                           object:[m_view window]];
+	// Losing key focus must not leave a panel button held down. The observer is
+	// registered by the view itself in viewDidMoveToWindow, which is where the
+	// window it belongs to is known
 	return true;
 }
 
 void mac_window::detach()
 {
+	// The hosted PC windows go with the panel: left open they would keep
+	// drawing from an engine that is being torn down
+	m_list.hide();
+	m_editor.hide();
+	m_fx.hide();
+	m_shapes.hide();
+	m_master.hide();
 	if (m_view) {
 		[[NSNotificationCenter defaultCenter] removeObserver:m_view];
 		[m_view removeFromSuperview];
@@ -403,6 +594,20 @@ void mac_window::set_size(int w, int h)
 {
 	if (m_view)
 		[m_view setFrame:NSMakeRect(0, 0, w, h)];
+}
+
+void mac_window::open_pc(ui::pc_window &w)
+{
+	std::string err;
+	if (!w.show(err))
+		alert(err.empty() ? std::string("the window cannot be opened") : err);
+}
+
+// Driven at the panel's repaint rate. Hidden windows cost nothing
+void mac_window::pc_frame(::xg::model &m, const ::ui::xg_snapshot &ram, ::ui::bridge &br)
+{
+	ui::pc_frame_all(m_list, m_editor, m_fx, m_shapes, m_master, m, ram, br,
+	                 [this](ui::pc_window &w) { open_pc(w); });
 }
 
 

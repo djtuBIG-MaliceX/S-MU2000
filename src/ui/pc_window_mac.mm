@@ -550,6 +550,13 @@ bool pc_window::visible() const
 	return h && h->win && [h->win isVisible];
 }
 
+void pc_window::hide()
+{
+	const host *h = (const host *)m_ns;
+	if (h && h->win)
+		[h->win orderOut:nil];
+}
+
 void pc_window::shutdown(bridge &br)
 {
 	if (!m_imgui)

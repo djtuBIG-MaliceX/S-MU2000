@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" width="1640" height="680" viewBox="0 0 433.91666 179.91666">
+  <g id="lcd" inkscape:groupmode="layer" inkscape:label="液晶の窓の枠">
+    <path id="lcd-1" style="fill:none;stroke:#404040;stroke-width:0.529167;stroke-linecap:butt;stroke-linejoin:miter;stroke-dasharray:none;stroke-opacity:1" transform="matrix(1,0,0,1,81.557198,-105.50975)"
+          d="M 26.870547 129.19351 l 4.098458 3.6065 H 200.26461 v 0.12402 l 4.26951 -3.75739 c -0.42306 -0.49162 -1.02918 -0.81856 -1.73168 -0.81856 H 28.620311 c -0.714204 0 -1.326609 0.3395 -1.749764 0.84543 z" />
+    <path id="lcd-2" style="fill:none;stroke:#404040;stroke-width:0.529167;stroke-linecap:butt;stroke-linejoin:miter;stroke-dasharray:none;stroke-opacity:1" transform="matrix(1,0,0,1,81.557198,-105.50975)"
+          d="M 204.53387 129.1667 l -4.26951 3.7574 v 50.94056 h -0.015 l 4.15737 5.85855 c 0.43305 -0.41945 0.7059 -1.00235 0.7059 -1.65571 v -57.4089 c 0 -0.57758 -0.23094 -1.08771 -0.57877 -1.4919 z" />
+    <path id="lcd-3" style="fill:none;stroke:#404040;stroke-width:0.529167;stroke-linecap:butt;stroke-linejoin:miter;stroke-dasharray:none;stroke-opacity:1" transform="matrix(1,0,0,1,81.557198,-105.50975)"
+          d="M 27.074414 189.76251 l 3.943945 -5.89783 h -0.08733 v -51.06459 h 0.03772 l -4.098458 -3.60649 c -0.335262 0.40084 -0.560689 0.89915 -0.560689 1.46502 v 57.4089 c 0 0.67894 0.301566 1.27301 0.764811 1.69499 z" />
+    <path id="lcd-4" style="fill:none;stroke:#404040;stroke-width:0.529167;stroke-linecap:butt;stroke-linejoin:miter;stroke-dasharray:none;stroke-opacity:1" transform="matrix(1,0,0,1,81.557198,-105.50975)"
+          d="M 30.890718 132.76184 H 200.22405 v 51.06458 H 30.890718 z" />
+    <path id="lcd-5" style="fill:none;stroke:#404040;stroke-width:0.529167;stroke-linecap:butt;stroke-linejoin:miter;stroke-dasharray:none;stroke-opacity:1" transform="matrix(1,0,0,1,81.557198,-105.50975)"
+          d="M 204.40674 189.72321 l -4.15737 -5.85855 H 31.018359 l -3.943945 5.89783 c 0.410152 0.37361 0.944518 0.61546 1.545642 0.61546 H 202.80219 c 0.62671 0 1.18916 -0.25239 1.60455 -0.65474 z" />
+  </g>
+</svg>

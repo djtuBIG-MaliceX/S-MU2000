@@ -173,7 +173,8 @@ layout::layout()
 
 	const double cd[4] = { 57, 336, 201, 21 };
 	const double ad[4] = { 8, 44, 60, 130 };
-	for (int i = 0; i < 4; i++) { card[i] = cd[i]; adin[i] = ad[i]; }
+	const double ph[4] = { 198, 238, 74, 82 };   // 丸と下の札。組み込みの絵（丸 228, 269）と art/mame の絵（丸 251, 257）の両方に当たる
+	for (int i = 0; i < 4; i++) { card[i] = cd[i]; adin[i] = ad[i]; phones[i] = ph[i]; }
 
 	// ---- 飾り。実機の写真から採寸した
 	bool ok = false;
@@ -395,6 +396,7 @@ bool layout::load(const std::string &path, std::string &err)
 		else if (key == "plg")    { if (need(4)) for (int i = 0; i < 3; i++) plg[i] = num(t[1 + i]); }
 		else if (key == "card")   { if (need(5)) for (int i = 0; i < 4; i++) card[i] = num(t[1 + i]); }
 		else if (key == "adin")   { if (need(5)) for (int i = 0; i < 4; i++) adin[i] = num(t[1 + i]); }
+		else if (key == "phones") { if (need(5)) for (int i = 0; i < 4; i++) phones[i] = num(t[1 + i]); }
 		else if (key == "low.x")  { if (need(12)) for (int i = 0; i < 11; i++) low_x[i] = int(num(t[1 + i])); }
 		else if (key == "low.w")  { if (need(12)) for (int i = 0; i < 11; i++) low_w[i] = int(num(t[1 + i])); }
 		else if (key.rfind("mode.", 0) == 0) {
@@ -509,6 +511,8 @@ bool layout::save(const std::string &path) const
 	             card[0], card[1], card[2], card[3]);
 	std::fprintf(f, "adin %g %g %g %g     # A/D INPUT のジャック\n",
 	             adin[0], adin[1], adin[2], adin[3]);
+	std::fprintf(f, "phones %g %g %g %g   # PHONES のジャック。押すと音の出口（デジタル / アナログ）の品書き\n",
+	             phones[0], phones[1], phones[2], phones[3]);
 	std::fprintf(f, "columns.y %g        # 窓の下の札（PART VOL EXP …）の高さ\n\n",
 	             columns_y);
 

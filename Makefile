@@ -9,6 +9,9 @@
 #
 # MSYS2 / MinGW-w64 の g++ を想定している。
 # C++20 が要る（sh.cpp が std::rotl / std::rotr を使う）。
+#
+#   make CROSS=windows   macOS から Windows 用 exe / VST3 を作る
+#                 (mingw-w64 が要る: brew install mingw-w64)
 
 # 音を作るのは重いので最適化を上げる。-O2 より 6% 速い
 CXXFLAGS ?= -std=c++20 -O3 -Wall -Wno-unused-variable -Wno-unused-but-set-variable
@@ -19,11 +22,25 @@ CXXFLAGS ?= -std=c++20 -O3 -Wall -Wno-unused-variable -Wno-unused-but-set-variab
 # compiler, and macOS.
 #   Windows ... OS holds Windows_NT
 #   macOS   ... uname -s answers Darwin
+#
+# Cross-compile the Windows binaries on macOS with mingw-w64:
+#   brew install mingw-w64
+#   make CROSS=windows
+# Objects go to build-windows/ so native and cross builds never mix.
+# CXX/PYTHON/BUILD can still be overridden (e.g. CXX=x86_64-w64-mingw32-g++-posix).
 PLATFORM := unknown
-ifeq ($(OS),Windows_NT)
+ifneq (,$(filter windows win win64 mingw mingw64,$(CROSS)))
+PLATFORM := windows
+CROSS_WINDOWS := 1
+else ifeq ($(OS),Windows_NT)
 PLATFORM := windows
 else ifeq ($(shell uname -s),Darwin)
 PLATFORM := macos
+else ifeq ($(shell uname -s),Linux)
+# Native Linux (issue #25). Cross-building the Windows binaries from Linux is
+# still `make CROSS=windows`; it used to be picked automatically when mingw-w64
+# was installed, which would now hide the native build
+PLATFORM := linux
 else ifneq ($(shell command -v x86_64-w64-mingw32-g++ 2>/dev/null),)
 PLATFORM := windows
 ifeq ($(origin CXX),default)
@@ -31,13 +48,63 @@ CXX := x86_64-w64-mingw32-g++
 endif
 endif
 
+ifdef CROSS_WINDOWS
+ifdef UNIVERSAL
+$(error CROSS=windows and UNIVERSAL=1 do not mix)
+endif
+ifdef ARCH
+$(error CROSS=windows and ARCH=$(ARCH) do not mix -- the target is always x86_64 Windows)
+endif
+ifdef MARCH
+$(error CROSS=windows and MARCH=$(MARCH) do not mix -- -march=native would probe the Mac CPU, not the Windows target)
+endif
+# Windows binaries do not run on macOS. The run targets (check, probe, test)
+# pass this through, so `make CROSS=windows check WINE=wine` works where Wine
+# exists; otherwise they stop with a message instead of an Exec format error
+WINE ?=
+endif
+
 ifeq ($(PLATFORM),windows)
+ifdef CROSS_WINDOWS
+# `CXX ?= ...` would keep make's built-in c++ (same reason as the clang++
+# swap below), so swap it only while it is still the default
+ifeq ($(origin CXX),default)
+CXX      := x86_64-w64-mingw32-g++
+endif
+PYTHON   ?= python3
+else
 CXX      ?= g++
 PYTHON   ?= python
+endif
 # MSYS2 の DLL に依存させない。動的リンクのままだと、MSYS2 の環境の外
 # （素の PowerShell など）では起動に失敗して何も言わずに終わる
 LDFLAGS  ?= -static -static-libgcc -static-libstdc++
 EXE      := .exe
+# 32 ビット MinGW (i686) は既定で浮動小数を x87 の 80 ビット中間値で計算する
+# (__FLT_EVAL_METHOD__=2)。x86-64/arm64 は SSE2 の 64 ビットなので、
+# 同じ C++ でも丸めが微妙に違い、サンプル精度の render がゴールデンからズレる
+# （約 9 秒後に ±1 LSB ずつ現れる兆候）。SSE2 演算に寄せて x64 と
+# ビット一致させる。x86-64 では既に既定なので実質 no-op、arm64 には当てない。
+ifneq (,$(filter i386 i486 i586 i686,$(firstword $(subst -, ,$(shell $(CXX) -dumpmachine 2>/dev/null)))))
+CXXFLAGS += -mfpmath=sse -msse2
+# libmsvcrt の i386 用 __beginthreadex は SEH handler を .sxdata 経由で引く
+# だけなので、ld が libmingw32 の crt_handler.o を取り出さない（x64 は SEH
+# を使わないので起きない）。--undefined で引き込ませる
+# （--require-defined だと、この名前を持たない新しい MSYS2 の i686 のランタイムでリンクが止まる。
+# そちらでは引き込まなくてもスレッドを使う試験が通る）
+#
+# PLUGIN_API は __stdcall。32 ビットだと dll からの名前が
+# GetPluginFactory@0 になって host が見つけられない。--kill-at で @0 を落とす
+LDFLAGS  += -Wl,--undefined=___mingw_SEH_error_handler -Wl,--kill-at
+endif
+else ifeq ($(PLATFORM),linux)
+CXX      ?= g++
+PYTHON   ?= python3
+LDFLAGS  ?=
+EXE      :=
+# std::thread and the ALSA backend want it on both sides of the link
+CXXFLAGS += -pthread
+LDFLAGS  += -pthread
 else
 # `CXX ?= clang++` would not work: make already has CXX set (to c++), and `?=`
 # leaves a defined variable alone. So swap it only while it is still the default
@@ -81,7 +148,14 @@ CXXFLAGS += -MMD -MP
 # message about which architecture the .o files were. Passing BUILD=... still
 # overrides, and a plain `make` still uses build/
 ifeq ($(origin BUILD),undefined)
-ifdef UNIVERSAL
+ifeq ($(PLATFORM),linux)
+# The working tree is often shared with a Windows build (WSL, a network share),
+# and the two sets of objects must not mix
+BUILD := build-linux
+endif
+ifdef CROSS_WINDOWS
+BUILD := build-windows
+else ifdef UNIVERSAL
 BUILD := build-universal
 else ifdef ARCH
 BUILD := build-$(ARCH)
@@ -116,7 +190,13 @@ ifeq ($(PLATFORM),windows)
 all: $(BUILD)/verify$(EXE) $(BUILD)/boot$(EXE) $(BUILD)/render$(EXE) \
      $(BUILD)/live$(EXE) $(BUILD)/midisend$(EXE) $(BUILD)/panel$(EXE) $(BUILD)/gui$(EXE) \
      $(BUILD)/statetest$(EXE) $(BUILD)/rec$(EXE) $(BUILD)/blocktime$(EXE) \
-     vst3 $(BUILD)/vst3probe$(EXE) clap
+     vst3 $(BUILD)/vst3probe$(EXE) clap $(BUILD)/clapprobe$(EXE)
+else ifeq ($(PLATFORM),linux)
+# Linux (issue #25). The windowed program and the plug-ins are not ported yet;
+# these need no window
+all: $(BUILD)/verify$(EXE) $(BUILD)/boot$(EXE) $(BUILD)/render$(EXE) \
+     $(BUILD)/panel$(EXE) $(BUILD)/statetest$(EXE) $(BUILD)/blocktime$(EXE) \
+     $(BUILD)/live$(EXE)
 else
 # macOS. vst3 and vst3probe are defined below
 all: $(BUILD)/verify$(EXE) $(BUILD)/boot$(EXE) $(BUILD)/render$(EXE) \
@@ -147,10 +227,27 @@ $(BUILD)/xgtest$(EXE): $(OBJS) $(BUILD)/src/mu2000.o $(BUILD)/src/xg/model.o $(B
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
 
+# エフェクトのパラメータ番地（1-16）を firmware に確かめさせる（doc/fx-params.md）
+$(BUILD)/fx_probe$(EXE): $(OBJS) $(BUILD)/src/mu2000.o $(BUILD)/src/fx_probe.o
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+
 # インサーションのパラメータの表（src/xg/fx_params.h）を firmware の LCD から作る（doc/pc-editor.md）。
 #   build/fxsweep.exe ../MU2000/roms > fxsweep.txt
 #   python tools/fxsweep/make_fx_params.py fxsweep.txt src/xg/fx_params.h
 $(BUILD)/fxsweep$(EXE): $(OBJS) $(BUILD)/src/mu2000.o $(BUILD)/tools/fxsweep/fxsweep.o
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+
+# SH-2 を止めたまま音を出す（doc/native-engine.md の段 2）。
+#   build/nativeplay.exe ../MU2000/roms out.wav -b 0,0,0 -n 60
+$(BUILD)/nativeplay$(EXE): $(OBJS) $(BUILD)/src/mu2000.o $(BUILD)/tools/native/nativeplay.o
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+
+# 音色の記録（ROM の 84 バイト）と SWP30 のレジスタを組で集める（doc/native-engine.md の段 1）。
+#   build/voicesweep.exe ../MU2000/roms > voicesweep.txt
+$(BUILD)/voicesweep$(EXE): $(OBJS) $(BUILD)/src/mu2000.o $(BUILD)/tools/voicesweep/voicesweep.o
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
 
@@ -193,7 +290,7 @@ IMGUI_FLAGS += -DIMGUI_IMPL_WIN32_DISABLE_GAMEPAD
 IMGUI_SRCS := $(IMGUI_CORE) \
               $(IMGUI_DIR)/backends/imgui_impl_win32.cpp \
               $(IMGUI_DIR)/backends/imgui_impl_dx11.cpp
-PC_SRCS    := src/ui/pc_editor.cpp src/ui/pc_window.cpp src/ui/xg_ui.cpp src/ui/overview.cpp src/ui/fx_editor.cpp src/ui/fx_help.cpp src/ui/part_shapes.cpp
+PC_SRCS    := src/ui/pc_editor.cpp src/ui/pc_window.cpp src/ui/xg_ui.cpp src/ui/overview.cpp src/ui/fx_editor.cpp src/ui/fx_help.cpp src/ui/part_shapes.cpp src/ui/master_editor.cpp src/ui/fx_icons.cpp
 PC_OBJS    := $(IMGUI_SRCS:%.cpp=$(BUILD)/imgui/%.o) $(PC_SRCS:%.cpp=$(BUILD)/imgui/%.o)
 
 # gui は実機のフロントパネル風の画面を出す
@@ -242,7 +339,7 @@ VST3_INC  := -I third_party/vst3
 
 VST3_SDK_SRCS := 	third_party/vst3/pluginterfaces/base/funknown.cpp 	third_party/vst3/pluginterfaces/base/coreiids.cpp 	third_party/vst3/pluginterfaces/base/conststringtable.cpp 	third_party/vst3/pluginterfaces/base/ustring.cpp
 
-VST3_SRCS := src/vst3/plugin.cpp src/vst3/engine.cpp src/vst3/iids.cpp \
+VST3_SRCS := src/vst3/plugin.cpp src/vst3/engine.cpp src/vst3/iids.cpp src/vst3/automation.cpp \
              src/vst3/view.cpp src/vst3/view_win.cpp \
              src/ui/panel.cpp src/ui/layout.cpp src/ui/svg.cpp src/ui/editor.cpp \
              src/ui/effects.cpp src/xg/model.cpp $(VST3_SDK_SRCS)
@@ -269,6 +366,11 @@ $(VST3_BIN): $(OBJS) $(BUILD)/src/mu2000.o $(VST3_OBJS) $(PC_OBJS)
 VST3_INSTALL ?= $(PROGRAMFILES)/Common Files/VST3
 
 install-vst3: $(VST3_BIN)
+ifdef CROSS_WINDOWS
+ifeq ($(PROGRAMFILES),)
+	$(error CROSS=windows: there is no Program Files here -- pass VST3_INSTALL=<dir> to copy the bundle somewhere you can pick it up from)
+endif
+endif
 	rm -rf "$(VST3_INSTALL)/S-MU2000.vst3"
 	cp -r $(VST3_DIR) "$(VST3_INSTALL)/"
 	@echo "入れた: $(VST3_INSTALL)/S-MU2000.vst3"
@@ -279,7 +381,11 @@ $(BUILD)/vst3probe$(EXE): $(BUILD)/vst3obj/src/vst3/probe.o $(BUILD)/vst3obj/src
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) -lole32
 
 probe: $(BUILD)/vst3probe$(EXE) $(VST3_BIN)
+ifdef CROSS_WINDOWS
+	$(if $(WINE),$(WINE) $(BUILD)/vst3probe$(EXE) $(VST3_BIN),$(error CROSS=windows: the probe is a Windows binary -- pass WINE=wine or copy build-windows/ to Windows))
+else
 	$(BUILD)/vst3probe$(EXE) $(VST3_BIN)
+endif
 
 # ---- CLAP プラグイン
 #
@@ -299,6 +405,11 @@ $(BUILD)/clapobj/%.o: %.cpp
 
 clap: $(CLAP_BIN)
 
+# CLAP を DAW 無しで鳴らす小さなホスト。vst3probe と同じ MIDI を流して出音を比べる
+$(BUILD)/clapprobe$(EXE): $(BUILD)/clapobj/src/clap/probe.o $(BUILD)/src/smf.o $(BUILD)/src/compat/compat.o
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+
 # VST3 と同じく、PC で触る窓（一覧・エディタ）も入れる
 $(CLAP_BIN): $(OBJS) $(BUILD)/src/mu2000.o $(CLAP_OBJS) $(PC_OBJS)
 	@mkdir -p $(dir $@)
@@ -314,6 +425,22 @@ install-clap: $(CLAP_BIN)
 # The Audio Unit is a macOS port; nothing to build here
 au install-au au-probe check-au:
 	@echo "Audio Unit は macOS の口です。doc/porting-macos.md を見よ"
+
+else ifeq ($(PLATFORM),linux)
+
+# ---- Linux-side ports (ALSA: PCM out, sequencer in). issue #25
+#
+# The same ui:: interfaces as on the other two platforms; the shape follows the
+# macOS files, with the device handle and the worker thread inside the impl
+LINUX_IO_OBJS := $(BUILD)/src/ui/audio_out_linux.o $(BUILD)/src/ui/midi_in_linux.o
+
+$(BUILD)/live$(EXE): $(OBJS) $(BUILD)/src/mu2000.o $(LINUX_IO_OBJS) $(BUILD)/src/live.o
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) -lasound
+
+# The windowed program and the plug-ins are not ported to Linux yet
+gui vst3 install-vst3 probe clap install-clap au install-au au-probe check-au:
+	@echo "$@ は Linux ではまだ作れません。doc/linux.md を見よ"
 
 else # macOS
 
@@ -360,7 +487,8 @@ MAC_GUI_SRCS := src/ui/panel.cpp src/ui/editor.cpp src/ui/effects.cpp \
 MAC_IMGUI_SRCS := $(IMGUI_CORE) \
                   $(IMGUI_DIR)/backends/imgui_impl_metal.mm
 MAC_PC_SRCS    := src/ui/pc_editor.cpp src/ui/pc_window_mac.mm src/ui/xg_ui.cpp \
-                  src/ui/overview.cpp src/ui/fx_editor.cpp src/ui/fx_help.cpp src/ui/part_shapes.cpp
+                  src/ui/overview.cpp src/ui/fx_editor.cpp src/ui/fx_help.cpp src/ui/part_shapes.cpp \
+                  src/ui/master_editor.cpp src/ui/fx_icons.cpp
 MAC_PC_OBJS    := $(MAC_IMGUI_SRCS) $(MAC_PC_SRCS)
 MAC_PC_OBJS    := $(MAC_PC_OBJS:%.cpp=$(BUILD)/imgui/%.o)
 MAC_PC_OBJS    := $(MAC_PC_OBJS:%.mm=$(BUILD)/imgui/%.o)
@@ -418,23 +546,25 @@ PANEL_SRCS := src/compat/gdi_mac.cpp \
               src/ui/panel.cpp src/ui/layout.cpp src/ui/svg.cpp src/ui/editor.cpp \
               src/ui/effects.cpp src/xg/model.cpp
 
-VST3_SRCS := src/vst3/plugin.cpp src/vst3/engine.cpp src/vst3/iids.cpp \
+VST3_SRCS := src/vst3/plugin.cpp src/vst3/engine.cpp src/vst3/iids.cpp src/vst3/automation.cpp \
              $(PANEL_VIEW_SRCS) $(PANEL_SRCS) $(VST3_SDK_SRCS)
 VST3_OBJS := $(VST3_SRCS:%.cpp=$(BUILD)/vst3obj/%.o)
 VST3_OBJS := $(VST3_OBJS:%.mm=$(BUILD)/vst3obj/%.o)
 
 $(BUILD)/vst3obj/%.o: %.cpp
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) $(VST3_INC) -c -o $@ $<
+	$(CXX) $(CXXFLAGS) $(VST3_INC) $(IMGUI_FLAGS) -c -o $@ $<
 
 $(BUILD)/vst3obj/%.o: %.mm
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) $(VST3_INC) -fobjc-arc -c -o $@ $<
+	$(CXX) $(CXXFLAGS) $(VST3_INC) $(IMGUI_FLAGS) -fobjc-arc -c -o $@ $<
 
 vst3: $(VST3_BIN)
 
 # -bundle, not -shared: a VST3 is read with CFBundle, not dlopen
-$(VST3_BIN): $(OBJS) $(BUILD)/src/mu2000.o $(VST3_OBJS)
+# The overview/editor PC windows open from the plug-in too, so the ImGui
+# views and the AppKit window come along in the bundle as well
+$(VST3_BIN): $(OBJS) $(BUILD)/src/mu2000.o $(VST3_OBJS) $(MAC_PC_OBJS)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -bundle -o $@ $^ $(LDFLAGS) $(MAC_FRAMEWORKS)
 	@mkdir -p $(VST3_DIR)/Contents/Resources
@@ -471,7 +601,7 @@ $(BUILD)/clapobj/%.o: %.cpp
 
 clap: $(CLAP_BIN)
 
-$(CLAP_BIN): $(OBJS) $(BUILD)/src/mu2000.o $(CLAP_OBJS)
+$(CLAP_BIN): $(OBJS) $(BUILD)/src/mu2000.o $(CLAP_OBJS) $(MAC_PC_OBJS)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -bundle -o $@ $^ $(LDFLAGS) $(MAC_FRAMEWORKS)
 	@mkdir -p $(CLAP_DIR)/Contents/Resources
@@ -532,7 +662,7 @@ AU_OBJS := $(AU_OBJS:%.mm=$(BUILD)/vst3obj/%.o)
 au: $(AU_BIN)
 
 # -bundle like the VST3: an AU is also read with CFBundle
-$(AU_BIN): $(OBJS) $(BUILD)/src/mu2000.o $(AU_OBJS)
+$(AU_BIN): $(OBJS) $(BUILD)/src/mu2000.o $(AU_OBJS) $(MAC_PC_OBJS)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -bundle -o $@ $^ $(LDFLAGS) $(MAC_FRAMEWORKS)
 	@mkdir -p $(AU_DIR)/Contents/Resources
@@ -550,7 +680,7 @@ install-au: $(AU_BIN)
 	mkdir -p "$(AU_INSTALL)"
 	cp -r $(AU_DIR) "$(AU_INSTALL)/"
 	@echo "入れた: $(AU_INSTALL)/S-MU2000.component"
-	@echo "auval -v aumu SMU2 Trbh で確かめられる"
+	@echo "auval -v aumu SMU2 Trbh で確かめられる (auval -real-time-safety は最近の OS では動かない)"
 
 # Small host that runs the AU without a DAW. -lobjc is for the editor check:
 # it makes the view class the way a host does, with NSClassFromString
@@ -565,6 +695,150 @@ au-probe: $(BUILD)/aubprobe$(EXE) $(AU_BIN)
 
 check-au: $(BUILD)/aubprobe$(EXE) $(AU_BIN)
 	S_MU2000_ROMS=$(ROMS) $(BUILD)/aubprobe$(EXE) $(AU_DIR) --torture
+
+# ---- AUv3 plug-in (macOS)
+#
+# The hardware jacks become ports as-is:
+#   out MAIN OUT L/R / in A/D INPUT / MIDI in cable 0=IN A, 1=IN B / MIDI out MIDI OUT
+#
+# An AUv3 is only recognized by the system inside an app, so a silent
+# container app is built alongside it. Launch it once and the unit shows
+# up in DAW lists.
+# The subtype differs from AUv2 (SMU3/Trbh vs SMU2/Trbh), so installing
+# both never confuses them.
+#
+#   make auv3           build build/S-MU2000.app (with the .appex inside)
+#   make install-auv3   copy it to ~/Applications and launch once (registers it)
+#   make auval3         validate the plug-in (aumu SMU3 Trbh)
+
+AUV3_APP   := $(BUILD)/S-MU2000.app
+AUV3_APPEX := $(AUV3_APP)/Contents/PlugIns/S-MU2000AU.appex
+AUV3_BIN   := $(AUV3_APPEX)/Contents/MacOS/S-MU2000AU
+AUV3_HOST  := $(AUV3_APP)/Contents/MacOS/S-MU2000
+
+# The sound engine is the same one VST3 uses (no VST3 types in it).
+# The UI is the same panel VST3 and AUv2 show (view_controller.mm hosts plug_view)
+AUV3_SRCS := src/auv3/audio_unit.mm src/auv3/factory.mm src/auv3/view_controller.mm \
+             src/vst3/engine.cpp src/vst3/iids.cpp \
+             $(PANEL_VIEW_SRCS) $(PANEL_SRCS) $(VST3_SDK_SRCS)
+AUV3_OBJS := $(AUV3_SRCS:%.cpp=$(BUILD)/auv3obj/%.o)
+AUV3_OBJS := $(AUV3_OBJS:%.mm=$(BUILD)/auv3obj/%.o)
+
+# Certificate for signing. Ad-hoc (-) registers fine (the sandbox
+# entitlements are what matter). Use a Developer ID for distribution.
+#   security find-identity -v -p codesigning   lists local certificates
+CODESIGN_ID ?= -
+
+# Copy ROMs into the bundle.
+#
+# A sandboxed extension can only read its own bundle. The AUv3 extension
+# lives in a sandbox (it would not register otherwise), so $HOME points
+# at the container and neither ~/Library/Application Support nor whatever
+# roms.txt names is reachable. Baking ROMs in is the only way an AUv3 sings.
+#
+#   make auv3 AUV3_ROMS=/path/to/roms
+#
+# ROMs are never redistributed, so they stay out of git (roms/ is ignored).
+# Local builds bake them in from ./roms by default so the unit always sings;
+# pass another path, empty to leave the bundle as it is, or none to take them
+# out (without them the unit registers and renders, silently)
+AUV3_ROMS ?= roms
+
+AUV3_FLAGS := -fobjc-arc
+AUV3_FW    := -framework Foundation -framework AudioToolbox -framework AVFoundation \
+              -framework CoreAudio -framework CoreMIDI -framework Cocoa -framework CoreAudioKit \
+              -framework Metal -framework QuartzCore
+
+$(BUILD)/auv3obj/%.o: %.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(VST3_INC) -c -o $@ $<
+
+$(BUILD)/auv3obj/%.o: %.mm
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(VST3_INC) $(IMGUI_FLAGS) $(AUV3_FLAGS) -ObjC++ -c -o $@ $<
+
+# Bundle finishing (ROMs in, then sign) runs every time. Doing it only
+# when binaries rebuild would ignore a later-added AUV3_ROMS.
+# An explicitly empty AUV3_ROMS leaves the contents as they are (so a bare
+# rebuild never wipes baked ROMs). Write AUV3_ROMS=none to take them out
+auv3: $(AUV3_HOST) $(BUILD)/autest$(EXE)
+	# ROMs into the bundle. Before signing (adding them later breaks the seal).
+	# An explicitly empty AUV3_ROMS leaves a bare install alone.
+	# AUV3_ROMS=none takes them out
+ifeq ($(AUV3_ROMS),none)
+	@rm -rf $(AUV3_APPEX)/Contents/Resources/roms
+	@rm -rf $(AUV3_APPEX)/Contents/Resources/bootcache
+	@echo "ROM を抜いた"
+endif
+ifneq ($(AUV3_ROMS),)
+ifneq ($(AUV3_ROMS),none)
+	@rm -rf $(AUV3_APPEX)/Contents/Resources/roms
+	@mkdir -p $(AUV3_APPEX)/Contents/Resources
+	@cp -R $(AUV3_ROMS) $(AUV3_APPEX)/Contents/Resources/roms
+	@echo "ROM を入れた: $(AUV3_ROMS)"
+	# Boot the image once here and bake the snapshot, so first insert never waits.
+	# A sandboxed plug-in owns no NVRAM (empty container), so build it under an
+	# empty HOME to match keys. Otherwise local settings leak in, the key
+	# changes, and the baked snapshot goes unused
+	@rm -rf $(AUV3_APPEX)/Contents/Resources/bootcache
+	@tmp=$$(mktemp -d); \
+	 HOME=$$tmp S_MU2000_ROMS=$(AUV3_ROMS) $(BUILD)/autest$(EXE) --state $$tmp/state.bin >/dev/null 2>&1; \
+	 if [ -d "$$tmp/Library/Application Support/S-MU2000/bootcache" ]; then \
+	   mkdir -p $(AUV3_APPEX)/Contents/Resources/bootcache; \
+	   cp "$$tmp/Library/Application Support/S-MU2000/bootcache/"*.bin \
+	      $(AUV3_APPEX)/Contents/Resources/bootcache/ 2>/dev/null; \
+	   echo "起動の写しを焼いた: $$(ls $(AUV3_APPEX)/Contents/Resources/bootcache | head -1)"; \
+	 else echo "起動の写しを作れなかった（初回は待たされる）"; fi; \
+	 rm -rf "$$tmp"
+endif
+endif
+	# Info.plists are refreshed here. The copies in the binary rules alone
+	# would leave a plist-only edit stale under its signature
+	@cp -f packaging/auv3-appex-Info.plist $(AUV3_APPEX)/Contents/Info.plist
+	@cp -f packaging/auv3-app-Info.plist $(AUV3_APP)/Contents/Info.plist
+	# The App Sandbox entitlement is required. A macOS app extension outside
+	# the sandbox never registers. Certificate kind does not matter (ad-hoc works)
+	@codesign --force --sign "$(CODESIGN_ID)" --timestamp=none \
+	          --entitlements packaging/auv3-appex.entitlements $(AUV3_APPEX)
+	@codesign --force --sign "$(CODESIGN_ID)" --timestamp=none \
+	          --entitlements packaging/auv3-app.entitlements $(AUV3_APP)
+	@echo "出来た: $(AUV3_APP)"
+
+# The .appex itself. Entry point is NSExtensionMain (it owns no main())
+$(AUV3_BIN): $(OBJS) $(BUILD)/src/mu2000.o $(AUV3_OBJS) $(MAC_PC_OBJS)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) $(AUV3_FW) \
+	       -e _NSExtensionMain -fapplication-extension
+	@cp -f packaging/auv3-appex-Info.plist $(AUV3_APPEX)/Contents/Info.plist
+
+# The container app. Silent. Exists only to carry the .appex into registration
+$(AUV3_HOST): $(AUV3_BIN) $(BUILD)/auv3obj/src/auv3/main_app.o
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -o $@ $(BUILD)/auv3obj/src/auv3/main_app.o $(LDFLAGS) -framework Cocoa
+	@cp -f packaging/auv3-app-Info.plist $(AUV3_APP)/Contents/Info.plist
+	@mkdir -p $(AUV3_APP)/Contents/Resources
+	@cp -f LICENSE $(AUV3_APP)/Contents/Resources/LICENSE.txt
+	@cp -f NOTICE.txt $(AUV3_APP)/Contents/Resources/NOTICE.txt
+
+# Register it. Place under ~/Applications and launch once
+install-auv3: auv3
+	rm -rf "$(HOME)/Applications/S-MU2000.app"
+	@mkdir -p "$(HOME)/Applications"
+	cp -R $(AUV3_APP) "$(HOME)/Applications/"
+	@echo "入れた: $(HOME)/Applications/S-MU2000.app"
+	@echo "一度起動すると DAW の一覧に出る（open してよいか聞かれたら許可する）"
+
+# Register in-process (no .appex) to check ports and sound on the spot
+$(BUILD)/autest$(EXE): $(OBJS) $(BUILD)/src/mu2000.o $(BUILD)/src/smf.o $(AUV3_OBJS) \
+                       $(BUILD)/auv3obj/src/auv3/autotest.o $(MAC_PC_OBJS)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) $(AUV3_FW)
+
+autest: $(BUILD)/autest$(EXE)
+
+auval3: install-auv3
+	@sleep 2
+	auval -v aumu SMU3 Trbh
 
 endif # windows / macOS
 
@@ -597,10 +871,10 @@ TEST_EXES := $(BUILD)/verify$(EXE) $(BUILD)/statetest$(EXE) $(BUILD)/render$(EXE
              $(BUILD)/samptest$(EXE)
 
 test: $(TEST_EXES)
-	$(PYTHON) tools/run_tests.py $(if $(T),--only $(T),)
+	SMU_BUILD=$(BUILD) $(PYTHON) tools/run_tests.py $(if $(T),--only $(T),)
 
 test-update: $(TEST_EXES)
-	$(PYTHON) tools/run_tests.py --update $(if $(T),--only $(T),)
+	SMU_BUILD=$(BUILD) $(PYTHON) tools/run_tests.py --update $(if $(T),--only $(T),)
 
 clean:
 	rm -rf $(BUILD)

@@ -44,6 +44,9 @@ public:
 	// Show it. Creates the window and the Metal device on the first call.
 	// On failure err says why
 	bool show(std::string &err);
+	// Hide it without destroying anything, so showing it again comes back
+	// in the same state. The plug-in calls this when its own view closes
+	void hide();
 	bool visible() const;
 	// gui is ending. Tell the contents it closed (unmute the overview, etc.)
 	void shutdown(bridge &br);

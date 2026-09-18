@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" width="1640" height="680" viewBox="0 0 433.91666 179.91666">
+  <g id="phones" inkscape:groupmode="layer" inkscape:label="PHONES のジャック">
+    <path id="phones-1" style="opacity:1;fill:#404040;fill-opacity:1;stroke:none;stroke-width:0.26486;stroke-linecap:round;stroke-linejoin:round" transform="matrix(0.607428,-0.794375,0.831804,0.55507,81.557198,-72.18201)"
+          d="M -145.04017 128.04725 c -1.81458 -2.59668 -5.4898 -3.09197 -8.20886 -1.10627 -2.71914 1.98557 -3.4526 5.70031 -1.63822 8.29713 1.81449 2.59691 5.48988 3.09235 8.20906 1.10656 2.71926 -1.98566 3.45264 -5.7006 1.63802 -8.29742 z M -146.48047 129.09903 c 1.28373 1.83718 0.76489 4.46533 -1.15885 5.87015 -1.92374 1.40481 -4.5239 1.05431 -5.80762 -0.78286 -1.28372 -1.83717 -0.76489 -4.46532 1.15884 -5.87014 1.92374 -1.40482 4.5239 -1.05432 5.80763 0.78285 z" />
+    <path id="phones-2" style="fill:none;stroke:#404040;stroke-width:0.529167;stroke-linecap:butt;stroke-linejoin:miter;stroke-dasharray:none;stroke-opacity:1" transform="matrix(1,0,0,1,81.557198,-105.50975)"
+          d="M 25.963028 225.72691 c 0 4.17205 -3.382112 7.55416 -7.554159 7.55416 -4.172047 0 -7.55416 -3.38211 -7.55416 -7.55416 0 -4.17205 3.382113 -7.55416 7.55416 -7.55416 4.172047 0 7.554159 3.38211 7.554159 7.55416 z" />
+  </g>
+</svg>

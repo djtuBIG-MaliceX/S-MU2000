@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" width="1640" height="680" viewBox="0 0 433.91666 179.91666">
+  <g id="dial" inkscape:groupmode="layer" inkscape:label="ジョグダイヤル">
+    <path id="dial-1" style="fill:none;stroke:#404040;stroke-width:0.529167;stroke-linecap:butt;stroke-linejoin:miter;stroke-dasharray:none;stroke-opacity:1" transform="matrix(1,0,0,1,81.557198,-105.50975)"
+          d="M 335.77225 227.35533 c 0 16.93615 -13.72947 30.66562 -30.66562 30.66562 -16.93615 0 -30.66562 -13.72947 -30.66562 -30.66562 0 -16.93615 13.72947 -30.66562 30.66562 -30.66562 16.93615 0 30.66562 13.72947 30.66562 30.66562 z" />
+    <path id="dial-2" style="fill:none;stroke:#404040;stroke-width:0.529167;stroke-linecap:butt;stroke-linejoin:miter;stroke-dasharray:none;stroke-opacity:1" transform="matrix(1,0,0,1,81.557198,-105.50975)"
+          d="M 318.9313 212.83941 c 0 6.83693 -5.54243 12.37936 -12.37936 12.37936 -6.83693 0 -12.37936 -5.54243 -12.37936 -12.37936 0 -6.83693 5.54243 -12.37936 12.37936 -12.37936 6.83693 0 12.37936 5.54243 12.37936 12.37936 z" />
+  </g>
+</svg>

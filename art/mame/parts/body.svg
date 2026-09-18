@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" width="1640" height="680" viewBox="0 0 433.91666 179.91666">
+  <g id="body" inkscape:groupmode="layer" inkscape:label="本体の外形">
+    <path id="body-1" style="fill:none;stroke:#404040;stroke-width:0.529167;stroke-linecap:butt;stroke-linejoin:miter;stroke-dasharray:none;stroke-opacity:1" transform="matrix(1,0,0,1,81.557198,-105.50975)"
+          d="M -70.924517 112.65498 c -1.920088 0 -3.465938 1.54585 -3.465938 3.46594 V 259.02744 H 287.5151 c 5.37448 3.0171 11.42834 4.6169 17.59169 4.64882 6.16318 -0.032 12.21685 -1.63181 17.59118 -4.64882 h 22.49475 V 116.12092 c 0 -1.92009 -1.54585 -3.46594 -3.46594 -3.46594 z" />
+    <path id="body-2" style="fill:none;stroke:#404040;stroke-width:0.529167;stroke-linecap:butt;stroke-linejoin:miter;stroke-dasharray:none;stroke-opacity:1" transform="matrix(1,0,0,1,81.557198,-105.50975)"
+          d="M 345.19272 267.14323 H -74.390455 v 8.83305 c 0 1.92009 1.54585 3.46594 3.465938 3.46594 H 341.72678 c 1.92009 0 3.46594 -1.54585 3.46594 -3.46594 z" />
+  </g>
+</svg>

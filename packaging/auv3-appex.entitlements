@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  macOS の app extension は砂場に入っていないと登録されない。
+	  これが無いと、署名が正しくても LaunchServices までは届いて pluginkit が拾わない。
+	-->
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<key>com.apple.security.files.user-selected.read-only</key>
+	<true/>
+	<!--
+	  SH2 と MEG の JIT は MAP_JIT で写像する。堅めの実行環境では
+	  この権利が無いと JIT が通らず通訳に落ちる。
+	-->
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+</dict>
+</plist>

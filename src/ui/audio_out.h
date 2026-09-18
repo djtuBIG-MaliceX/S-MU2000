@@ -21,6 +21,10 @@
 // macOS does it with CoreAudio instead: same contract, same shape (see the
 // branch below), because an output AudioUnit hands us frames on its own
 // real-time thread, so there is no worker thread on that side.
+//
+// Linux (issue #25) uses ALSA and takes the same shape as the macOS one: the
+// device handle and the worker thread live in the impl, so the header does not
+// have to name either (src/ui/audio_out_linux.cpp).
 
 #ifndef S_MU2000_UI_AUDIO_OUT_H
 #define S_MU2000_UI_AUDIO_OUT_H
@@ -33,7 +37,7 @@
 #include <functional>
 #include <string>
 
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(__linux__)
 #include <memory>
 #include <vector>
 #else
@@ -45,7 +49,7 @@ namespace ui {
 
 constexpr u32 AUDIO_RATE = 44100;
 
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(__linux__)
 
 // macOS: a CoreAudio DefaultOutput AudioUnit calls the render callback on its
 // own real-time HAL thread, so unlike the Windows side there is no worker thread
@@ -225,7 +229,7 @@ private:
 	s64 m_qpc_freq = 1;
 };
 
-#endif // __APPLE__
+#endif // __APPLE__ || __linux__
 
 } // namespace ui
 

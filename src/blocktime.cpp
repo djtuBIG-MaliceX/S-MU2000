@@ -1,6 +1,10 @@
 // 1 ブロックを作るのに何 ms かかるかを測る。音声デバイスは使わない。
 //
-//   blocktime <rom ディレクトリ> <MIDI> <ブロックのフレーム数> [秒数] [回数]
+//   blocktime <rom ディレクトリ> <MIDI> <ブロックのフレーム数> [秒数] [回数] [台数]
+//
+// **台数**を 2 以上にすると、同じ MIDI を流す MU2000 を何台も同時に回す（doc/todo.md の
+// 「PFM のインスタンスを何枚も同時に」）。ROM は 1 つを分け合うので、DAW にプラグインを
+// 何枚も挿したときに近い。台数を増やして「実時間に対する割合」が 100% を超える所が上限。
 //
 // 待ち時間の下限は「1 ブロックの最悪値 < ブロックの長さ」で決まるので、
 // ここで出る最悪値が溜めをどこまで詰められるかの答えになる。
@@ -15,6 +19,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -40,13 +45,14 @@ struct run_result {
 int main(int argc, char **argv)
 {
 	if (argc < 4) {
-		std::fprintf(stderr, "blocktime <rom> <midi> <frames> [秒] [回数]\n");
+		std::fprintf(stderr, "blocktime <rom> <midi> <frames> [秒] [回数] [台数]\n");
 		return 1;
 	}
 	const std::string dir = argv[1];
 	const int block = std::atoi(argv[3]);
 	const double seconds = argc > 4 ? std::atof(argv[4]) : 20.0;
 	const int repeats = argc > 5 ? std::max(1, std::atoi(argv[5])) : 5;
+	const int copies = argc > 6 ? std::max(1, std::atoi(argv[6])) : 1;
 	const u32 RATE = 44100;
 
 	std::vector<smf::event> events;
@@ -57,7 +63,10 @@ int main(int argc, char **argv)
 	if (!mu.load_program(dir + "/mu2000_flash.bin")) { std::fprintf(stderr, "%s\n", mu.error().c_str()); return 1; }
 	if (!mu.load_wave(dir + "/dump")) { std::fprintf(stderr, "%s\n", mu.error().c_str()); return 1; }
 	mu.load_sintab(dir + "/standin/sin-table.bin");
-	mu.set_threaded(true);
+	mu.set_threaded(!std::getenv("SMU2000_SINGLE"));
+	// 軽量モード（doc/native-dsp.md）でも測れるように
+	if (const char *e = std::getenv("SMU2000_NATIVE_FX"))
+		mu.set_native_fx(std::atoi(e));
 	smu2000::pc_prof_start();
 	mu.reset();
 
@@ -65,6 +74,28 @@ int main(int argc, char **argv)
 	for (u32 i = 0; i < 30 * RATE && !mu.midi_ready(); i++) { s32 l = 0, r = 0; mu.run_sample(l, r); }
 	const std::vector<u8> booted = mu.save_state();
 	mu.set_profile(true);
+
+	// 2 台目から。ROM は 1 つを分け合う（36MB を人数分持たない）
+	std::vector<std::unique_ptr<mu2000>> more;
+	for (int i = 1; i < copies; i++) {
+		auto m = std::make_unique<mu2000>();
+		m->set_program_rom(mu.program_rom());
+		m->set_wave_rom(mu.wave_rom());
+		m->set_sintab_rom(mu.sintab_rom());
+		m->set_threaded(!std::getenv("SMU2000_SINGLE"));
+		if (const char *e = std::getenv("SMU2000_NATIVE_FX"))
+			m->set_native_fx(std::atoi(e));
+		m->reset();
+		if (!m->load_state(booted.data(), booted.size(), err)) {
+			std::fprintf(stderr, "%s\n", err.c_str());
+			return 1;
+		}
+		if (const char *e = std::getenv("SMU2000_NATIVE_ENGINE"))
+			m->set_native_engine(std::atoi(e));
+		more.push_back(std::move(m));
+	}
+	if (copies > 1)
+		std::printf("MU2000 を %d 台、同じ MIDI で同時に回す\n", copies);
 
 	// perf_ticks() / perf_freq() are QueryPerformanceCounter and its frequency
 	// on Windows, and a monotonic nanosecond clock on macOS, so the measurement
@@ -88,8 +119,18 @@ int main(int argc, char **argv)
 	for (int rep = 0; rep < repeats; rep++) {
 		const bool warming = double(smu2000::perf_ticks() - w0) * tick < WARM_SECONDS * 1000.0;
 		if (!mu.load_state(booted.data(), booted.size(), err)) { std::fprintf(stderr, "%s\n", err.c_str()); return 1; }
+		for (auto &m : more)
+			if (!m->load_state(booted.data(), booted.size(), err)) { std::fprintf(stderr, "%s\n", err.c_str()); return 1; }
+		// 状態を戻したら、native の口も入れ直す（写し取りは覚え直し）
+		if (const char *e = std::getenv("SMU2000_NATIVE_ENGINE")) {
+			mu.set_native_engine(std::atoi(e));
+			for (auto &m : more)
+				m->set_native_engine(std::atoi(e));
+		}
 		mu.clear_profile();
 
+		// 音源として挿されたときと同じ状態で測る（compat/platform.h）
+		const smu2000::denormals_off no_denormals;
 		std::vector<double> ms;
 		size_t next = 0;
 		u64 done = 0;
@@ -100,13 +141,21 @@ int main(int argc, char **argv)
 			for (int i = 0; i < n; i++) {
 				const double t = double(done + i) / RATE - base;
 				while (next < events.size() && events[next].time <= t) {
-					for (u8 b : events[next].bytes)
+					for (u8 b : events[next].bytes) {
 						mu.midi_in(b, events[next].port ? 1 : 0);
+						for (auto &m : more)
+							m->midi_in(b, events[next].port ? 1 : 0);
+					}
 					next++;
 				}
 				if (loop_at > 0.0 && t >= loop_at) { next = 0; base = double(done + i) / RATE; }
 				s32 l = 0, r = 0;
 				mu.run_sample(l, r);
+				for (auto &m : more) {
+					s32 l2 = 0, r2 = 0;
+					m->run_sample(l2, r2);
+					l += l2; r += r2;
+				}
 			}
 			const u64 t1 = smu2000::perf_ticks();
 			ms.push_back(double(t1 - t0) * tick);
@@ -164,8 +213,12 @@ int main(int argc, char **argv)
 	std::printf("  平均 %.3f ms（回ごとの幅 %.1f%%）  中央 %.2f  95%% %.2f  99%% %.2f  最悪 %.2f ms\n",
 	            mean, spread(means), median(col(&run_result::mid)), median(col(&run_result::p95)),
 	            median(col(&run_result::p99)), median(col(&run_result::worst)));
-	std::printf("  実時間に対する割合: 平均 %.1f%%  最悪 %.0f%%\n",
-	            100.0 * mean / span, 100.0 * median(col(&run_result::worst)) / span);
+	std::printf("  実時間に対する割合: 平均 %.1f%%  最悪 %.0f%%%s\n",
+	            100.0 * mean / span, 100.0 * median(col(&run_result::worst)) / span,
+	            copies > 1 ? "（全部の台を合わせて）" : "");
+	if (copies > 1)
+		std::printf("  1 台あたり: 平均 %.1f%%  → この機械で実時間に入るのは %d 台まで\n",
+		            100.0 * mean / span / copies, int(span * copies / mean));
 	std::printf("  ブロックの長さを超えた回数: 多い回で %d / %zu\n", over_max, runs[0].blocks);
 	if (mu.m_t_n) {
 		const std::vector<double> megm = col(&run_result::megm_ns);

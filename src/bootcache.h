@@ -31,11 +31,54 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
 
 namespace smu2000 {
 namespace bootcache {
+
+// Snapshot file envelope. The state blob after it is mu2000::save_state()
+// verbatim (DAW project states use the same blob with no envelope, and that
+// path is untouched). Bump kEnvVersion whenever snapshot semantics change:
+// older generations are then ignored AND removed, and rebuilt by one full
+// boot. Generation 0 (no envelope, raw blob) covers everything saved before
+// envelopes existed -- including snapshots taken at the mid-boot LCD
+// transient, whose restored frame freezes on hosts that never render.
+inline constexpr u32 kEnvMagic   = 0x43423253u; // "S2BC"
+inline constexpr u32 kEnvVersion = 1;
+inline constexpr u32 kEnvSettled = 1u;          // LCD past the mid-boot transient
+inline constexpr size_t kEnvSize = 12;
+
+inline void write_envelope(std::vector<u8> &out, u32 flags)
+{
+	const u32 h[3] = { kEnvMagic, kEnvVersion, flags };
+	const u8 *b = reinterpret_cast<const u8 *>(h);
+	out.insert(out.end(), b, b + kEnvSize);
+}
+
+// True for a current, settled snapshot. Anything else (older generation,
+// raw blob, corruption, or a state blob from another save-format version)
+// must be rebuilt, never loaded. The version pins to exactly what this
+// build writes: unlike DAW project states (which stay readable back to
+// STATE_VERSION_OLDEST), a snapshot is only an optimization, and loading
+// one saved under different semantics (e.g. before the M37640 host
+// command existed, leaving the firmware parked on its host-status LCD)
+// trades one slow boot for a permanently wrong one
+inline bool check_envelope(const u8 *data, size_t n)
+{
+	if (n < kEnvSize + 8)
+		return false;
+	u32 h[3];
+	std::memcpy(h, data, kEnvSize);
+	if (h[0] != kEnvMagic || h[1] != kEnvVersion || !(h[2] & kEnvSettled))
+		return false;
+	u32 magic = 0, version = 0;
+	std::memcpy(&magic, data + kEnvSize, 4);
+	std::memcpy(&version, data + kEnvSize + 4, 4);
+	// Magic and layout match mu2000.cpp (STATE_MAGIC "S2MU", then version)
+	return magic == 0x554d3253u && version == mu2000::state_version();
+}
 
 // 鍵。プログラム ROM・ワーク RAM・波形 ROM・状態の版から作る。
 // **reset() の前に、起動に使う RAM が入った状態で呼ぶこと**
@@ -99,9 +142,16 @@ inline bool load(mu2000 &mu, u64 k)
 	std::fclose(f);
 	if (!read_ok)
 		return false;
+	// Not a current settled snapshot (older generation, raw blob, or
+	// corruption): drop it so a full boot rebuilds it, then report a miss
+	if (!check_envelope(buf.data(), buf.size())) {
+		std::remove(p.c_str());
+		return false;
+	}
 	std::string err;
-	if (!mu.load_state(buf.data(), buf.size(), err)) {
+	if (!mu.load_state(buf.data() + kEnvSize, buf.size() - kEnvSize, err)) {
 		std::fprintf(stderr, "起動の写しを読めない: %s\n", err.c_str());
+		std::remove(p.c_str());
 		return false;
 	}
 	return true;
@@ -114,12 +164,16 @@ inline bool save(const mu2000 &mu, u64 k)
 	if (p.empty())
 		return false;
 	const std::vector<u8> st = mu.save_state();
+	std::vector<u8> out;
+	out.reserve(kEnvSize + st.size());
+	write_envelope(out, kEnvSettled);
+	out.insert(out.end(), st.begin(), st.end());
 	// 書いている途中で落ちても壊れた写しを残さないよう、別名で書いてから置き換える
 	const std::string tmp = p + ".new";
 	std::FILE *f = std::fopen(tmp.c_str(), "wb");
 	if (!f)
 		return false;
-	const bool ok = std::fwrite(st.data(), 1, st.size(), f) == st.size();
+	const bool ok = std::fwrite(out.data(), 1, out.size(), f) == out.size();
 	std::fclose(f);
 	if (!ok) {
 		std::remove(tmp.c_str());
@@ -149,13 +203,23 @@ inline bool refresh(const mu2000 &live)
 		return false;
 
 	const u64 k = key(fresh);
-	// もう有るなら何もしない
+	// A current settled snapshot already there means nothing to do.
+	// Anything else (missing, older generation, unsettled) gets rebuilt
+	// below, healing stale files without anyone touching them by hand
 	const std::string p = path(k);
 	if (p.empty())
 		return false;
 	if (std::FILE *f = std::fopen(p.c_str(), "rb")) {
+		std::fseek(f, 0, SEEK_END);
+		const long size = std::ftell(f);
+		std::fseek(f, 0, SEEK_SET);
+		u8 head[kEnvSize + 8] = {};
+		const bool current = size >= (long)sizeof(head) &&
+		                     std::fread(head, 1, sizeof(head), f) == sizeof(head) &&
+		                     check_envelope(head, sizeof(head));
 		std::fclose(f);
-		return false;
+		if (current)
+			return false;
 	}
 
 	fresh.reset();
@@ -167,6 +231,12 @@ inline bool refresh(const mu2000 &live)
 	}
 	if (i >= limit)
 		return false;
+	// Settle past the mid-boot LCD transient before saving, for the same
+	// reason the plug-in boot does: the snapshot keeps whatever frame is up
+	for (u64 j = 0; j < 2 * 44100; j++) {
+		s32 l = 0, r = 0;
+		fresh.run_sample(l, r);
+	}
 	return save(fresh, k);
 }
 

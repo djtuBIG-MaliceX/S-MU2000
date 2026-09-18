@@ -13,6 +13,7 @@
 
 #include "smartmedia.h"
 #include "state.h"
+#include "xg/native_driver.h"
 #include "compat/mamecompat.h"
 #include "compat/membus.h"
 #include "mame/cpu/sh7042.h"
@@ -21,10 +22,13 @@
 #include "mame/video/hd44780.h"
 
 #include <cstdio>
+#include <functional>
 #include <cstring>
 #include <atomic>
 #include <array>
 #include <deque>
+#include <deque>
+#include <map>
 #include <memory>
 #include <thread>
 #include <string>
@@ -88,6 +92,12 @@ public:
 	// n サイクルぶん進める。周辺のイベントはこの中で挟む
 	void run_cycles(u64 n);
 
+	// S-MU2000: SH-2 を回さずに SWP30 だけ進める（レジスタ列の再生。doc/native-engine.md）
+	void set_cpu_enabled(bool on) { m_cpu_enabled = on; }
+	// 記録した書き込みを、外から SWP30 へ入れる（master=false でスレーブ）
+	void poke_swp(bool master, u32 reg, u16 value)
+	{ (master ? m_swpm : m_swps).write16(reg, value); }
+
 	// MIDI の入口。実機の DIN は **A と B の 2 口**で、それぞれ SH7043 の
 	// 内蔵 SCI ch0 / ch1 に繋がっている（docs/hardware.md）。
 	// パートは A が 1-16、B が 17-32。
@@ -104,20 +114,61 @@ public:
 	// 1 バイト送る。既定では実機と同じ 31250bps の直列で流れる。
 	// fast MIDI では firmware が前のバイトを読むと、待たずに次を渡す。
 	// 仮想の口で MIDI の輪ができると際限なく積まれるので、上限を超えたら捨てる。
-	static constexpr size_t MIDI_QUEUE_LIMIT = 65536;
-	void midi_in(u8 byte, int port = 0)
+	//
+	// 上限は**実際の演奏では届かない大きさ**にしておく。firmware がさばけるのは 1 秒に 3kB ほど
+	// （ピッチベンドなら 1,040 個）で、DAW でホイールを回すとそれを超えて溜まる。前は 65,536 バイトで
+	// 捨てていて、16 チャンネルにブロックごとのベンドを 15 秒流す（124kB）と 10,634 バイト捨て、
+	// その中のノートオフが消えて音が鳴りっぱなしになった（issue #18）。同じ MIDI を実機に USB で
+	// 送ると、何も失わずに約 40 秒遅れて全部さばき、後の音も普通に鳴って止まる（2026-09-17）。
+	// 4MB はさばく速さで 20 分以上ぶん。輪ができても gui の THRU は流量を絞っている（midi_guard.h）
+	static constexpr size_t MIDI_QUEUE_LIMIT = size_t(1) << 22;
+	//
+	// ケーブルメッセージ `F5 nn`（nn = 1-4）を受けると、その入口から後に来るバイトを口 nn へ回す。
+	// MU80/MU100/MU128 の TO HOST と S-YXG50 の流儀で、1 本の入口から 64 パート全部に届く（issue #24）。
+	// `F5 nn` 自体は firmware に渡さない。実機の MU2000 は USB で PC から送った F5 を無視する
+	// （2026-09-17 に実機で確かめた）が、そのまま渡すと firmware の USB の受け口（0x042932）が
+	// 口の切り替えと読み、こちらが挟む `F5 <口>` と食い違う。範囲外の nn は読み捨てて口を変えない。
+	// 戻り値はバイトを回した口。`F5 nn` を読んだときは -1
+	int midi_in(u8 byte, int port = 0)
 	{
-		if (port >= MIDI_DIN_PORTS || m_usb_host) {
-			usb_midi_in(byte, port);
-			return;
+		if (port < 0 || port >= MIDI_PORTS)
+			port = 0;
+		// native の口が動いているときは、鍵の上げ下げをこちらで処理する
+		// （firmware に渡さない）。詳しくは xg/native_driver.h
+		if (m_native_engine && native_midi(byte, port))
+			return port;
+		if (byte < 0xf8) {                     // リアルタイムは F5 と nn の間に挟まってもよい
+			if (m_cable_wait[port]) {
+				m_cable_wait[port] = false;
+				if (!(byte & 0x80)) {
+					if (byte >= 1 && byte <= MIDI_PORTS)
+						m_cable[port] = byte - 1;
+					return -1;
+				}
+			}
+			if (byte == 0xf5) {
+				m_cable_wait[port] = true;
+				return -1;
+			}
 		}
-		if (m_midi[port].queue.size() < MIDI_QUEUE_LIMIT)
-			m_midi[port].queue.push_back(byte);
+		const int to = m_cable[port];
+		if (to >= MIDI_DIN_PORTS || m_usb_host)
+			usb_midi_in(byte, to);
+		else if (m_midi[to].queue.size() < MIDI_QUEUE_LIMIT)
+			m_midi[to].queue.push_back(byte);
 		else
 			m_midi_dropped.fetch_add(1, std::memory_order_relaxed);
+		return to;
 	}
 	// 溢れて捨てたバイト数（どの糸から読んでもよい）
 	u64 midi_dropped() const { return m_midi_dropped.load(std::memory_order_relaxed); }
+	// Bytes sitting on the wire, including the one in flight.
+	// The 31250bps throttle asks this to decide whether the line is free
+	size_t midi_queued(int port) const
+	{
+		const midi_line &m = m_midi[port == 1 ? 1 : 0];
+		return m.queue.size() + (m.bit >= 0 ? 1 : 0);
+	}
 	size_t midi_pending() const
 	{
 		size_t pending = m_usb.rx.size() + (m_usb.have ? 1 : 0);
@@ -161,7 +212,7 @@ public:
 	// A・B も USB 側を通る（実機で DIN が黙るのと同じ）
 	void set_usb_host(bool on) { m_usb_host = on; }
 	bool usb_host() const { return m_usb_host; }
-	bool usb_idle() const { return m_usb.rx.empty() && !m_usb.have; }
+	bool usb_idle() const { return m_usb.rx.empty() && m_usb.cmd.empty() && !m_usb.have; }
 	// firmware が USB へ出したバイト。口は 0 始まり（-1 は口の指定より前）
 	bool usb_out_take(u8 &v, int &port);
 
@@ -213,6 +264,12 @@ public:
 
 	sh7043a_device &cpu()  { return *m_cpu; }
 	swp30_device   &swpm() { return m_swpm; }
+
+	// S-MU2000: エフェクトを C++ で鳴らす軽量モード（doc/native-dsp.md）。
+	// 既定は切。入れると MEG のエフェクトは無音を受け、代わりに dsp::native_fx が鳴る
+	//   0 切 / 1 エフェクトだけ C++（MEG も回る）/ 2 MEG を回さない（いちばん軽い）
+	void set_native_fx(int mode);
+	int native_fx() const { return m_nfx_on; }
 	swp30_device   &swps() { return m_swps; }
 	hd44780_device &lcd()  { return m_lcd; }
 
@@ -255,6 +312,25 @@ public:
 	void set_swp_trace(std::FILE *f, bool with_reads = false)
 	{ m_swp_trace = f; m_swp_trace_reads = with_reads; }
 
+	// **firmware を走らせない口**（doc/native-engine.md の段 2）。
+	// 1: 鍵の上げ下げを native driver でさばき、CPU はその間止める
+	void set_native_engine(int mode);
+	int native_engine() const { return m_native_engine; }
+	// native の口の内訳（調べ用）
+	struct native_stats { u64 note_native = 0, note_fw = 0, learn = 0, other = 0; };
+	native_stats native_counts() const { return m_ne_stats; }
+
+	// native の口が、いま firmware を回している割合（0-1。小さいほど軽い）
+	double native_firmware_share() const
+	{
+		const u64 t = m_ne_samples.load(std::memory_order_relaxed);
+		return t ? double(m_ne_fw_samples.load(std::memory_order_relaxed)) / double(t) : 0.0;
+	}
+
+	// SWP30 への書き込みを、その場で拾う（掃引の道具用。doc/native-engine.md の段 1）
+	using swp_watch_fn = std::function<void(bool master, u32 reg, u16 value)>;
+	void set_swp_watch(swp_watch_fn fn) { m_swp_watch = std::move(fn); }
+
 private:
 	void build_bus();
 	void start_devices();
@@ -263,6 +339,79 @@ private:
 	running_machine m_machine;   // 時計とタイマの置き場
 	required_device<sh7043a_device> m_cpu_finder;
 	sh7043a_device *m_cpu = nullptr;
+
+	bool m_cpu_enabled = true;     // false なら SH-2 を回さない（再生のとき）
+
+	// ---- native の口（段 2）
+	int  m_native_engine = 0;
+	u32  m_fw_hold = 0;            // このサンプル数だけ firmware を回す
+	std::atomic<u64> m_ne_samples{0}, m_ne_fw_samples{0};
+	xg::native_driver m_ndrv;
+	// 写し取り中の状態
+	bool m_learning = false;
+	u32  m_learn_rec = 0;
+	std::map<u32, u16> m_learn_first, m_learn_last;
+	u64  m_learn_mask = 0, m_learn_keyed = 0;
+	int  m_learn_left = 0;         // 残りサンプル数
+	int  m_learn_want = 1;         // 鳴るはずの要素の数（そろうまで待つ）
+	// **実機と同じだけ遅らせる**（doc/native-engine.md の 6.16）。
+	// firmware は MIDI を受けてから 74 サンプル（1.68ms）後に鳴らす。native も同じ
+	// だけ待たないと、同じ曲の中で native の音だけ 1.7ms 早く出てしまう
+	// 内訳: MIDI は 1 バイト 10 ビット・31250 baud なので 14.1 サンプルかかる。
+	// 3 バイトの鍵で 42 サンプル、残り 32 サンプルが firmware の中の手間
+	static constexpr u32 NATIVE_DELAY = 74;
+	static constexpr u32 NATIVE_PROC  = 32;          // バイトを受け終えてから鳴るまで
+	static constexpr u64 RX_BYTE_TICK = 903;         // 1 バイト（1/64 サンプル単位）
+	u64  m_rx_at[MIDI_PORTS] = {};                   // その口が次のバイトを受け終える時刻
+	struct nev { u64 at; u8 kind, part, d0, d1; };   // kind 0=離し 1=押し 2=CC 3=ベンド
+	std::deque<nev> m_nq;
+	u64  m_ne_clock = 0;
+	u32  m_nown[64][4] = {};       // native で鳴らしている鍵（パートごとに 128 ビット）
+
+	void native_pump();
+	// 写し取った音の、フィルタの動きを録る（doc/native-engine.md の 6.17）
+	bool m_traj_rec = false;
+	u32  m_traj_left = 0;
+	u64  m_traj_start = 0;
+	u32  m_traj_rec_key = 0;
+	u64  m_traj_drum_key = 0;
+	int  m_traj_chan[64];          // チャンネル → 何番目の写し取りか（-1 は使わない）
+	std::vector<xg::nv::voice_cal> *m_traj_cals = nullptr;
+	u32  m_traj_n = 0;
+	void traj_start(u32 rec, u64 drum_key, int ncal);
+	void traj_finish();
+	// そのバイトを受け終える時刻を進めて、鳴らすべき時刻（サンプル）を返す
+	u64 rx_advance(int port)
+	{
+		const u64 now = m_ne_clock * 64;
+		if (m_rx_at[port] < now)
+			m_rx_at[port] = now;
+		m_rx_at[port] += RX_BYTE_TICK;
+		return m_rx_at[port] / 64 + NATIVE_PROC;
+	}
+	bool nown(int part, int note) const
+	{ return (m_nown[part][(note >> 5) & 3] & (u32(1) << (note & 31))) != 0; }
+	void nown_set(int part, int note, bool on)
+	{
+		if (on) m_nown[part][(note >> 5) & 3] |= u32(1) << (note & 31);
+		else    m_nown[part][(note >> 5) & 3] &= ~(u32(1) << (note & 31));
+	}
+
+	// 口ごとの MIDI の読み取り
+	struct nmidi { u8 status = 0; u8 d0 = 0; int have = 0; };
+	nmidi m_nmidi[MIDI_PORTS];
+
+	int  m_learn_note = 60, m_learn_vel = 100, m_learn_part = 0;
+	// firmware が鳴らしている音の数（パートごと）。0 でなければベンドも firmware へ回す
+	u8   m_fw_notes[64] = {};
+	u32  m_fw_note_total = 0;
+	u64  m_learn_drum = 0;         // ドラムのとき、覚える鍵
+	native_stats m_ne_stats;
+
+	bool native_midi(u8 byte, int port);
+	void replay_note(u8 status, u8 d0, u8 d1, int port);
+	void native_learn_start(u32 rec);
+	void native_learn_finish();
 
 	swp30_device m_swpm, m_swps;   // マスタ 0x800000 / スレーブ 0x802000
 	required_device<sci4_device> m_sci4_finder;
@@ -312,6 +461,10 @@ private:
 	// SWP30 へのアクセス幅の内訳（byte 幅があると片側が壊れる）
 	u64 m_swp_w8 = 0, m_swp_r8 = 0, m_swp_w16 = 0, m_swp_w32 = 0;
 
+	// 記録に入れるサンプル番号（0 起点。run_sample の頭で進めるので 1 引く）
+	u64 trace_sample() const { return m_sample_count ? m_sample_count - 1 : 0; }
+	u64         m_sample_count = 0;  // 電源投入から数えたサンプル数（記録と再生の目印）
+	swp_watch_fn m_swp_watch;
 	std::FILE  *m_swp_trace = nullptr;
 	bool        m_swp_trace_reads = false;
 
@@ -320,7 +473,10 @@ private:
 	// 命令の途中で止まれず走りすぎた分。次の呼び出しから引く
 	u64 m_overrun = 0;
 	// SWP30 のレジスタに書いたので、このサンプルの残りは CPU を止める（run_cycles の説明）
-	bool m_swp_hold = false;
+	// マスタの SWP30 へ 1 本書くと CPU が待たされるサイクル数（build_bus の説明）。
+	// 実機で測った 61.4 サンプルに合う値（doc/upstream.md の 36）
+	static constexpr u64 SWP_WRITE_CYCLES = 440;
+	u64 m_swp_wait = 0;      // まだ消化していない待ち
 	bool m_profile = false;
 
 	// スレーブ用のスレッド。合図は atomic の回し合いで、錠は使わない。
@@ -350,6 +506,14 @@ public:
 	}
 private:
 
+	// S-MU2000: 軽量モード（doc/native-dsp.md）。RAM の XG の設定を読んで C++ 側へ渡す
+	void native_fx_update();
+
+	smu2000::dsp::native_fx m_nfx;
+	int  m_nfx_on = 0;
+	bool m_nfx_ready = false;      // 遅延の線を用意したか（台ごと）
+	u32  m_nfx_tick = 0;
+
 	// MIDI IN A / B。バイトを 31250bps の直列に崩して RX 線に流す。
 	// 2 口は別々の SCI なので、状態も別々に持つ
 	struct midi_line {
@@ -370,11 +534,16 @@ private:
 		u64  next     = 0;      // 次のバイトを渡してよい時刻
 		bool have     = false;  // 渡したバイトをまだ読まれていない
 		u8   cur      = 0;
+		std::deque<u8> cmd;     // M37640 からのコマンド。状態の bit6 を立てて渡す
+		bool cur_cmd  = false;  // 渡しているバイトがコマンドか
 		u64  tx_next  = 0;
 		std::deque<u8> tx;      // firmware が出した MIDI バイト（F5 込み）
 		int  out_port = -1;     // 取り出し側が見ている口
 	};
 	void usb_midi_in(u8 byte, int port);
+	// ケーブルメッセージ（midi_in の説明）。入口ごとに、いま回している口と、F5 の後の番号待ち
+	std::array<int, MIDI_PORTS>  m_cable = { 0, 1, 2, 3 };
+	std::array<bool, MIDI_PORTS> m_cable_wait = {};
 	void usb_step(u64 now);
 	u8   usb_r(offs_t a);
 	void usb_w(offs_t a, u8 v);

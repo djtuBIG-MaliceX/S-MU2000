@@ -41,6 +41,8 @@ struct snapshot {
 	bool lcd_on = false;
 	bool ready = false;          // 起動が終わったか
 	char message[96] = {};       // 起動中／ROM が無い等。空なら出さない
+	// 鳴っている声の数（SWP30 のマスタとスレーブ、それぞれ 64 スロット）
+	u8   voices_master = 0, voices_slave = 0;
 };
 
 // XG の値の写し。音声の糸が firmware のワーク RAM から 25ms ごとに写す（xg/ram.h）。

@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Info.plist for the AUv3 app extension.
+
+  AUv2（SMU2/Trbh）とは種別を変えてある（SMU3）。同じ aumu のまま
+  名前も束のIDも別なので、両方入れても取り違えず、古い議事録（AUv2 で
+  残した曲）は AUv2 を指し続ける。factoryFunction に当たるものは
+  NSExtensionPrincipalClass（SMU2000FactoryV3）。
+
+  **拡張の種類は com.apple.AudioUnit-UI。** macOS はこの種類の拡張を
+  「画面を持てる AUv3」として扱い、principal class（AUViewController で
+  AUAudioUnitFactory も兼ねる。src/auv3/factory.mm）を載せた view サービスへ
+  ホストの画面を橋渡しする。画面を持たない com.apple.AudioUnit のままだと、
+  音は出てもホストは画面を頼みに来ない -- 記録に 1 行も残らないまま
+  「AUv3 は画面が出ない」になっていた。
+
+  種類ごとの決まり（Apple の雛形 Audio Unit Extension.xctemplate の
+  TemplateInfo.plist にそのまま書いてある）:
+    com.apple.AudioUnit      principal class は NSObject + AUAudioUnitFactory
+    com.apple.AudioUnit-UI   principal class は AUViewController + AUAudioUnitFactory
+                             AudioComponents に factoryFunction を書く
+  どちらの雛形も NSExtensionActivationRule と NSExtensionServiceRoleType は
+  書かないので、こちらも書かない（ServiceRoleType は com.apple.Services の話）。
+-->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleExecutable</key>
+	<string>S-MU2000AU</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.tarboh.smu2000.auv3.au</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>S-MU2000 AUv3</string>
+	<key>CFBundlePackageType</key>
+	<string>XPC!</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>CFBundleSupportedPlatforms</key>
+	<array>
+		<string>MacOSX</string>
+	</array>
+	<key>LSMinimumSystemVersion</key>
+	<string>11.0</string>
+	<key>NSExtension</key>
+	<dict>
+		<key>NSExtensionAttributes</key>
+		<dict>
+			<key>AudioComponents</key>
+			<array>
+				<dict>
+					<key>description</key>
+					<string>S-MU2000</string>
+					<key>factoryFunction</key>
+					<string>SMU2000FactoryV3</string>
+					<key>name</key>
+					<string>tarboh: S-MU2000 AUv3</string>
+					<key>manufacturer</key>
+					<string>Trbh</string>
+					<key>type</key>
+					<string>aumu</string>
+					<key>subtype</key>
+					<string>SMU3</string>
+					<key>version</key>
+					<integer>65536</integer>
+					<key>sandboxSafe</key>
+					<true/>
+					<key>tags</key>
+					<array>
+						<string>Synthesizer</string>
+						<string>MIDI</string>
+					</array>
+				</dict>
+			</array>
+		</dict>
+		<key>NSExtensionPointIdentifier</key>
+		<string>com.apple.AudioUnit-UI</string>
+		<key>NSExtensionPrincipalClass</key>
+		<string>SMU2000FactoryV3</string>
+	</dict>
+</dict>
+</plist>

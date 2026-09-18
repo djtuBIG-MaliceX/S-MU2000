@@ -4,6 +4,14 @@
 
 #include "mu2000.h"
 
+#if defined(__SSE2__) || defined(_M_X64) || defined(__x86_64__)
+#include <xmmintrin.h>
+#include <pmmintrin.h>
+#endif
+
+#include "xg/ram.h"
+#include "xg/fx_params.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -419,16 +427,20 @@ void mu2000::build_bus()
 	// 800000-801fff: SWP30 マスタ / 802000-803fff: スレーブ。
 	// レジスタは 16bit 単位なので、番地を 2 で割って渡す
 	auto swp = [this](swp30_device &dev, u32 base) {
-		// 実機のマスタの SWP30 は、書き込みを 1 サンプルに 1 回しか受け取れないらしく、書くたびに CPU は
-		// 次のサンプルの区切りまで待たされる（BSC の WAIT）。遅れて鳴る層（firmware が 2.5ms ごとに数を
-		// 減らして鍵を押す）の遅れが、これで実機と音ごとに ±10 サンプルで合う。待たせないと、音の設定の
-		// 書き込み百回ほどが一瞬で終わり、実機より約 64 サンプル長くなっていた。
+		// 実機のマスタの SWP30 へ書くと、CPU は 1 本あたり **440 サイクル**（15.7 マイクロ秒、
+		// 1 サンプルの 0.69 ぶん）待たされる（BSC の WAIT）。書き込み百回ほどが一瞬で終わる形にすると、
+		// 遅れて鳴る層の遅れが実機より約 64 サンプル短くなる。
+		//
+		// 440 という数は実機から直に測った。XG モードでパート 1 と 2 を同じ受信チャンネルにして
+		// 1 つのノートオンで鳴らし、左右へ振ると、左右の立ち上がりの差がそのまま
+		// 「firmware が 1 パートぶんのレジスタを書く時間」になる（キーオンの間の待つ書き込みは 68 本）。
+		// 実機 61.4 サンプル（8 音、標準偏差 1.0）に対し、この値で 61.1（doc/upstream.md の 36）。
+		//
 		// スレーブは待たせない（2.4kHz の割り込みが毎回ミキサを 7 つ書くので、待たせると CPU の 4 割が
 		// 止まる。待たせると遅れが実機より 10 サンプル余計に長くなり、SLICE の位相も遠ざかる）。
 		// 制御の 2 つ（0x0e / 0x0f）は、中身を書くもの（MEG のプログラムの中身 = チャンネル 0x11・0x12、
 		// リバーブ RAM へ直に書く中身 = 0x26）だけ待たせ、番地・合図・状態は待たせない。エフェクトの種類を
-		// 替えたときの読み込みの時間が、これで実機と合う（SLICE は表を 2052 項目書くので実機で 62ms 長い。
-		// 刻みの位相もこれで合う。doc/upstream.md の 36）
+		// 替えたときの読み込みの時間が、これで実機と合う（SLICE は表を 2052 項目書くので実機で 62ms 長い）
 		const bool waits = base == 0x800000;
 		auto hold = [this, waits](offs_t reg) {
 			const u32 slot = reg & 0x3f;
@@ -436,7 +448,7 @@ void mu2000::build_bus()
 			const bool control = slot == 0x0e || slot == 0x0f;
 			const bool data = chan == 0x11 || chan == 0x12 || chan == 0x26;
 			if (waits && (!control || data)) {
-				m_swp_hold = true;
+				m_swp_wait += SWP_WRITE_CYCLES;
 				m_cpu->abort_timeslice();
 			}
 		};
@@ -446,7 +458,7 @@ void mu2000::build_bus()
 		d.r16 = [this, &dev, base](offs_t a) {
 			const u16 v = dev.read16((a - base) >> 1);
 			if (m_swp_trace && m_swp_trace_reads)
-				std::fprintf(m_swp_trace, "R %08x %04x %04x  pc=%08x\n", base, (a - base) >> 1, v, m_cpu->pc());
+				std::fprintf(m_swp_trace, "R %08x %04x %04x  pc=%08x  t=%.6f s=%llu\n", base, (a - base) >> 1, v, m_cpu->pc(), double(m_cpu->total_cycles()) / 28000000.0, (unsigned long long)trace_sample());
 			return v;
 		};
 		// 幅の内訳を数える。MAME は 16bit ハンドラに mem_mask を渡せるが
@@ -467,10 +479,14 @@ void mu2000::build_bus()
 			m_swp_w32++;
 			const offs_t reg = (a - base) >> 1;
 			if (m_swp_trace) {
-				std::fprintf(m_swp_trace, "%s%08x %04x %04x  pc=%08x\n",
-				             m_swp_trace_reads ? "W " : "", base, reg, u16(v >> 16), m_cpu->pc());
-				std::fprintf(m_swp_trace, "%s%08x %04x %04x  pc=%08x\n",
-				             m_swp_trace_reads ? "W " : "", base, reg + 1, u16(v), m_cpu->pc());
+				std::fprintf(m_swp_trace, "%s%08x %04x %04x  pc=%08x  t=%.6f s=%llu\n",
+				             m_swp_trace_reads ? "W " : "", base, reg, u16(v >> 16), m_cpu->pc(), double(m_cpu->total_cycles()) / 28000000.0, (unsigned long long)trace_sample());
+				std::fprintf(m_swp_trace, "%s%08x %04x %04x  pc=%08x  t=%.6f s=%llu\n",
+				             m_swp_trace_reads ? "W " : "", base, reg + 1, u16(v), m_cpu->pc(), double(m_cpu->total_cycles()) / 28000000.0, (unsigned long long)trace_sample());
+			}
+			if (m_swp_watch) {
+				m_swp_watch(base == 0x800000, reg, u16(v >> 16));
+				m_swp_watch(base == 0x800000, reg + 1, u16(v));
 			}
 			dev.write16(reg, u16(v >> 16));
 			dev.write16(reg + 1, u16(v));
@@ -479,8 +495,10 @@ void mu2000::build_bus()
 		d.w16 = [this, &dev, base, hold](offs_t a, u16 v) {
 			m_swp_w16++;
 			if (m_swp_trace)
-				std::fprintf(m_swp_trace, "%s%08x %04x %04x  pc=%08x\n",
-				             m_swp_trace_reads ? "W " : "", base, (a - base) >> 1, v, m_cpu->pc());
+				std::fprintf(m_swp_trace, "%s%08x %04x %04x  pc=%08x  t=%.6f s=%llu\n",
+				             m_swp_trace_reads ? "W " : "", base, (a - base) >> 1, v, m_cpu->pc(), double(m_cpu->total_cycles()) / 28000000.0, (unsigned long long)trace_sample());
+			if (m_swp_watch)
+				m_swp_watch(base == 0x800000, (a - base) >> 1, v);
 			dev.write16((a - base) >> 1, v);
 			hold((a - base) >> 1);
 		};
@@ -600,6 +618,21 @@ void mu2000::start_devices()
 
 void mu2000::reset()
 {
+	// 実機の M37640 は、PC に繋がっていると「ホストが居る」を知らせてくる
+	// （状態の bit6 を立てて F4 03 01 01 01。0x43810 が受け、0x43DAD1 を 1 にする）。
+	// これが来ないと、HOST SELECT が USB のとき firmware は起動の途中（0x1167CE）で
+	// 液晶に「HOST Is Offline!」を出す。エミュでは PC が常に繋がっているので、起動時に 1 回送る
+	m_usb.cmd.clear();
+	m_usb.cur_cmd = false;
+	// ケーブルメッセージで回した口は、電源を入れ直せば元に戻る
+	for (int p = 0; p < MIDI_PORTS; p++) {
+		m_cable[p] = p;
+		m_cable_wait[p] = false;
+	}
+	if (m_usb_host)
+		for (u8 b : { 0xf4, 0x03, 0x01, 0x01, 0x01 })
+			m_usb.cmd.push_back(b);
+
 	// ポート A。MAME の mu500_state::pa_r は 0xffff を返すだけだったが、
 	// そこに付いていた覚え書きに配線が書いてある。
 	//   21 出力（前面と背面の MIDI A を切り替える）
@@ -740,11 +773,13 @@ void mu2000::run_cycles(u64 n)
 					if (left < chunk)
 						chunk = left;
 				}
-		// SWP30 に書いた後は、このサンプルの残りを命令を進めずに過ごす（上の swp の説明）。
+		// SWP30 に書いた後は、その待ちぶんだけ命令を進めずに時間を送る（上の swp の説明）。
 		// 周辺のタイマや MIDI の送出は、区切りごとにここまでで進めている
-		if (m_swp_hold) {
-			m_cpu->skip_cycles(chunk);
-			n = chunk >= n ? 0 : n - chunk;
+		if (m_swp_wait) {
+			const u64 skip = std::min<u64>(m_swp_wait, chunk);
+			m_cpu->skip_cycles(skip);
+			m_swp_wait -= skip;
+			n = skip >= n ? 0 : n - skip;
 			continue;
 		}
 
@@ -762,7 +797,6 @@ void mu2000::run_cycles(u64 n)
 		} else
 			n -= u64(done);
 	}
-	m_swp_hold = false;
 }
 
 // ダイヤルを 1 位相ぶん進める。
@@ -829,13 +863,25 @@ void mu2000::usb_step(u64 now)
 	// （doc/dump/usb.md の実測）。DIN の 3,125 byte/s より 6 倍速いが、
 	// 発音の間隔は firmware 側が頭打ちなので実測とは食い違わない。
 	// 4 つの口が 1 本の流れを分け合うので、遅くすると互いに待たせてしまう
-	if (!u.have && !u.rx.empty() && now >= u.next) {
-		u.cur  = u.rx.front();
+	if (!u.have && now >= u.next && (!u.cmd.empty() || !u.rx.empty())) {
+		// コマンドを先に渡す
+		std::deque<u8> &q = u.cmd.empty() ? u.rx : u.cmd;
+		u.cur_cmd = !u.cmd.empty();
+		u.cur  = q.front();
 		u.have = true;
-		u.rx.pop_front();
+		q.pop_front();
 		u.next = now + (m_fast_midi ? 0 : USB_BYTE_CYCLES);
-		m_cpu->execute_set_input(3, 1);
 	}
+	// 送信の線を一度下ろす。下で上げ直すので、山は 1 標本ぶんになる
+	m_cpu->execute_set_input(2, 0);
+	// **読まれるまで上げておく**。実機の M37640 は「受信あり」を線で示しているので、
+	// firmware が受け取りを止めている間に来たバイトも、止めるのをやめた時点で必ず拾われる。
+	// 渡した瞬間に 1 回だけ上げる形にしていたため、firmware が受信を詰まらせて
+	// IRQ3 の優先度を 0 に落としている隙に渡すと、優先度を戻しても二度と上がらず、
+	// 以後 MIDI を 1 バイトも受け取らなくなっていた（USB の口へ 1 秒に 2 万バイト近い
+	// 設定データを流すと起きる。X で報告された testxg.mid）
+	if (u.have)
+		m_cpu->execute_set_input(3, 1);
 
 	// 送信。firmware は IRQ2（ベクタ 66）が来るたびに 1 バイト出す。
 	// 上げないとリングが埋まり、0x437A0 の空き待ちで固まる（実機でやらかした）
@@ -849,8 +895,11 @@ u8 mu2000::usb_r(offs_t a)
 {
 	usb_line &u = m_usb;
 	if (a & 1)
-		return u.have ? 0x01 : 0x00;   // bit0 = 受信あり、bit6 = コマンド（使わない）
+		return u.have ? (u.cur_cmd ? 0x41 : 0x01) : 0x00;   // bit0 = 受信あり、bit6 = コマンド
+	// 受け取られたのでその場で線を下ろす。次の標本まで待つと、その隙に
+	// 割り込みがもう一度入って同じバイトを二度読まれてしまう
 	u.have = false;
+	m_cpu->execute_set_input(3, 0);
 	return u.cur;
 }
 
@@ -931,11 +980,561 @@ void mu2000::midi_step(u64 now)
 }
 
 
+
+// ---- native の口（doc/native-engine.md の段 2）
+
+void mu2000::set_native_engine(int mode)
+{
+	m_native_engine = mode;
+	m_fw_hold = 0;
+	m_learning = false;
+	m_learn_left = 0;
+	for (u8 &c : m_fw_notes)
+		c = 0;
+	m_fw_note_total = 0;
+	m_nq.clear();
+	m_traj_rec = false;
+	m_traj_left = 0;
+	m_traj_cals = nullptr;
+	m_ne_clock = 0;
+	for (u64 &t : m_rx_at)
+		t = 0;
+	std::memset(m_nown, 0, sizeof(m_nown));
+	for (nmidi &n : m_nmidi)
+		n = nmidi();
+	m_ne_samples.store(0, std::memory_order_relaxed);
+	m_ne_fw_samples.store(0, std::memory_order_relaxed);
+	m_ne_stats = native_stats();
+	if (!mode) {
+		set_swp_watch(nullptr);
+		return;
+	}
+	m_ndrv.reset();
+	m_ndrv.set_rom(m_prog ? m_prog->data() : nullptr);
+	m_ndrv.set_ram(m_ram.data());
+	m_ndrv.set_poke([this](u32 reg, u16 value) { m_swpm.write16(reg, value); });
+}
+
+// 音色の 1 音目を firmware に鳴らさせて、スロットに書かれた値を写し取る
+void mu2000::native_learn_start(u32 rec)
+{
+	m_learning = true;
+	m_learn_rec = rec;
+	// その鍵・強さで鳴るはずの要素の数
+	m_learn_want = 1;
+	if (rec && m_prog) {
+		const u8 *rom0 = m_prog->data();
+		int n = 0;
+		const int nel = xg::nv::element_count(rom0, rec);
+		for (int k = 0; k < nel; k++)
+			if (xg::nv::element_active(xg::nv::element(rom0, rec, k), m_learn_note, m_learn_vel))
+				n++;
+		if (n > 0)
+			m_learn_want = n;
+	}
+	m_learn_first.clear();
+	m_learn_last.clear();
+	m_learn_mask = m_learn_keyed = 0;
+	// レジスタは鍵を押した所でまとめて書かれるので、短くてよい。
+	// 長くすると、その間の音が全部 firmware に回ってしまう。
+	// ただし短すぎると 0x01（鳴らしてから上がっていく）が落ち着く前に切れる
+	m_learn_left = 44100 / 50;          // 20ms ぶん見る
+	set_swp_watch([this](bool master, u32 reg, u16 value) {
+		if (!master)
+			return;
+		m_learn_last[reg] = value;
+		switch (reg) {
+		case 0x18e: m_learn_mask = (m_learn_mask & ~(u64(0xffff) << 48)) | (u64(value) << 48); break;
+		case 0x18f: m_learn_mask = (m_learn_mask & ~(u64(0xffff) << 32)) | (u64(value) << 32); break;
+		case 0x1ce: m_learn_mask = (m_learn_mask & ~(u64(0xffff) << 16)) | (u64(value) << 16); break;
+		case 0x1cf: m_learn_mask = (m_learn_mask & ~u64(0xffff)) | value; break;
+		case 0x20e:
+			m_learn_keyed |= m_learn_mask;
+			if (m_learn_first.empty())
+				m_learn_first = m_learn_last;
+			// 鳴り始めたら、あと少しだけ見て終える（0x01 が落ち着くぶん）。
+			// ただし**要素がそろうまでは待つ**。MusicBox のように 2 つ目の要素を
+			// 37ms 遅れて鳴らす音色があり、打ち切ると片方しか写し取れない。
+			// 長く占有すると、その間ほかの音色が写し取りを始められないので、
+			// そろったら 5ms で切り上げる
+			m_learn_left = __builtin_popcountll(m_learn_keyed) >= m_learn_want
+			             ? 44100 / 200 : 44100 / 16;
+			break;
+		default: break;
+		}
+	});
+}
+
+void mu2000::native_learn_finish()
+{
+	set_swp_watch(nullptr);
+	m_learning = false;
+	if (!m_learn_keyed || !m_prog)
+		return;
+	// ドラムは、音色の記録が引けないので中身を写すだけ（音ごとに覚える）
+	if (m_learn_drum) {
+		std::vector<xg::nv::voice_cal> cals;
+		for (int ch = 0; ch < 64; ch++) {
+			if (!(m_learn_keyed & (u64(1) << ch)))
+				continue;
+			xg::nv::voice_cal cal;
+			for (int i = 0; i < 0x40; i++) {
+				const bool at_key = (i == 0x05 || i == 0x0a || i == 0x11);
+				const std::map<u32, u16> &src = at_key ? m_learn_first : m_learn_last;
+				const auto it = src.find(u32(ch) * 64 + u32(i));
+				if (it != src.end())
+					cal.set(i, it->second);
+			}
+			if (!cal.has(0x16) || !cal.has(0x17))
+				continue;
+			cal.cal_vel  = m_learn_vel;
+			cal.cal_vol  = m_ndrv.part_vol(m_learn_part);
+			cal.cal_expr = m_ndrv.part_expr(m_learn_part);
+			cal.cal_pan  = m_ndrv.part_pan(m_learn_part);
+			cal.have = true;
+			cals.push_back(cal);
+		}
+		const int ndcal = int(cals.size());
+		const u64 dkey = m_learn_drum;
+		m_ndrv.learn_drum(m_learn_drum, std::move(cals));
+		traj_start(0, dkey, ndcal);
+		m_learn_drum = 0;
+		return;
+	}
+	// 波形の番地まで取れていなければ、写し取りとして使えない（次の音でやり直す）
+	{
+		bool ok = false;
+		for (int ch = 0; ch < 64 && !ok; ch++)
+			if ((m_learn_keyed & (u64(1) << ch)) &&
+			    m_learn_last.count(u32(ch) * 64 + 0x16) && m_learn_last.count(u32(ch) * 64 + 0x17))
+				ok = true;
+		if (!ok)
+			return;
+	}
+	const u8 *rom = m_prog->data();
+	const int nel = xg::nv::element_count(rom, m_learn_rec);
+	unsigned used_elem = 0;
+	std::vector<xg::nv::voice_cal> cals;
+	for (int ch = 0; ch < 64; ch++) {
+		if (!(m_learn_keyed & (u64(1) << ch)))
+			continue;
+		xg::nv::voice_cal cal;
+		for (int i = 0; i < 0x40; i++) {
+			// 0x05・0x0a・0x11 は LFO が動かし続けるので引き金の瞬間、
+			// ほかは落ち着いた値（doc/native-engine.md の 6.10）
+			const bool at_key = (i == 0x05 || i == 0x0a || i == 0x11);
+			const std::map<u32, u16> &src = at_key ? m_learn_first : m_learn_last;
+			const auto it = src.find(u32(ch) * 64 + u32(i));
+			if (it != src.end())
+				cal.set(i, it->second);
+		}
+		// どの要素かは、そのスロットが鳴らしている波形の番地で見分ける。
+		// 同じ波形の要素が 2 つあるときは、まだ使っていないほうを取る
+		int idx = -1;
+		if (cal.has(0x16) && cal.has(0x17)) {
+			const u32 want = u32(cal.reg[0x16]) << 16 | cal.reg[0x17];
+			for (int k = 0; k < nel; k++) {
+				if (used_elem & (1u << k))
+					continue;
+				const u8 *e2 = xg::nv::element(rom, m_learn_rec, k);
+				const u8 *w2 = xg::nv::wave_entry(rom, xg::nv::wave_set(e2), m_learn_note);
+				if (w2 && xg::nv::read_wave(w2).format_addr == want) {
+					idx = k;
+					used_elem |= 1u << k;
+					break;
+				}
+			}
+		}
+		if (idx < 0)
+			idx = int(cals.size()) < nel ? int(cals.size()) : 0;
+		cal.base_level = xg::nv::calibrate_level(rom, xg::nv::element(rom, m_learn_rec, idx),
+		                                         cal.has(9) ? (cal.reg[9] & 0xff) : 64,
+		                                         m_learn_note, m_learn_vel);
+		cal.cal_vel  = m_learn_vel;
+		cal.cal_vol  = m_ndrv.part_vol(m_learn_part);
+		cal.cal_expr = m_ndrv.part_expr(m_learn_part);
+		cal.cal_pan  = m_ndrv.part_pan(m_learn_part);
+		cal.have = true;
+		cals.push_back(cal);
+	}
+	const int ncal = int(cals.size());
+	if (std::getenv("SMU2000_NATIVE_DEBUG")) {
+		std::fprintf(stderr, "learn rec=%06x 要素 %d 写し %d 鍵いた %d\n", m_learn_rec, nel, ncal,
+		             __builtin_popcountll(m_learn_keyed));
+		for (int k = 0; k < ncal; k++) {
+			const xg::nv::voice_cal &c = cals[size_t(k)];
+			const u8 *e2 = xg::nv::element(rom, m_learn_rec, k);
+			const u8 *w2 = xg::nv::wave_entry(rom, xg::nv::wave_set(e2), m_learn_note);
+			std::fprintf(stderr, "  写し%d 0x11=%04x 0x32=%04x 0x09=%04x 波形=%08x"
+			                     " / 式 0x11=%04x 要素b18=%d b0=%d b1=%d\n",
+			             k, c.reg[0x11], c.reg[0x32], c.reg[0x09], c.wave_addr(),
+			             w2 ? xg::nv::pitch_reg(xg::nv::read_wave(w2), m_learn_note,
+			                                    xg::nv::key_follow(e2)) : 0,
+			             e2[18], e2[0], e2[1]);
+			if (w2)
+				std::fprintf(stderr, "        こちらの波形=%08x 基準鍵=%d 微調=%d 上限鍵=%d 追従=%d 組=%d%s",
+				             xg::nv::read_wave(w2).format_addr, xg::nv::read_wave(w2).base_key,
+				             xg::nv::read_wave(w2).fine_cents, xg::nv::read_wave(w2).key_max,
+				             xg::nv::key_follow(e2), xg::nv::wave_set(e2), "\n");
+		}
+	}
+	m_ndrv.learn(m_learn_rec, std::move(cals));
+	traj_start(m_learn_rec, 0, ncal);
+}
+
+// 写し取った音が鳴っている間、firmware がフィルタ（0x00・0x01・0x04）を
+// どう動かすかを録る。あとの音でも同じように動かせば、音色の動きまで揃う
+void mu2000::traj_start(u32 rec, u64 drum_key, int ncal)
+{
+	if (!ncal)
+		return;
+	m_traj_cals = drum_key ? m_ndrv.drum_cals_of(drum_key) : m_ndrv.cals_of(rec);
+	if (!m_traj_cals)
+		return;
+	// 写し取ったチャンネルの順が、そのまま写し取りの並び
+	int n = 0;
+	for (int ch = 0; ch < 64; ch++)
+		m_traj_chan[ch] = (m_learn_keyed & (u64(1) << ch)) ? n++ : -1;
+	m_traj_n = 0;
+	m_traj_rec = true;
+	m_traj_rec_key = rec;
+	m_traj_drum_key = drum_key;
+	m_traj_start = m_ne_clock;
+	m_traj_left = 44100;                 // 1 秒ぶん見る
+	set_swp_watch([this](bool master, u32 reg, u16 value) {
+		if (!master)
+			return;
+		const int ch = int(reg / 64), r = int(reg % 64);
+		if (ch >= 64 || m_traj_chan[ch] < 0)
+			return;
+		// 離しに入ったらそこで打ち切る（離しの動きは鳴らすときには要らない）。
+		// ただし鳴らし始めてすぐは見ない。前の音の離しが同じスロットに来る
+		if (r == 0x09 && (value & 0x8000)) {
+			if (m_ne_clock - m_traj_start > 44100 / 10)
+				m_traj_left = 1;
+			return;
+		}
+		// フィルタ（0x00・0x01・0x04）と LFO（0x05・0x0a）。
+		// LFO は「かけ始めるまでの間」や深さの増やし方を firmware がソフトでやっている
+		if (r != 0x00 && r != 0x01 && r != 0x04 && r != 0x05 && r != 0x0a)
+			return;
+		if (m_traj_n >= 2048 || size_t(m_traj_chan[ch]) >= m_traj_cals->size())
+			return;
+		// **その場で**写し取りに足す。いま鳴っている native の音も、
+		// 次の tick でこの段を拾う（xg/native_driver.h の tick）
+		(*m_traj_cals)[m_traj_chan[ch]].filter_env.push_back(
+		    xg::nv::fstep{ u32(m_ne_clock - m_traj_start), u8(r), value });
+		m_traj_n++;
+	});
+}
+
+void mu2000::traj_finish()
+{
+	set_swp_watch(nullptr);
+	m_traj_rec = false;
+	if (std::getenv("SMU2000_NATIVE_DEBUG"))
+		std::fprintf(stderr, "traj rec=%06x drum=%llx 段 %u%c", m_traj_rec_key,
+		             (unsigned long long)m_traj_drum_key, m_traj_n, 10);
+	m_traj_cals = nullptr;
+}
+
+// 待っている native の出来事を、時が来たものから実行する
+void mu2000::native_pump()
+{
+	while (!m_nq.empty() && m_nq.front().at <= m_ne_clock) {
+		const nev e = m_nq.front();
+		m_nq.pop_front();
+		switch (e.kind) {
+		case 0: m_ndrv.note_off(e.part, e.d0); break;
+		case 1:
+			if (m_ndrv.note_on(e.part, e.d0, e.d1))
+				m_ne_stats.note_native++;
+			break;
+		case 2: m_ndrv.control(e.part, e.d0, e.d1); break;
+		case 3: m_ndrv.bend(e.part, int(e.d1) << 7 | e.d0); break;
+		default: break;
+		}
+	}
+}
+
+// MIDI を 1 バイト受けて、native でさばけたら true。
+// さばけなかったもの（音色の指定・コントローラ・SysEx）は firmware へ回す
+bool mu2000::native_midi(u8 byte, int port)
+{
+	if (byte >= 0xf8)
+		return false;                    // リアルタイムはそのまま
+	// 実機は 1 バイトずつ線で受ける。和音のように何音も一度に来ると、
+	// あとの音ほど遅れて鳴る。そのぶんをここで数える
+	const u64 fire = rx_advance(port);
+	nmidi &n = m_nmidi[port];
+	if (byte & 0x80) {
+		if (byte >= 0xf0) {              // SysEx など。以後は firmware に任せる
+			n.status = 0;
+			// **長めに回す**。エフェクトの種類を変える SysEx は、MEG のプログラムを
+			// 1 万件以上書き直す。その途中で止めると音が出なくなる
+			m_fw_hold = 44100 / 2;
+			return false;
+		}
+		n.status = byte;
+		n.have = 0;
+		// 鍵の上げ下げ・CC・ベンドはこちらで見る。残り（音色の指定など）は firmware へ
+		const u8 kind = byte & 0xf0;
+		if (kind != 0x80 && kind != 0x90 && kind != 0xb0 && kind != 0xe0) {
+			m_ne_stats.other++;
+			m_fw_hold = 44100 / 50;
+			return false;
+		}
+		return true;                     // 状態のバイトは飲み込む
+	}
+	const u8 kind = n.status & 0xf0;
+	if (kind != 0x80 && kind != 0x90 && kind != 0xb0 && kind != 0xe0)
+		return false;
+	if (n.have == 0) {
+		n.d0 = byte;
+		n.have = 1;
+		return true;
+	}
+	n.have = 0;
+	const int part = (n.status & 0x0f) + port * 16;
+
+	// ピッチベンドは、音程のレジスタを自分で作れるので firmware には渡さない。
+	// ただし、そのパートで firmware が鳴らしている音がある間は渡す
+	if (kind == 0xe0) {
+		m_nq.push_back({ fire, 3, u8(part), u8(n.d0 & 0x7f), u8(byte & 0x7f) });
+		if (m_fw_notes[part]) {
+			m_fw_hold = std::max(m_fw_hold, u32(44100 / 500));
+			replay_note(n.status, n.d0, byte, port);
+		}
+		return true;
+	}
+	// コントローラ。音量・表現・パン・ダンパーは自分でさばく。
+	// それでも firmware には渡す（写し取りのとき同じ位置で鳴らしてほしい）が、
+	// 回す時間は短くてよい
+	if (kind == 0xb0) {
+		m_ne_stats.other++;
+		const bool mine = m_ndrv.handles_cc(n.d0 & 0x7f);
+		if (mine)
+			m_nq.push_back({ fire, 2, u8(part), u8(n.d0 & 0x7f), u8(byte & 0x7f) });
+		else
+			m_ndrv.control(part, n.d0 & 0x7f, byte & 0x7f);   // 音を全部切るなどは待たない
+		m_fw_hold = std::max(m_fw_hold, u32(mine ? 44100 / 500 : 44100 / 50));
+		replay_note(n.status, n.d0, byte, port);
+		return true;
+	}
+	const int note = n.d0 & 0x7f, vel = byte & 0x7f;
+	if (kind == 0x80 || vel == 0) {
+		if (nown(part, note)) {
+			nown_set(part, note, false);
+			m_nq.push_back({ fire, 0, u8(part), u8(note), u8(vel) });
+			return true;
+		}
+		// native で鳴っていない音は firmware に任せる
+		if (m_fw_notes[part]) {
+			m_fw_notes[part]--;
+			if (m_fw_note_total)
+				m_fw_note_total--;
+		}
+		replay_note(n.status, u8(note), u8(vel), port);
+		return true;
+	}
+	if (m_ndrv.can_play(part, note)) {
+		nown_set(part, note, true);
+		m_nq.push_back({ fire, 1, u8(part), u8(note), u8(vel) });
+		return true;
+	}
+	m_ne_stats.note_fw++;
+	// まだ写し取っていない音（ドラムは音ごと）。firmware に鳴らさせて覚える
+	const u32 rec = m_ndrv.record_of(part);
+	const bool drum = m_ndrv.is_drum(part);
+	if ((rec || drum) && !m_learning) {
+		m_learn_note = note;
+		m_learn_vel = vel;
+		m_learn_drum = drum ? m_ndrv.drum_key(part, note) : 0;
+		m_learn_part = part;
+		m_ne_stats.learn++;
+		native_learn_start(rec);
+	}
+	m_fw_hold = std::max(m_fw_hold, u32(44100 / 20));
+	if (m_fw_notes[part] < 255) {
+		m_fw_notes[part]++;
+		m_fw_note_total++;
+	}
+	replay_note(n.status, u8(note), u8(vel), port);
+	return true;
+}
+
+// 飲み込んだバイトを firmware へ流し直す。
+// **回す時間も作る**。渡しただけでは、CPU を止めたままなので誰も読まない
+void mu2000::replay_note(u8 status, u8 d0, u8 d1, int port)
+{
+	const int save = m_native_engine;
+	m_native_engine = 0;                 // 二重に読まない
+	midi_in(status, port);
+	midi_in(d0, port);
+	midi_in(d1, port);
+	m_native_engine = save;
+	if (m_fw_hold < 44100 / 50)
+		m_fw_hold = 44100 / 50;
+}
+
+// S-MU2000: 軽量モードの入り切り（doc/native-dsp.md）
+void mu2000::set_native_fx(int mode)
+{
+	m_nfx_on = mode;
+	// 遅延の線は作り直さない（音声の糸が読んでいる最中に切り替えても危なくないように）。
+	// 大きさは 44100Hz ぶんで固定なので、1 度用意すれば足りる。
+	// **台ごとに持つ**。前は関数の static で、DAW に 2 枚目を挿すと
+	// 2 台目の遅延の線が空のままになって落ちていた
+	// 非正規化数（0 に近すぎる値）を 0 に丸める設定は、**ここでは触らない**。
+	// 糸ごとの設定なので、音声の糸が入れ替わると消えてしまうし、
+	// 音源として挿されている側が host の糸の設定を変えたままにするのも行儀が悪い。
+	// 1 ブロックごとに smu2000::denormals_off を置く（compat/platform.h）
+	if (!m_nfx_ready) {
+		m_nfx.set_rate(44100.0f);
+		m_nfx_ready = true;
+	}
+	m_nfx.reset();
+	int mask = 15;
+	if (const char *e = std::getenv("SMU2000_NATIVE_SLOTS"))
+		mask = std::atoi(e);
+	m_swpm.set_native_fx(mode ? &m_nfx : nullptr, mode >= 2, mask);
+	if (mode)
+		native_fx_update();
+}
+
+namespace {
+
+// XG の番地から、ワーク RAM の値を読む（7bit ずつ。無ければ -1）
+int xg_read(const std::vector<u8> &ram, int hi, int mid, int lo, int size)
+{
+	int v = 0;
+	for (int i = 0; i < size; i++) {
+		u32 off = 0;
+		if (!xg::ram::locate(u32(hi << 14 | mid << 7 | (lo + i)), off) || off >= ram.size())
+			return -1;
+		v = (v << 7) | (ram[off] & 0x7f);
+	}
+	return v;
+}
+
+// インサーション n のパラメータ 1-10 が 2 バイトの種類のときの値（16bit がそのまま並ぶ）
+int ins_wide(const std::vector<u8> &ram, int n, int addr)
+{
+	// 2 バイトのパラメータは 0x30, 0x32, ... と 2 番地ずつ使い、RAM にも 2 バイトずつ並ぶ。
+	// つまり RAM での位置は「番地の差」そのもの（前は 2 倍していて 1 つおきに読んでいた）
+	const u32 off = xg::ram::INS_BLOCK[n] + xg::ram::INS_WIDE + u32(addr - 0x30);
+	if (off + 1 >= ram.size())
+		return -1;
+	return ram[off] << 8 | ram[off + 1];
+}
+
+} // namespace
+
+// RAM に入っている XG の設定を読んで、C++ のエフェクトに渡す。
+// 音を作る糸から 512 サンプルごとに呼ぶ（設定はそんなに速く変わらない）
+void mu2000::native_fx_update()
+{
+	using nfx = smu2000::dsp::native_fx;
+	const std::vector<u8> &ram = m_ram;
+	if (ram.size() < 0x30000)
+		return;
+
+	struct slot_def { nfx::slot_id id; int hi, mid, base, ret_lo, ins; };
+	static const slot_def SLOTS[] = {
+		{ nfx::REVERB,    0x02, 0x01, 0x00, 0x0c, -1 },
+		{ nfx::CHORUS,    0x02, 0x01, 0x20, 0x2c, -1 },
+		{ nfx::VARIATION, 0x02, 0x01, 0x40, 0x56, -1 },
+		{ nfx::INS1,      0x03, 0x00, 0x00, -1,    0 },
+	};
+
+	// パラメータの並びは、置き場ごとに違う（表の addr はインサーションの番地）。
+	//   リバーブ・コーラス … 1-10 は base+02〜0B の 1 バイト、11-16 は base+10〜15
+	//   バリエーション     … 1-10 は 02 01 42 から 2 バイトずつ、11-16 は 02 01 70〜75
+	//   インサーション     … 表の番地そのまま（2 バイトのものは +0x18 に 16bit で並ぶ）
+	auto read_param = [&](const slot_def &s, const xg::fx_param &p, int index) {
+		if (s.ins >= 0)
+			return p.addr >= 0x30 ? ins_wide(ram, s.ins, p.addr)
+			                      : xg_read(ram, s.hi, s.mid, s.base + p.addr, p.size);
+		if (s.id == nfx::VARIATION) {
+			if (p.addr >= 0x30 || index < 10)
+				return xg_read(ram, s.hi, s.mid, 0x42 + 2 * index, 2);
+			return xg_read(ram, s.hi, s.mid, 0x70 + (p.addr - 0x20), 1);
+		}
+		if (p.addr >= 0x20)
+			return xg_read(ram, s.hi, s.mid, s.base + 0x10 + (p.addr - 0x20), 1);
+		return xg_read(ram, s.hi, s.mid, s.base + p.addr, p.size);
+	};
+
+	for (const slot_def &s : SLOTS) {
+		const int type = xg_read(ram, s.hi, s.mid, s.base, 2);
+		if (type < 0)
+			continue;
+		const xg::fx_def *def = xg::fx_find(type);
+		int raw[16] = {};
+		const int n = def ? std::min(def->count, 16) : 0;
+		for (int i = 0; i < n; i++) {
+			const xg::fx_param &p = def->params[i];
+			const int v = read_param(s, p, i);
+			raw[i] = v < 0 ? int(p.lo) : v;
+		}
+		m_nfx.set(s.id, type, raw, n);
+		// 調べもの用: SMU2000_NATIVE_FX_DEBUG=1 で、読んだ値を出す
+		static const bool dbg = std::getenv("SMU2000_NATIVE_FX_DEBUG") != nullptr;
+		if (dbg) {
+			std::printf("nfx slot %d type %02x %02x kind %d:", int(s.id), type >> 7, type & 0x7f,
+			            int(m_nfx.slot(s.id).current()));
+			for (int i = 0; i < n; i++)
+				std::printf(" %s=%d", def->params[i].label, raw[i]);
+			std::putchar(10);
+		}
+
+		// 戻り量。XG の 64 を基準にする（送りに対する量で、実機の中身とは別物）
+		if (s.ret_lo >= 0) {
+			const int ret = xg_read(ram, s.hi, s.mid, s.ret_lo, 1);
+			// 戻り量の基準。実機の混ざり具合に合わせた実測の値（SMU2000_NATIVE_RETURN で変えられる）
+			static const float base = [] {
+				const char *e = std::getenv("SMU2000_NATIVE_RETURN");
+				return e ? float(std::atof(e)) : 0.8f;
+			}();
+			float g = ret < 0 ? base : base * float(ret) / 64.0f;
+			// バリエーションを INSERTION でパートに掛けているときは、送りの目盛りが
+			// インサーションと同じになる（戻り量は使われない）
+			if (s.id == nfx::VARIATION && xg_read(ram, 0x02, 0x01, 0x5a, 1) == 0)
+				g = 0.31f;
+			m_nfx.set_return(s.id, g);
+		}
+	}
+
+	// マスター EQ（02 40 00-14）
+	{
+		int gain[5], freq[5], q[5];
+		static const int G[5] = { 0x01, 0x05, 0x09, 0x0d, 0x11 };
+		bool ok = true;
+		for (int i = 0; i < 5; i++) {
+			gain[i] = xg_read(ram, 0x02, 0x40, G[i], 1);
+			freq[i] = xg_read(ram, 0x02, 0x40, G[i] + 1, 1);
+			q[i]    = xg_read(ram, 0x02, 0x40, G[i] + 2, 1);
+			if (gain[i] < 0 || freq[i] < 0 || q[i] < 0)
+				ok = false;
+		}
+		const int shape1 = xg_read(ram, 0x02, 0x40, 0x04, 1);
+		const int shape5 = xg_read(ram, 0x02, 0x40, 0x14, 1);
+		if (ok)
+			m_nfx.meq().set_raw(gain, freq, q, shape1 < 0 ? 0 : shape1, shape5 < 0 ? 0 : shape5);
+	}
+}
+
 void mu2000::run_sample(s32 &left, s32 &right)
 {
+	// S-MU2000: 軽量モードでは、XG の設定をときどき読み直す
+	if (m_nfx_on && !(++m_nfx_tick & 0x1ff))
+		native_fx_update();
+
 	// 台数が変わっていたら別スレッドの使い方を見直す（8192 サンプルごと）
 	if (m_want_threaded && !(++m_thread_check & 0x1fff))
 		apply_threading();
+
+	m_sample_count++;
 
 	// SWP30 は 44100Hz で 1 サンプル。CPU はその間に 28MHz/44100 ≒ 634.9 サイクル
 	m_cycle_debt += 28000000;
@@ -949,7 +1548,38 @@ void mu2000::run_sample(s32 &left, s32 &right)
 	if (m_profile)
 		pt0 = smu2000::perf_ticks();
 
-	run_cycles(cycles);
+	// native の口が動いているときは、firmware を回すのは
+	//   * 渡した MIDI がまだ溜まっている間（受け取って処理させる）
+	//   * そのあと少しの間（処理が終わるまで）
+	// だけ。ふだんは止めておく
+	bool run_cpu = m_cpu_enabled;
+	if (m_native_engine) {
+		m_ne_samples.fetch_add(1, std::memory_order_relaxed);
+		if (midi_pending())
+			m_fw_hold = std::max(m_fw_hold, u32(44100 / 500));   // 溜まっている間は回す
+		// firmware が鳴らしている音がある間は止めない。LFO・包絡線・ベンドの
+		// 追従をやっているのは firmware なので、止めるとその音だけ変わってしまう
+		if (m_fw_note_total)
+			m_fw_hold = std::max(m_fw_hold, u32(2));
+		if (m_fw_hold) {
+			if (--m_fw_hold == 0)
+				m_ndrv.sync_cc();       // 止める前に、つまみの位置を取り直す
+		} else {
+			run_cpu = false;
+		}
+		if (run_cpu)
+			m_ne_fw_samples.fetch_add(1, std::memory_order_relaxed);
+		if (m_learning && m_learn_left && --m_learn_left == 0)
+			native_learn_finish();
+		m_ne_clock++;
+		if (!m_nq.empty())
+			native_pump();
+		m_ndrv.tick(m_ne_clock);
+		if (m_traj_rec && m_traj_left && --m_traj_left == 0)
+			traj_finish();
+	}
+	if (run_cpu)
+		run_cycles(cycles);
 
 	if (m_profile) {
 		pt1 = smu2000::perf_ticks();
@@ -1020,7 +1650,7 @@ namespace {
 
 // 保存の形。中身の並びを変えたら上げる
 constexpr u32 STATE_MAGIC   = 0x554d3253;   // "S2MU"
-constexpr u32 STATE_VERSION = 7;   // 2: MIDI の入口が A/B の 2 口になった / 3: SWP30 のピッチ EG / 4: サンプリングの録音の位置 / 5: SmartMedia の命令の途中 / 6: MEG の印と 2 つ目の idx / 7: USB の口（C・D）の受け取り途中
+constexpr u32 STATE_VERSION = 10;  // 2: MIDI の入口が A/B の 2 口になった / 3: SWP30 のピッチ EG / 4: サンプリングの録音の位置 / 5: SmartMedia の命令の途中 / 6: MEG の印と 2 つ目の idx / 7: USB の口（C・D）の受け取り途中 / 8: 2 つ目の A/D 変換器（AN4 = HOST SELECT） / 9: SWP30 の書き込みの待ち / 10: USB のコマンド（M37640 からの知らせ）
 constexpr u32 STATE_VERSION_OLDEST = 2;
 
 } // namespace
@@ -1053,6 +1683,9 @@ void mu2000::state(state_io &s)
 	// **前のサンプルからのはみ出し**。これが無いと、戻した直後の 1 サンプルで
 	// CPU の回す量が数サイクルずれる
 	s.v(m_overrun);
+	// 版 9 から: SWP30 へ書いた待ちの残り（サンプルを跨ぐことがある）
+	if (s.version() >= 9)
+		s.v(m_swp_wait);
 
 	// 受け取り途中の MIDI。A と B の 2 口ぶん
 	s.tag("midi");
@@ -1090,6 +1723,22 @@ void mu2000::state(state_io &s)
 			}
 		}
 		s.v(m_usb.in_port); s.v(m_usb.next); s.v(m_usb.have); s.v(m_usb.cur); s.v(m_usb.tx_next);
+		if (s.version() >= 10) {
+			u32 c = u32(m_usb.cmd.size());
+			s.v(c);
+			if (s.writing()) {
+				for (u8 b : m_usb.cmd)
+					s.v(b);
+			} else {
+				m_usb.cmd.clear();
+				for (u32 i = 0; i < c && s.ok(); i++) {
+					u8 b = 0;
+					s.v(b);
+					m_usb.cmd.push_back(b);
+				}
+			}
+			s.v(m_usb.cur_cmd);
+		}
 	}
 }
 
@@ -1133,5 +1782,12 @@ bool mu2000::load_state(const u8 *p, size_t n, std::string &err)
 	// MIDI OUT の途中の枠と溜めは保存していない。空から始める
 	m_tx_r = m_tx_w = 0;
 	m_tx_bit = -1;
+
+	// 軽量モード（C++ のエフェクト）の中身は状態に**入れない**。ディレイと残響の
+	// 遅延線だけで 5MB 近くあって、DAW の企画ファイルが膨らむわりに、得られるのは
+	// 「尾が切れない」だけだから（MEG の側の尾は SWP30 のリバーブ RAM に入っている）。
+	// ただし前の曲の尾が残ったままだと、戻した曲に混ざる。ここで消す
+	if (m_nfx_on)
+		m_nfx.reset();
 	return true;
 }

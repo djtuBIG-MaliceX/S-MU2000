@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" width="1640" height="680" viewBox="0 0 433.91666 179.91666">
+  <g id="power" inkscape:groupmode="layer" inkscape:label="STANDBY / ON のスイッチ">
+    <path id="power-1" style="opacity:1;fill:#404040;fill-opacity:1;stroke:none;stroke-width:0.26486;stroke-linecap:round;stroke-linejoin:round" transform="matrix(0.607428,-0.794375,0.831804,0.55507,81.557198,-72.18201)"
+          d="M -207.17488 69.297798 l -2.55557 1.866216 l -0.59298 -0.848628 l -0.62974 0.45987 l 2.10058 3.006193 l 0.62974 -0.45987 l -0.5559 -0.795563 l 2.55557 -1.866216 z" />
+    <path id="power-2" style="opacity:1;fill:#404040;fill-opacity:1;stroke:none;stroke-width:0.26486;stroke-linecap:round;stroke-linejoin:round" transform="matrix(0.607428,-0.794375,0.831804,0.55507,81.557198,-72.18201)"
+          d="M -213.50846 73.922921 l -0.64783 0.473085 l -0.59298 -0.848629 l -0.62973 0.459865 l 2.10058 3.006193 l 0.62973 -0.459865 l -0.5559 -0.795563 l 0.64783 -0.473085 z" />
+    <path id="power-3" style="fill:none;stroke:#404040;stroke-width:0.529167;stroke-linecap:butt;stroke-linejoin:miter;stroke-dasharray:none;stroke-opacity:1" transform="matrix(1,0,0,1,81.557198,-105.50975)"
+          d="M -67.463917 211.0977 h 24.881733 c 1.106768 0 1.997776 0.89101 1.997776 1.99778 v 12.40873 c 0 1.10677 -0.891008 1.99778 -1.997776 1.99778 h -24.881733 c -1.106768 0 -1.997776 -0.89101 -1.997776 -1.99778 v -12.40873 c 0 -1.10677 0.891008 -1.99778 1.997776 -1.99778 z" />
+  </g>
+</svg>

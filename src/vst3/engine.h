@@ -28,6 +28,7 @@
 #include <vector>
 
 class mu2000;
+namespace xg { struct param; }
 
 namespace smu2000 {
 namespace vst3 {
@@ -44,6 +45,7 @@ inline int midi_length(uint8_t status)
 	case 0xf0:
 		switch (status) {
 		case 0xf1: case 0xf3: return 2;
+		case 0xf5:            return 2;   // ケーブルメッセージ（口の切り替え、mu2000::midi_in）
 		case 0xf2:            return 3;
 		default:              return 1;
 		}
@@ -69,6 +71,9 @@ public:
 	// プラグインは構築の場で起動を終えておき、曲頭から音を鳴らせるようにする。
 	// plugin.ini の boot=async か SMU2000_SYNC_BOOT=0 で裏スレッドに戻せる
 	void start(bool block = false);
+	// 起動が終わるまで待つ。**DAW の本スレッドからだけ**呼ぶこと。
+	// 待ちきれずに時間切れなら false。始まっていなければ始めてから待つ
+	bool wait_ready(int ms);
 
 	status state() const { return m_state.load(std::memory_order_acquire); }
 	// state() が failed のときの理由。ready でも「代用品を使った」等が入る
@@ -88,6 +93,11 @@ public:
 	// 192 バイト＝31250bps で 61ms かかり、そのあとに続く音が丸ごと遅れるので、
 	// 鳴らした覚えのあるチャンネルだけに絞る
 	void all_notes_off(const uint16_t *mask, int ports);
+
+	// MIDI OUT. Takes what the firmware sent out of the hardware OUT jack
+	// (replies to XG queries and the like). Call from the same thread as
+	// fill(), after fill(). Returns bytes written into dst (0 when empty)
+	size_t midi_out(uint8_t *dst, size_t max);
 
 	// n サンプルぶん作る。左右は別々の配列（VST3 はそういう渡し方をする）。
 	// in_l / in_r はホストの周波数で n サンプルぶんの A/D INPUT（無ければ nullptr）
@@ -115,8 +125,27 @@ public:
 	// 壊れた状態がプロジェクトに入ったりした（issue #9）
 	void set_processing(bool on) { m_processing.store(on, std::memory_order_release); }
 	std::vector<uint8_t> save_state();
-	// 起動が終わっていなければ、終わってから最初の区間で戻す
-	bool load_state(const uint8_t *p, size_t n);
+	// 起動が終わっていなければ、終わってから最初の区間で戻す。
+	// setup は XG の値だけの控え（save_xg_setup）。機械まるごとの状態が読めなかったとき
+	// （版が違う、壊れている、無い）は、これを MIDI IN A に流して戻す
+	bool load_state(const uint8_t *p, size_t n, const uint8_t *setup = nullptr, size_t setup_n = 0);
+	// XG の値だけの控え。システム・エフェクト・64 パートを、流し込めば同じ設定になる MIDI にしたもの
+	// （ui/xg_state.h の setup_messages）。S-MU2000 の版が変わって機械まるごとの状態が読めなくなっても、
+	// 音色とエフェクトの設定はこれで戻る
+	std::vector<uint8_t> save_xg_setup();
+
+	// ---- 画面で値を触ったことを、プラグインの口（ホストのオートメーション）へ知らせる
+	//
+	// 画面（パネルとPC の窓）の層が値を書くたびに edit が呼ばれる（xg::model の edit_listener）。
+	// idle は画面の 1 コマごと。closing が true なら画面が閉じるところで、続いている操作を全部終える。
+	// どちらも画面の糸から呼ばれる
+	using edit_fn = std::function<void(const xg::param &p, int part, int value)>;
+	using idle_fn = std::function<void(bool closing)>;
+	using raw_fn  = std::function<void(u32 addr, int size, int value)>;   // 定義表に無い番地（set_raw）
+	void set_edit_handlers(edit_fn edit, idle_fn idle, raw_fn raw = nullptr);
+	void notify_edit(const xg::param &p, int part, int value);
+	void notify_edit_raw(u32 addr, int size, int value);
+	void notify_idle(bool closing);
 
 	// ---- SmartMedia（前面のカードの差し込み口）
 	//
@@ -138,12 +167,21 @@ private:
 	// （false なら裏スレッド）。起動の途中に m_abort が入ったら途中でやめる
 	void boot(bool sync);
 	void apply_deferred_state();   // 起動前に来た状態を戻す（m_machine を持って呼ぶ）
+	// 機械まるごとの状態を戻す。読めなければ XG の値の控えを流す（m_machine を持って呼ぶ）
+	bool restore(const uint8_t *p, size_t n, const std::vector<uint8_t> &setup);
 	void one_sample(float &l, float &r);
 	void build_table();
 
 	std::atomic<status> m_state{status::loading};
 	std::atomic<bool> m_processing{false};
 	std::vector<uint8_t> m_deferred_state;  // 起動が終わる前に来た状態（m_machine で守る）
+	std::vector<uint8_t> m_deferred_setup;  // 同じく、XG の値の控え
+	bool                 m_deferred = false;
+
+	std::mutex m_hook_mutex;
+	edit_fn    m_on_edit;
+	idle_fn    m_on_idle;
+	raw_fn     m_on_raw;
 	std::thread         m_thread;
 	std::atomic<bool>   m_abort{false};
 
@@ -183,11 +221,24 @@ private:
 	ui::bridge m_bridge;
 	ui::driver m_drv;
 
+	// MIDI OUT mirror. pump_out() inside fill() drains the machine queue
+	// first, so its echo is copied here and midi_out() reads this copy.
+	// Both run on the audio thread, so no lock is needed
+	static constexpr int TX_RING = 4096, TX_MASK = TX_RING - 1;
+	uint8_t m_tx[TX_RING] = {};
+	int     m_tx_w = 0, m_tx_r = 0;
+	void tx_push(uint8_t v);
+
 	// 起動前や、機械を他が使っている間に来た MIDI。口ごとに持つ。音声スレッドしか触らない
 	std::vector<uint8_t> m_pending[mu2000::MIDI_PORTS];
 };
 
 } // namespace vst3
+
+// This engine is not VST3-specific (no VST3 types in it).
+// AUv3 (src/auv3/) uses the same one, so alias it to spare that side writing vst3
+namespace plug = vst3;
+
 } // namespace smu2000
 
 #endif // S_MU2000_VST3_ENGINE_H

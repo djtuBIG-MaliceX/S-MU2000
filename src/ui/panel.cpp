@@ -166,6 +166,14 @@ bool panel::on_ad_input(int x, int y) const
 	return x >= r.left && x < r.right && y >= r.top && y < r.bottom;
 }
 
+bool panel::on_phones(int x, int y) const
+{
+	if (m_page != page::front)
+		return false;
+	const RECT r = scale(m_lay.phones[0], m_lay.phones[1], m_lay.phones[2], m_lay.phones[3]);
+	return x >= r.left && x < r.right && y >= r.top && y < r.bottom;
+}
+
 // 論理座標の点を実座標へ
 POINT panel::at(double x, double y) const
 {
@@ -786,9 +794,12 @@ void panel::paint_front(HDC dc, const snapshot &s, u64 pressed, double volume,
 			if (const svg_art *pic = m_lay.plg_art.pick(on, false)) {
 				const int r = int(6 * m_scale);
 				pic->draw(dc, RECT{ c.x - r, c.y - r, c.x + r, c.y + r });
-			} else
-				disc(dc, c.x, c.y, int(5 * m_scale),
-				     on ? LED_ON : RGB(64, 62, 52), RGB(110, 106, 92), 1);
+			} else {
+				// 実機の表示灯は四角
+				const int r = int(4 * m_scale);
+				round_box(dc, RECT{ c.x - r, c.y - r, c.x + r, c.y + r },
+				          on ? LED_ON : RGB(64, 62, 52), RGB(110, 106, 92), std::max(1, int(m_scale)));
+			}
 			text_in(dc, scale(px - 22, m_lay.plg[2] + 7, 44, 12), plg[i], PANEL_INK,
 			        m_font_small, DT_CENTER | DT_TOP | DT_SINGLELINE);
 		}
@@ -864,8 +875,10 @@ void panel::paint_front(HDC dc, const snapshot &s, u64 pressed, double volume,
 	draw_wheel(dc, m_wheel_angle);
 	draw_volume(dc, volume);
 
+	// 状態の行は本体の一番下（body_h の内側）に載るので、ボタンの名前と同じ濃い色で書く。
+	// 前は暗い帯向けの薄い灰色で、本体の地の色に溶けて読めなかった
 	if (status && status[0])
-		text_in(dc, m_status, status, RGB(170, 174, 180), m_font_small,
+		text_in(dc, m_status, status, PANEL_INK, m_font_small,
 		        DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 	text_in(dc, m_hint,
 	        "大きなダイヤルはホイールで回す ／ ボタンはクリック ／ "

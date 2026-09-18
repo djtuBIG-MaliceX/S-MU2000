@@ -2,7 +2,7 @@
 
 Yamaha MU2000 のソフトウェア音源。DAW に挿して使えることを目指す。
 
-**現在の状態: VST3 として DAW に挿して鳴る。実機のフロントパネル風の画面が付いた。**
+**現在の状態: VST3・CLAP（Windows）と VST3・Audio Unit（macOS）として DAW に挿して鳴る。実機のフロントパネル風の画面と、PC で触るエディタが付いた。**
 
 作りかけを晒しながら進めている。X では `#S_MU2000`。
 
@@ -35,9 +35,19 @@ Yamaha MU2000 のソフトウェア音源。DAW に挿して使えることを�
 > custom `.ydl` files anywhere, including Issues, Pull Requests, Discussions, Releases and
 > attachments. Hashes, logs, MIDI files and recordings are enough for bug reports.
 
-実機の firmware をそのまま走らせ、MIDI を受けて発音する。2 分半の実曲を
-MAME の録音と突き合わせて、発音指示 2851 件すべてが一致、振幅も 88.7% の
-区間で 10% 以内に収まっている。実時間再生の CPU 使用率はおよそ 38%。
+実機の firmware をそのまま走らせ、MIDI を受けて発音する。音は実機を S/PDIF で
+録ったものと直接比べて詰めている（いずれも 1/3 オクターブの帯ごとの差）。
+
+* XG の GM 128 音色と、そのほかの XG 音色 1225 種（C2・C4・C6）。C4 では 1225 種のうち
+  1109 種が差 1.5dB 未満。残る 116 種のうち 60 種は、実機で録り直しただけでも同じくらい揺れる
+* パフォーマンスモードの 100 パフォーマンス。帯の差の平均 0.61dB（実機どうしの再現性は 0.22dB）
+* システムのリバーブ・コーラスの全種類、バリエーションを送りで使う形、コントローラ、
+  ドラムの楽器ごとの NRPN、マルチ EQ、128 声を超えたときの奪い合い
+
+合わないものと、調べた経過は [doc/todo.md](doc/todo.md) に残してある。
+
+音源の JIT（SH2 と MEG の命令を機械語に訳す）が入り、16 パートが鳴りっぱなしの
+試験曲でも CPU の使用率は実時間のおよそ 22%（Ryzen 7 9700X、1 ブロックの平均）。
 LCD は firmware が書いたものがそのまま出て、ボタンもダイヤルも触れる。
 
 ## これは何か
@@ -65,6 +75,14 @@ MAME でも MU2000 は鳴る。だが MAME は自分で時計を持って実時�
 
 **吸い出しの手順と道具は [doc/dump/](doc/dump/) に入っている。**
 
+rom ディレクトリには次を置く。
+
+| ファイル | 中身 |
+|---|---|
+| `mu2000_flash.bin` | プログラム ROM 4MB（CPU から見えるまま） |
+| `dump/xv364a0.ic49` ほか 3 つ | 波形 ROM 8MB × 4 |
+| `standin/sin-table.bin` | MEG が使う sin 表 64KB |
+
 * プログラム ROM は**吸い出さなくていい**。ヤマハが公開している更新プログラム
   （`mu2r1_uw.zip`）から復元できる。中身は Flash 書き込みの SysEx をそのまま
   収めた MIDI ファイルで、組み直すと MAME 登録の SHA1 に一致する
@@ -78,37 +96,58 @@ MIDI 経由の予備の経路もあり、両方で吸ったものが 1 バイト
 
 ## 使い方
 
+**はじめて使うなら [doc/manual.md](doc/manual.md)**（用意するもの → 作る → 鳴らす → 画面 → DAW の通しの手引き。English: [doc/manual.en.md](doc/manual.en.md)）。
+
 ```
 make
 
-build/live.exe   <rom ディレクトリ> [--midi 番号] [--fast-midi]  MIDI 入力を受けて鳴らす
-build/live.exe   --list                              MIDI 入力の一覧
-build/render.exe <rom ディレクトリ> <MIDI> <出力 wav>  ファイルを WAV に
-                 [--reset gm|gs|xg]                 リセットを明示して先頭に入れる
-                 [--fast-midi]                      firmware が読める速さで MIDI を渡す
-build/midisend.exe <MIDI ファイル> [--port 番号]      MIDI 出力へ実時間で流す
-build/boot.exe   <rom ディレクトリ> [サイクル数]       起動の確認
-build/gui.exe    <rom ディレクトリ> [--midi 番号] [--fast-midi]  実機パネル風の画面で鳴らす
+build/gui.exe    <rom ディレクトリ> [--midi 番号] [--midi-b/-c/-d 番号]  実機パネル風の画面で鳴らす
+                 [--host-midi]                      USB ではなく DIN の口（A・B だけ）で受ける
+                 [--play 曲.mid]                    MIDI ファイルを流す
+                 [--exclusive] [--audio 名前] [--latency ms]  音の出口（下の「待ち時間」）
+                 [--editor] [--list-window]         PC で触る窓を開いて起動
+                 [--factory] [--nomidi] [--fast-midi]
 build/gui.exe    <rom ディレクトリ> --lcd              LCD だけの画面で鳴らす
-build/gui.exe    --list                              MIDI の入口と出口の一覧
+build/gui.exe    --list                              MIDI の入口と出口・音の出口の一覧
+build/live.exe   <rom ディレクトリ> [--midi 番号] [--fast-midi]  画面なしで MIDI 入力を受けて鳴らす
+build/live.exe   --list                              MIDI 入力の一覧
+build/render.exe <rom ディレクトリ> <MIDI> <出力 wav> [秒数]  ファイルを WAV に
+                 [--reset gm|gs|xg]                 リセットを明示して先頭に入れる
+                 [--usb]                            USB の口で起動し、曲の口 1-4 を A-D へ渡す
+                 [--fast-midi]                      firmware が読める速さで MIDI を渡す
+                 [--card 絵.img] [--adc-in 入力.wav]  SmartMedia を差す／A/D INPUT に流す
+build/panel.exe  <rom ディレクトリ> [--keys "play,edit"] [--list]  パネルを文字だけで動かす
+build/boot.exe   <rom ディレクトリ> [サイクル数]       起動の確認
+build/statetest.exe <rom ディレクトリ> [MIDI]          状態の保存と復元が正しいかを確かめる
+build/blocktime.exe <rom> <MIDI> <フレーム数> [秒] [回数]  1 ブロックの所要時間を測る
+build/midisend.exe <MIDI ファイル> [--port 番号]      MIDI 出力へ実時間で流す
 build/rec.exe    --list                              音声入力の一覧
 build/rec.exe    <番号> <wav> <秒> [--send <番号> <MIDI>]  実機の音を録る
-build/blocktime.exe <rom> <MIDI> <フレーム数> [秒] [回数]  1 ブロックの所要時間を測る
 ```
 
 **Domino など外のシーケンサから鳴らす手順は
 [doc/domino.md](doc/domino.md)**。要るのは仮想 MIDI ケーブル（loopMIDI）
 ひとつだけ。`gui.exe` は入口と出口を**動かしたまま画面から選べる**ので、
 パネルの `MIDI IN A` のジャックを押すか、窓のどこかを右クリックする。
-入口は **A と B の 2 口**（パート 1-16 と 17-32）で、THRU の出口も口ごとに選べる。
+
+入口は **A〜D の 4 口**（パート 1-16・17-32・33-48・49-64）。実機の HOST SELECT を
+USB にしたときと同じ形で起動するので、実機では USB でしか使えない C・D も使える。
+`--host-midi` を付けると DIN の口（A・B の 32 パート）で起動する。THRU の出口も口ごとに選べる。
+1 本の入口からでも、ケーブルメッセージ `F5 nn`（nn = 1〜4）を送れば以後のメッセージが口 A〜D へ行く
+（MU128 などの TO HOST と同じ流儀。実機の MU2000 は USB で送った `F5` を無視する。[doc/dump/usb.md](doc/dump/usb.md)）。
 選んだものは `%LOCALAPPDATA%\S-MU2000\gui.ini` に覚えておく。パネルの VOLUME の
 つまみの位置もここ（実機でもアナログのつまみで、firmware の RAM には入らない）。
+
+パネルのほかに、マウスとキーボードで触る窓がある（一覧・エディタ・インサーションの設定・
+パートの音色。F2・F3 か右クリック。[doc/pc-editor.md](doc/pc-editor.md)）。
+SmartMedia の差し込み口と、サンプリング用の A/D INPUT も使える（[doc/gui.md](doc/gui.md)）。
+MIDI ファイルは窓に落とすか `--play` で流せる。
 
 **MU2000 の設定は電源を入れ直しても残る。** 実機の電池で保持される RAM と同じ
 ものを、`gui` と `live` が終わるときに `%LOCALAPPDATA%\S-MU2000\nvram\` へ残し、
 次の起動で使う。ユーティリティの設定も、XG のマスタボリュームのような
-値も残る（実機の firmware がそう作ってある）。VST3 はここを**読むだけ**で、
-挿したときは gui / live で作った設定から始まる（VST3 の中で変えたものは DAW の
+値も残る（実機の firmware がそう作ってある）。プラグイン（VST3・CLAP・AU）はここを**読むだけ**で、
+挿したときは gui / live で作った設定から始まる（プラグインの中で変えたものは DAW の
 プロジェクトに残る）。工場出荷状態に戻すには `--factory` を付けて起動するか、
 `gui` の窓を右クリックして「工場出荷状態に戻す」。ファイルを消しても同じ。
 
@@ -121,35 +160,55 @@ build/blocktime.exe <rom> <MIDI> <フレーム数> [秒] [回数]  1 ブロッ�
 * **エフェクト** … リバーブ／コーラス／バリエーションと、インサーション 2 系統
   （番地は実測で確かめてある。[doc/effects.md](doc/effects.md)）
 
-VST3 の画面も同じもの。
+プラグインの画面も同じもの。
 
-DAW に挿すなら VST3。作り方と ROM の置き場は [doc/vst3.md](doc/vst3.md)。
-置き場は `%LOCALAPPDATA%\Programs\Common\VST3`（利用者ごと）か
+`live` は音声デバイスが要求した分だけ音源を進める。自分で時計を持たないので、
+外部と同期させてもずれない（MAME が破綻したのはここ）。
+
+**出力はデバイスが言ってくる形式のまま開く。** 48000Hz を言ってくる機械では
+44100 からの変換を自前の sinc でやる（Windows の変換器を通さない）。
+
+## DAW に挿す
+
+作り方と ROM の置き場は [doc/vst3.md](doc/vst3.md)。DAW ごとに分かったことは
+[doc/reason.md](doc/reason.md)（Reason）・[doc/sonar.md](doc/sonar.md)（Cakewalk Sonar）。
+
+**VST3**。置き場は `%LOCALAPPDATA%\Programs\Common\VST3`（利用者ごと）か
 `C:\Program Files\Common Files\VST3`（全員）。ROM は同梱できないので、
 バンドルの `Contents/Resources/roms.txt` に置き場所を 1 行書く。
+入力は実機の MIDI IN A〜D と同じ 4 本（64 パート）。Cubase のように MIDI の
+プログラムチェンジを `IUnitInfo` の音色の一覧で扱うホストでも、パートごとに音色が替わる。
+
+**音色やエフェクトの設定はプロジェクトに残り、パートの音量・フィルタ・EG・EQ やマスター EQ などは
+名前付きのパラメータとしてオートメーションで動かせる**（VST3・CLAP。画面で触った値もホストへ伝わる）。
+[doc/automation.md](doc/automation.md)。
 
 ```
-make vst3           build/S-MU2000.vst3/ にバンドルができる
-make install-vst3   VST3 の置き場へ複製する
-make probe          DAW 無しで読み込みと発音を確かめる
+make vst3             build/S-MU2000.vst3/ にバンドルができる
+make install-vst3     VST3 の置き場へ複製する
+make probe            DAW 無しで読み込みと発音を確かめる
+build/vst3probe.exe <バンドルの中の DLL> --torture
+                      ホストの無茶な呼び方を一通り試す（DLL は Contents/x86_64-win/S-MU2000.vst3）
 ```
 
-CLAP にも対応した（Windows で確かめた。macOS 用の `make clap` も書いてあるが、まだ macOS のホストで試していない）。中身は VST3 版と同じで、MIDI はバイト列のまま
-受け取る。ノートの入力は MIDI IN A（パート 1-16）と B（パート 17-32）の 2 本。
+**CLAP**（Windows で確かめた。macOS 用の `make clap` も書いてあるが、まだ macOS のホストで試していない）。
+中身は VST3 版と同じで、MIDI はバイト列のまま受け取る。ノートの入力も A〜D の 4 本。
 置き場は `C:\Program Files\Common Files\CLAP`（全員）か
 `%LOCALAPPDATA%\Programs\Common\CLAP`（利用者ごと）。ROM の置き場は
 `S-MU2000.clap` のすぐ横の `roms.txt` か、`%LOCALAPPDATA%\S-MU2000\roms.txt` に 1 行書く。
 
 ```
-make clap           build/S-MU2000.clap ができる
-make install-clap   CLAP の置き場へ複製する
+make clap             build/S-MU2000.clap ができる
+make install-clap     CLAP の置き場へ複製する
+build/clapprobe.exe build/S-MU2000.clap <MIDI> <出力 wav>
+                      DAW 無しで鳴らす（ROM の場所は環境変数 S_MU2000_ROMS でも渡せる）
 ```
 
-`live` は音声デバイスが要求した分だけ音源を進める。自分で時計を持たないので、
-外部と同期させてもずれない（MAME が破綻したのはここ）。CPU 使用率はおよそ 38%。
+プラグインも既定で USB の口（A〜D）で起動する。DIN の口（A・B）に戻すときは、
+`%LOCALAPPDATA%\S-MU2000\plugin.ini` に `usb=0` と書く。
 
-**出力はデバイスが言ってくる形式のまま開く。** 48000Hz を言ってくる機械では
-44100 からの変換を自前の sinc でやる（Windows の変換器を通さない）。
+**macOS**（Apple silicon）では VST3 と Audio Unit（AUv2、`aumu`）が作れる。
+`make` で道具と両方のバンドルができる。くわしくは [doc/porting-macos.md](doc/porting-macos.md)。
 
 ## 待ち時間
 
@@ -217,25 +276,24 @@ Windows の「既定の再生デバイス」は勝手に変わる（実際、設
 | `--exclusive --latency 10` | 11.6ms（512） | 5.4ms | 落ちない |
 | `--exclusive --latency 5` | 5.8ms（256） | 3.4ms | たまに間に合わない |
 
-余裕は音源の 1 ブロックの最悪値より長くないと音が切れる。16 パート同時だと
-最悪 9.2ms（`build/blocktime.exe` で測れる）。報告の「間に合わなかった」が
-増えるなら `--latency` を伸ばす。**ここから先を詰めるには音源を速くする。**
+余裕は音源の 1 ブロックの最悪値より長くないと音が切れる。報告の「間に合わなかった」が
+増えるなら `--latency` を伸ばす。1 ブロックの所要時間は `build/blocktime.exe` で測れる。
 
-rom ディレクトリには次を置く。
-
-| ファイル | 中身 |
-|---|---|
-| `mu2000_flash.bin` | プログラム ROM 4MB（CPU から見えるまま） |
-| `dump/xv364a0.ic49` ほか 3 つ | 波形 ROM 8MB × 4 |
-| `standin/sin-table.bin` | MEG が使う sin 表 64KB |
+この節の待ち時間と表の数字は、JIT を入れる前（2026-09-13）に測った値で、まだ測り直していない。
+音源の 1 ブロックはその後速くなり、16 パート同時の試験曲 `dense` を 512 フレームずつ回すと
+平均 2.5ms・最悪 7.2ms（2026-09-17、Ryzen 7 9700X）。
 
 ## ビルドについて
 
-MSYS2 / MinGW-w64 の g++ を想定している。C++20 が要る。
+Windows は MSYS2 / MinGW-w64 の g++、macOS は Apple の clang++、Linux は g++ を想定している。C++20 が要る。
+Linux は画面の要らない道具（render・panel・各種試験）だけが動く（[doc/linux.md](doc/linux.md)）。
 `make test` で回帰試験が回る（[doc/testing.md](doc/testing.md)）。ROM が無い
 機械でも、ROM の要らない分だけは走る。
-出来た exe は **MSYS2 の DLL に依存しない**ように静的リンクしてある
+Windows の exe は **MSYS2 の DLL に依存しない**ように静的リンクしてある
 （動的リンクのままだと、素の PowerShell から起動しても何も言わずに終わる）。
+
+SH2 と MEG の JIT は x86-64 と arm64 の両方にある。`midisend` と `rec`（実機と比べるための道具）は
+Windows だけ。macOS のビルドは [doc/porting-macos.md](doc/porting-macos.md)。
 
 ## 由来とライセンス
 
@@ -275,14 +333,22 @@ gui.exe の PC エディタの窓は Dear ImGui（`third_party/imgui`、Omar Cor
 
 ## 上流への還元
 
-MU2000 を鳴らす過程で MAME の SWP30 に 2 つのバグを見つけ、実機の測定値をもとに
-修正した。[mamedev/mame#16075](https://github.com/mamedev/mame/pull/16075) として
-取り込まれている。
-
-その後に見つけたもの（まだ送っていない）は
+MU2000 を鳴らす過程で MAME の SWP30 に見つけたバグは、実機の測定値をもとに直して
+MAME へ送っている。見つけたもの全部と、送ったかどうかは
 [doc/upstream.md](doc/upstream.md) に溜めてある。
 
-| 症状 | 原因 |
+取り込まれたもの（2026-09-17 時点）:
+
+| PR | 中身 |
 |---|---|
-| ロングトーンで音色が次々に変わる | ループ長のマスクが 26bit（正しくは 24bit）で、ファインチューンの下位 2bit が混入。ループ長が 5000 万サンプルに化けてループしない |
-| 発音 150ms 後にピッチが跳ぶ | ピッチレジスタの bit14 を clamp が誤爆し、最大ピッチに張り付く |
+| [mamedev/mame#16075](https://github.com/mamedev/mame/pull/16075) | ループ長のマスクの幅（ロングトーンで音色が次々に変わる）と、ピッチの clamp（発音 150ms 後にピッチが最大に張り付く） |
+| [mamedev/mame#16115](https://github.com/mamedev/mame/pull/16115) | iir2 のレジスタの並び、DPCM の累算の漏れ |
+| [mamedev/mame#16140](https://github.com/mamedev/mame/pull/16140) | リバーブ RAM の有効のレジスタを読めるようにした |
+| [mamedev/mame#16141](https://github.com/mamedev/mame/pull/16141) | MEG の DRC がインタプリタと食い違う 3 か所 |
+| [mamedev/mame#16142](https://github.com/mamedev/mame/pull/16142) | MEG のメモリ読み出しの絶対番地の指定 |
+| [mamedev/mame#16143](https://github.com/mamedev/mame/pull/16143) | 逆向き再生のサンプルの補間の順 |
+
+審査中: [#16144](https://github.com/mamedev/mame/pull/16144)（声の音量の積の切り捨て）・
+[#16150](https://github.com/mamedev/mame/pull/16150)（DPCM の端数）・
+[#16151](https://github.com/mamedev/mame/pull/16151)（歪み系エフェクトで見つけた MEG の演算器の端の場合）・
+[#16154](https://github.com/mamedev/mame/pull/16154)（切ったリバーブ RAM の区画の読み書き）。

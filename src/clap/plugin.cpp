@@ -9,11 +9,15 @@
 //   ・MIDI はバイト列のまま届く（CLAP_EVENT_MIDI / MIDI_SYSEX）。VST3 のように
 //     コントロールチェンジをパラメータに化けさせる必要が無い
 //   ・ノートは CLAP 流（CLAP_EVENT_NOTE_ON 等）で来ることもあるので、MIDI に直す
-//   ・パラメータは出力レベル 1 本だけ
+//   ・パラメータは出力レベルと、XG の値（パートの音量・フィルタ・EG・EQ、マスター EQ など。
+//     VST3 と同じ表と番号。automation.h、doc/automation.md）。画面で触った値は
+//     ジェスチャーの始まり・値・終わりのイベントでホストへ伝える
 //
-// ノートの入力は 2 本。実機の MIDI IN A（パート 1-16）と B（パート 17-32）。
+// ノートの入力は 4 本。実機の MIDI IN A-D（パート 1-16 / 17-32 / 33-48 / 49-64）。VST3 版と同じ。
 // 状態の保存の形は VST3 版の getState と同じにしてある。
 
+#include "vst3/automation.h"
+#include "vst3/automation_host.h"
 #include "vst3/engine.h"
 #include "vst3/plug_window.h"
 #include "vst3/view.h"
@@ -28,6 +32,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -36,6 +41,7 @@ namespace {
 
 using smu2000::vst3::engine;
 using smu2000::vst3::plug_view;
+namespace autom = smu2000::automation;
 
 // ---- このプラグインを表す名前。一度決めたら変えられない
 //      （変えるとホストが別物とみなし、保存した曲から見つからなくなる）
@@ -61,7 +67,13 @@ const clap_plugin_descriptor_t kDescriptor = {
 	kFeatures,
 };
 
-constexpr int kPorts = 2;
+// MIDI IN A-D。VST3 と同じ 4 口（C・D は実機では USB だけの口で、パート 33-64 に届く）
+constexpr int kPorts = mu2000::MIDI_PORTS;
+
+int port_of(uint16_t index)
+{
+	return index < kPorts ? int(index) : 0;
+}
 constexpr clap_id kGainId = 0;
 
 #if defined(_WIN32)
@@ -122,11 +134,17 @@ public:
 		m_plugin.on_main_thread   = [](const clap_plugin *) {};
 		m_engine.panel().set_gain(1.0f);
 		m_engine.set_output_rate(smu2000::vst3::NATIVE_RATE);
+		// 画面で XG の値を触ったら、ホストへ伝える
+		m_engine.set_edit_handlers(
+			[this](const xg::param &p, int part, int value) { on_gui_edit(p, part, value); },
+			[this](bool closing) { on_gui_idle(closing); },
+			[this](u32 addr, int, int value) { on_gui_edit_raw(addr, value); });
 	}
 
 	~mu_plugin()
 	{
 		gui_destroy();
+		m_engine.set_edit_handlers(nullptr, nullptr);
 	}
 
 	const clap_plugin_t *plugin() const { return &m_plugin; }
@@ -150,7 +168,11 @@ private:
 	{
 		m_rate = rate;
 		m_engine.set_output_rate(rate);
-		m_engine.start();
+		// **ここで起動を待ちきる。**activate は本スレッドで呼ばれ、時間がかかってよい
+		// ところなので、ここで待たないとホストは起動中の機械へ MIDI を流し始める。
+		// 流された分は溜めてあとでまとめて出すので、曲の頭が崩れる（issue #19）
+		if (!m_engine.wait_ready(30000))
+			m_engine.log_line("起動が終わらないまま演奏に入る");
 		return true;
 	}
 
@@ -202,7 +224,7 @@ private:
 		return true;
 	}
 
-	// ---- ノートの口。MIDI IN A / B
+	// ---- ノートの口。MIDI IN A-D
 
 	static const clap_plugin_note_ports_t s_note_ports;
 
@@ -214,22 +236,129 @@ private:
 		info->id = index;
 		info->supported_dialects = CLAP_NOTE_DIALECT_MIDI | CLAP_NOTE_DIALECT_CLAP;
 		info->preferred_dialect  = CLAP_NOTE_DIALECT_MIDI;
-		std::snprintf(info->name, sizeof(info->name), "%s",
-		              index == 0 ? "MIDI In A (Part 1-16)" : "MIDI In B (Part 17-32)");
+		static const char *NAMES[4] = { "MIDI In A (Part 1-16)", "MIDI In B (Part 17-32)",
+		                                "MIDI In C (Part 33-48)", "MIDI In D (Part 49-64)" };
+		std::snprintf(info->name, sizeof(info->name), "%s", NAMES[index & 3]);
 		return true;
 	}
 
-	// ---- パラメータ。出力レベルだけ（音源の外で掛ける素の掛け算）
+	// ---- パラメータ。出力レベル（音源の外で掛ける素の掛け算）と、XG の値
 
 	static const clap_plugin_params_t s_params;
 
-	void params_flush(const clap_input_events_t *in)
+	// 音を作っていないときに来たパラメータ（と、画面で触った値の知らせを出す口）
+	void params_flush(const clap_input_events_t *in, const clap_output_events_t *out)
 	{
-		if (!in)
+		if (in) {
+			m_xg.begin_block();
+			const uint32_t n = in->size(in);
+			for (uint32_t i = 0; i < n; i++) {
+				const clap_event_header_t *h = in->get(in, i);
+				if (!gain_event(h))
+					xg_event(h);
+			}
+		}
+		push_out(out);
+	}
+
+	// XG の値のイベントなら、値が変わったところだけ音源へ流して true
+	bool xg_event(const clap_event_header_t *h)
+	{
+		if (!h || h->space_id != CLAP_CORE_EVENT_SPACE_ID || h->type != CLAP_EVENT_PARAM_VALUE)
+			return false;
+		const auto *e = reinterpret_cast<const clap_event_param_value_t *>(h);
+		const int i = autom::index_of(e->param_id);
+		if (i < 0)
+			return false;
+		const autom::entry &en = autom::entries()[size_t(i)];
+		m_xg.host_value(i, autom::clamp_value(en, e->value), [&](int port, const uint8_t *bytes, int n) {
+			m_engine.midi(bytes, size_t(n), port);
+		});
+		return true;
+	}
+
+	// ---- 画面で触った値をホストへ（ジェスチャーの始まり・値・終わり）
+	//
+	// 画面の糸で溜め、ホストに request_flush を頼む。ホストは flush か process の出口で受け取る
+
+	struct out_event { clap_id id; double value; uint16_t type; };
+
+	void on_gui_edit(const xg::param &p, int part, int value)
+	{
+		bool began = false;
+		const int i = m_xg.gui_edit(p, part, value, began);
+		if (i >= 0)
+			tell_host(i, value, began);
+	}
+
+	void on_gui_edit_raw(u32 addr, int raw)
+	{
+		bool began = false;
+		int value = 0;
+		const int i = m_xg.gui_edit_raw(addr, raw, value, began);
+		if (i >= 0)
+			tell_host(i, value, began);
+	}
+
+	void tell_host(int i, int value, bool began)
+	{
+		const clap_id id = autom::entries()[size_t(i)].id;
+		{
+			std::lock_guard<std::mutex> lock(m_out_mutex);
+			if (began)
+				m_out.push_back({ id, 0.0, CLAP_EVENT_PARAM_GESTURE_BEGIN });
+			m_out.push_back({ id, double(value), CLAP_EVENT_PARAM_VALUE });
+		}
+		if (m_host_params)
+			m_host_params->request_flush(m_host);
+	}
+
+	void on_gui_idle(bool closing)
+	{
+		bool any = false;
+		m_xg.gui_idle(closing, [&](int i) {
+			std::lock_guard<std::mutex> lock(m_out_mutex);
+			m_out.push_back({ autom::entries()[size_t(i)].id, 0.0, CLAP_EVENT_PARAM_GESTURE_END });
+			any = true;
+		});
+		if (any && m_host_params)
+			m_host_params->request_flush(m_host);
+	}
+
+	// 溜めた知らせを出す。音声の糸からも呼ぶので、錠が取れなければ次に回す
+	void push_out(const clap_output_events_t *out)
+	{
+		if (!out)
 			return;
-		const uint32_t n = in->size(in);
-		for (uint32_t i = 0; i < n; i++)
-			gain_event(in->get(in, i));
+		std::unique_lock<std::mutex> lock(m_out_mutex, std::try_to_lock);
+		if (!lock.owns_lock() || m_out.empty())
+			return;
+		for (const out_event &ev : m_out) {
+			if (ev.type == CLAP_EVENT_PARAM_VALUE) {
+				clap_event_param_value_t e{};
+				e.header.size = sizeof(e);
+				e.header.time = 0;
+				e.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+				e.header.type = CLAP_EVENT_PARAM_VALUE;
+				e.param_id = ev.id;
+				e.cookie = nullptr;
+				e.note_id = -1;
+				e.port_index = -1;
+				e.channel = -1;
+				e.key = -1;
+				e.value = ev.value;
+				out->try_push(out, &e.header);
+			} else {
+				clap_event_param_gesture_t g{};
+				g.header.size = sizeof(g);
+				g.header.time = 0;
+				g.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+				g.header.type = ev.type;
+				g.param_id = ev.id;
+				out->try_push(out, &g.header);
+			}
+		}
+		m_out.clear();
 	}
 
 	// 出力レベルのイベントなら受け取って true
@@ -238,8 +367,9 @@ private:
 		if (!h || h->space_id != CLAP_CORE_EVENT_SPACE_ID || h->type != CLAP_EVENT_PARAM_VALUE)
 			return false;
 		const auto *e = reinterpret_cast<const clap_event_param_value_t *>(h);
-		if (e->param_id == kGainId)
-			m_engine.panel().set_gain(float(std::clamp(e->value, 0.0, 1.0)));
+		if (e->param_id != kGainId)
+			return false;                      // XG の値（xg_event）
+		m_engine.panel().set_gain(float(std::clamp(e->value, 0.0, 1.0)));
 		return true;
 	}
 
@@ -251,7 +381,7 @@ private:
 
 	bool save(const clap_ostream_t *s)
 	{
-		const int32_t version = 3;
+		const int32_t version = 4;
 		const float gain = m_engine.panel().gain();
 		m_engine.card_flush();   // プロジェクトを保存するときに、カードのファイルも揃える
 		if (!write_all(s, &version, sizeof(version)) || !write_all(s, &gain, sizeof(gain)))
@@ -266,7 +396,12 @@ private:
 		// 中身はプロジェクトに入れない（16MB から 128MB あるので）
 		const std::string card = m_engine.card_path();
 		const int32_t len = int32_t(card.size());
-		return write_all(s, &len, sizeof(len)) && (!len || write_all(s, card.data(), card.size()));
+		if (!write_all(s, &len, sizeof(len)) || (len && !write_all(s, card.data(), card.size())))
+			return false;
+		// 版 4: XG の値だけの控え（VST3 版と同じ）
+		const std::vector<uint8_t> setup = m_engine.save_xg_setup();
+		const int32_t sn = int32_t(setup.size());
+		return write_all(s, &sn, sizeof(sn)) && (!sn || write_all(s, setup.data(), setup.size()));
 	}
 
 	bool load(const clap_istream_t *s)
@@ -282,35 +417,53 @@ private:
 		if (version < 2)
 			return true;
 
+		// 機械まるごとの状態（起動中に保存された曲では長さが 0）
 		int32_t packed_size = 0;
-		if (!read_all(s, &packed_size, sizeof(packed_size)) || packed_size <= 0 || packed_size > (64 << 20))
-			return true;
-		std::vector<uint8_t> packed(static_cast<size_t>(packed_size));
-		if (!read_all(s, packed.data(), packed.size()))
-			return true;
 		std::vector<u8> blob;
-		if (!state_unpack(packed.data(), packed.size(), blob))
-			return true;
-
-		// 起動が終わっていないと戻せない。終わるまで待つ
-		for (int i = 0; i < 300 && m_engine.state() == smu2000::vst3::status::loading; i++)
-			std::this_thread::sleep_for(std::chrono::milliseconds(10));
-		m_engine.load_state(blob.data(), blob.size());
+		if (read_all(s, &packed_size, sizeof(packed_size)) && packed_size > 0 && packed_size <= (64 << 20)) {
+			std::vector<uint8_t> packed(static_cast<size_t>(packed_size));
+			if (!read_all(s, packed.data(), packed.size()) || !state_unpack(packed.data(), packed.size(), blob))
+				blob.clear();
+		}
 
 		// 版 3 から: 差していた SmartMedia のファイル（UTF-8）。無くなっていたら差さない
+		std::string card;
 		if (version >= 3) {
 			int32_t len = 0;
 			if (read_all(s, &len, sizeof(len)) && len > 0 && len < 4096) {
 				std::string path(size_t(len), '\0');
-				if (read_all(s, path.data(), path.size())) {
-					std::string err;
-					if (!m_engine.card_insert(path, err))
-						m_engine.log_line(("SmartMedia を差せない: " + err).c_str());
-				}
+				if (read_all(s, path.data(), path.size()))
+					card = path;
 			}
-		} else if (!m_engine.card_path().empty()) {
+		}
+		// 版 4 から: XG の値だけの控え。機械まるごとの状態が読めないときに使う
+		std::vector<uint8_t> setup;
+		if (version >= 4) {
+			int32_t len = 0;
+			if (read_all(s, &len, sizeof(len)) && len > 0 && len < (1 << 20)) {
+				setup.resize(size_t(len));
+				if (!read_all(s, setup.data(), setup.size()))
+					setup.clear();
+			}
+		}
+
+		// 起動が終わっていないと戻せない。終わるまで待つ
+		m_engine.wait_ready(3000);
+		if (!blob.empty() || !setup.empty())
+			m_engine.load_state(blob.empty() ? nullptr : blob.data(), blob.size(),
+			                    setup.empty() ? nullptr : setup.data(), setup.size());
+
+		if (!card.empty()) {
+			std::string err;
+			if (!m_engine.card_insert(card, err))
+				m_engine.log_line(("SmartMedia を差せない: " + err).c_str());
+		} else if (version < 3 && !m_engine.card_path().empty()) {
 			m_engine.card_eject();
 		}
+		// XG の値が替わったので、ホストに読み直させる
+		m_xg.forget_recent();
+		if (m_host_params)
+			m_host_params->rescan(m_host, CLAP_PARAM_RESCAN_VALUES);
 		return true;
 	}
 
@@ -356,6 +509,9 @@ private:
 	const clap_host_t     *m_host = nullptr;
 	const clap_host_params_t *m_host_params = nullptr;
 	engine                 m_engine;
+	autom::host            m_xg{m_engine};
+	std::mutex             m_out_mutex;
+	std::vector<out_event> m_out;           // 画面で触った値の、ホストへの知らせ（m_out_mutex）
 	plug_view             *m_view = nullptr;
 	double                 m_rate = smu2000::vst3::NATIVE_RATE;
 	// 出力レベルは bridge が持つ。ここは 1 サンプルずつ寄せる途中の値
@@ -394,40 +550,78 @@ const clap_plugin_note_ports_t mu_plugin::s_note_ports = {
 	},
 };
 
+// 並びは出力レベル、XG の値（automation.h の表の順）。XG の値は XG の整数のまま（min〜max）
 const clap_plugin_params_t mu_plugin::s_params = {
-	[](const clap_plugin_t *) -> uint32_t { return 1; },
+	[](const clap_plugin_t *) -> uint32_t { return 1 + uint32_t(autom::entries().size()); },
 	[](const clap_plugin_t *, uint32_t index, clap_param_info_t *info) {
-		if (index != 0 || !info)
+		if (!info || index > autom::entries().size())
 			return false;
 		std::memset(info, 0, sizeof(*info));
-		info->id            = kGainId;
-		info->flags         = CLAP_PARAM_IS_AUTOMATABLE;
-		info->min_value     = 0.0;
-		info->max_value     = 1.0;
-		info->default_value = 1.0;
-		std::snprintf(info->name, sizeof(info->name), "Output");
+		if (index == 0) {
+			info->id            = kGainId;
+			info->flags         = CLAP_PARAM_IS_AUTOMATABLE;
+			info->min_value     = 0.0;
+			info->max_value     = 1.0;
+			info->default_value = 1.0;
+			std::snprintf(info->name, sizeof(info->name), "Output");
+			return true;
+		}
+		const autom::entry &e = autom::entries()[index - 1];
+		info->id            = e.id;
+		// インサーションのパラメータは種類で範囲が変わるので、割合（0-1000）の連続の値
+		info->flags         = CLAP_PARAM_IS_AUTOMATABLE |
+		                      (e.k == autom::kind::insertion ? 0 : CLAP_PARAM_IS_STEPPED);
+		info->min_value     = autom::lo(e);
+		info->max_value     = autom::hi(e);
+		info->default_value = autom::def(e);
+		std::snprintf(info->name, sizeof(info->name), "%s", e.name.c_str());
+		std::snprintf(info->module, sizeof(info->module), "%s",
+		              e.k == autom::kind::insertion ? e.group.c_str() : e.is_part ? ("Parts/" + e.group).c_str() : "Master");
 		return true;
 	},
 	[](const clap_plugin_t *p, clap_id id, double *out) {
-		if (id != kGainId || !out)
+		if (!out)
 			return false;
-		*out = self(p)->m_engine.panel().gain();
+		if (id == kGainId) {
+			*out = self(p)->m_engine.panel().gain();
+			return true;
+		}
+		const int i = autom::index_of(id);
+		if (i < 0)
+			return false;
+		*out = double(self(p)->m_xg.shown_value(i));
 		return true;
 	},
-	[](const clap_plugin_t *, clap_id id, double v, char *buf, uint32_t cap) {
-		if (id != kGainId || !buf || !cap)
+	[](const clap_plugin_t *p, clap_id id, double v, char *buf, uint32_t cap) {
+		if (!buf || !cap)
 			return false;
-		std::snprintf(buf, cap, "%.0f %%", v * 100.0);
+		if (id == kGainId) {
+			std::snprintf(buf, cap, "%.0f %%", v * 100.0);
+			return true;
+		}
+		const int i = autom::index_of(id);
+		if (i < 0)
+			return false;
+		const autom::entry &e = autom::entries()[size_t(i)];
+		std::snprintf(buf, cap, "%s", autom::text(e, autom::clamp_value(e, v), self(p)->m_xg.view_ram()).c_str());
 		return true;
 	},
-	[](const clap_plugin_t *, clap_id id, const char *text, double *out) {
-		if (id != kGainId || !text || !out)
+	[](const clap_plugin_t *p, clap_id id, const char *text, double *out) {
+		if (!text || !out)
 			return false;
-		*out = std::clamp(std::atof(text) / 100.0, 0.0, 1.0);
+		if (id == kGainId) {
+			*out = std::clamp(std::atof(text) / 100.0, 0.0, 1.0);
+			return true;
+		}
+		const int i = autom::index_of(id);
+		int value = 0;
+		if (i < 0 || !autom::parse(autom::entries()[size_t(i)], text, value, self(p)->m_xg.view_ram()))
+			return false;
+		*out = double(value);
 		return true;
 	},
-	[](const clap_plugin_t *p, const clap_input_events_t *in, const clap_output_events_t *) {
-		self(p)->params_flush(in);
+	[](const clap_plugin_t *p, const clap_input_events_t *in, const clap_output_events_t *out) {
+		self(p)->params_flush(in, out);
 	},
 };
 
@@ -516,7 +710,7 @@ clap_process_status mu_plugin::process(const clap_process_t *pr)
 	clap_audio_buffer_t *out = pr->audio_outputs_count > 0 ? &pr->audio_outputs[0] : nullptr;
 	// 64bit 浮動小数は受けないと答えてある。それでも来たら音を出さない
 	if (!out || !out->data32 || out->channel_count < 1) {
-		params_flush(pr->in_events);
+		params_flush(pr->in_events, pr->out_events);
 		return CLAP_PROCESS_CONTINUE;
 	}
 	m_left  = out->data32[0];
@@ -541,6 +735,7 @@ clap_process_status mu_plugin::process(const clap_process_t *pr)
 	}
 
 	// イベントは時刻順に来る。その時刻まで音を作ってから流す
+	m_xg.begin_block();
 	if (const clap_input_events_t *ev = pr->in_events) {
 		const uint32_t count = ev->size(ev);
 		for (uint32_t i = 0; i < count; i++) {
@@ -571,17 +766,19 @@ clap_process_status mu_plugin::process(const clap_process_t *pr)
 
 	m_left = m_right = nullptr;
 	m_in_l = m_in_r = nullptr;
+	// 画面で触った値の知らせ
+	push_out(pr->out_events);
 	return CLAP_PROCESS_CONTINUE;
 }
 
 void mu_plugin::event(const clap_event_header_t *h)
 {
-	if (gain_event(h))
+	if (gain_event(h) || xg_event(h))
 		return;
 	switch (h->type) {
 	case CLAP_EVENT_MIDI: {
 		const auto *e = reinterpret_cast<const clap_event_midi_t *>(h);
-		const int port = e->port_index == 1 ? 1 : 0;
+		const int port = port_of(e->port_index);
 		if ((e->data[0] & 0xf0) == 0x90 && e->data[2])
 			m_sounded[port] |= uint16_t(1u << (e->data[0] & 15));
 		m_engine.midi(e->data, size_t(midi_length(e->data[0])), port);
@@ -590,7 +787,7 @@ void mu_plugin::event(const clap_event_header_t *h)
 	case CLAP_EVENT_MIDI_SYSEX: {
 		const auto *e = reinterpret_cast<const clap_event_midi_sysex_t *>(h);
 		if (e->buffer && e->size)
-			m_engine.midi(e->buffer, e->size, e->port_index == 1 ? 1 : 0);
+			m_engine.midi(e->buffer, e->size, port_of(e->port_index));
 		break;
 	}
 	// CLAP 流のノート。チャンネルやキーが「どれでも」（-1）なら MIDI にできないので捨てる
@@ -604,7 +801,7 @@ void mu_plugin::event(const clap_event_header_t *h)
 		int v = int(std::lround(e->velocity * 127.0));
 		v = on ? std::clamp(v, 1, 127) : std::clamp(v, 0, 127);
 		const uint8_t msg[3] = { uint8_t((on ? 0x90 : 0x80) | e->channel), uint8_t(e->key), uint8_t(v) };
-		const int port = e->port_index == 1 ? 1 : 0;
+		const int port = port_of(e->port_index);
 		if (on && v)
 			m_sounded[port] |= uint16_t(1u << (e->channel & 15));
 		m_engine.midi(msg, 3, port);

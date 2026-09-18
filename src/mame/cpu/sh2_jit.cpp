@@ -518,7 +518,9 @@ sh2_device::jit::code_t sh2_device::jit::compile(sh2_device &cpu, u32 pc)
 		     sz == 2 ? reinterpret_cast<void *>(&sh2_device::jit_rw) : reinterpret_cast<void *>(&sh2_device::jit_rl));
 		a.addrsp(8);
 #else
-		a.mov64(RCX, RBX);
+		if constexpr (sysv)
+			a.mov64(ARG1, RDX);        // address
+		a.mov64(ARG0, RBX);
 		call(sz == 1 ? reinterpret_cast<void *>(&sh2_device::jit_rb) :
 		     sz == 2 ? reinterpret_cast<void *>(&sh2_device::jit_rw) : reinterpret_cast<void *>(&sh2_device::jit_rl));
 #endif
@@ -879,7 +881,8 @@ sh2_device::jit::code_t sh2_device::jit::compile(sh2_device &cpu, u32 pc)
 			call(reinterpret_cast<void *>(&sh2_device::jit_trace));
 			a.addrsp(4);
 #else
-			a.mov64(RCX, RBX);
+			a.mov64(ARG0, RBX);
+			a.imm32(ARG1, at);
 			call(reinterpret_cast<void *>(&sh2_device::jit_trace));
 #endif
 		}
@@ -915,8 +918,8 @@ sh2_device::jit::code_t sh2_device::jit::compile(sh2_device &cpu, u32 pc)
 			call(reinterpret_cast<void *>(&sh2_device::jit_exec));
 			a.addrsp(8);
 #else
-			a.mov64(RCX, RBX);
-			a.imm32(RDX, op);
+			a.mov64(ARG0, RBX);
+			a.imm32(ARG1, op);
 			call(reinterpret_cast<void *>(&sh2_device::jit_exec));
 #endif
 			r = k == kind::delayed ? delayed : k == kind::ends ? ends : memop;
@@ -975,7 +978,7 @@ sh2_device::jit::code_t sh2_device::jit::compile(sh2_device &cpu, u32 pc)
 	call(reinterpret_cast<void *>(&sh2_device::jit_irq));
 	a.addrsp(4);
 #else
-	a.mov64(RCX, RBX);
+	a.mov64(ARG0, RBX);
 	call(reinterpret_cast<void *>(&sh2_device::jit_irq));
 #endif
 	a.patch(no_irq1);

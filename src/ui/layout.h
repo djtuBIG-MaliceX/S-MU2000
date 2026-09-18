@@ -95,6 +95,7 @@ struct layout
 	// 当たりの四角だけ持っている
 	double card[4];                        // カードの差し込み口。MIDI ファイル再生
 	double adin[4];                        // A/D INPUT のジャック
+	double phones[4];                      // PHONES のジャック。音の出口（デジタル / アナログ）を選ぶ
 
 	std::vector<deco> decos;
 

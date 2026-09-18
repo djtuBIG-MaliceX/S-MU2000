@@ -15,12 +15,19 @@
 // になる。後者のために IMidiMapping で「チャンネル×番号 → パラメータ番号」を
 // 教えてやる必要がある。受け取った側でまた MIDI のバイト列に組み直して音源へ渡す。
 //
-// MIDI の入力バスは **2 本**。実機の MIDI IN A（パート 1-16）と B（パート 17-32）
-// に当たる。パラメータも口ごとに 16ch × 131 本ずつ持つ。
+// MIDI の入力バスは **4 本**。実機の MIDI IN A-D（パート 1-16 / 17-32 / 33-48 / 49-64）
+// に当たる。パラメータも口ごとに 16ch × 131 本ずつ持つ（一覧には並べない）。
+//
+// それとは別に、XG の値（パートの音量・フィルタ・EG・EQ、マスター EQ など）を名前付きの
+// パラメータとして見せる（automation.h、doc/automation.md）。ホストのオートメーションで
+// 動かせ、画面（パネル・PC の窓）で触った値は beginEdit / performEdit / endEdit でホストへ伝える。
 
+#include "automation.h"
+#include "automation_host.h"
 #include "engine.h"
 #include "state.h"
 #include "view.h"
+#include "ui/xg_state.h"
 
 #include "pluginterfaces/base/funknown.h"
 #include "pluginterfaces/base/ibstream.h"
@@ -31,12 +38,15 @@
 #include "pluginterfaces/vst/ivstevents.h"
 #include "pluginterfaces/vst/ivstmidicontrollers.h"
 #include "pluginterfaces/vst/ivstparameterchanges.h"
+#include "pluginterfaces/vst/ivstunits.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <memory>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -117,11 +127,40 @@ constexpr ParamID kStatusId = 4097;
 // C・D は実機では USB だけの口
 constexpr int32   kPorts      = mu2000::MIDI_PORTS;
 constexpr ParamID kPortBase[4] = { 0, 8192, 16384, 24576 };
-constexpr int32   kParamCount = kPorts * kMidiParams + 2;
+// MIDI の口のパラメータと Output / Status。XG の値はその後ろに並べる（xg_first）
+constexpr int32   kMidiParamCount = kPorts * kMidiParams + 2;
+constexpr int32   kXgFirst        = kMidiParamCount;
+
+namespace autom = smu2000::automation;
+
+int32 param_count() { return kMidiParamCount + int32(autom::entries().size()); }
+
+// XG の値のユニット。パートごとに 1 つと、マスター。MIDI のチャンネルのユニット（1-64）とは別
+constexpr UnitID kXgPartUnit   = 1000;     // + パート番号
+constexpr UnitID kXgMasterUnit = 2000;
+constexpr UnitID kXgInsUnit    = 3000;     // + インサーションの番号（0-3）
+
 
 ParamID param_of(int32 port, int32 ch, int32 ctrl)
 {
 	return ParamID(kPortBase[port & 3] + ch * kCtrlCount + ctrl);
+}
+
+// ---- ユニットとプログラム一覧（IUnitInfo）
+//
+// Cubase は MIDI のプログラムチェンジを IMidiMapping では流さない。
+// 「MIDI チャンネル → ユニット」を getUnitByBus で引き、そのユニットに属していて
+// kIsProgramChange の印が付いたパラメータへ、プログラム一覧の番号として渡してくる。
+// 印もユニットも無いと黙って捨てる。REAPER などは IMidiMapping の 130 番で流すので、
+// そちらはそのまま残す。
+//
+// ユニットは根（0）の下に、口 × チャンネルの 64 個（1-64）。一覧は 128 音の 1 つを共有する
+constexpr ProgramListID kProgramList = 1;
+constexpr int32 kPrograms = 128;
+
+UnitID unit_of(int32 port, int32 ch)
+{
+	return UnitID(1 + (port & 3) * kChannels + ch);
 }
 
 // パラメータ番号を、口・チャンネル・番号と m_value の位置に戻す。
@@ -176,7 +215,7 @@ void set_str(String128 dst, const char *ascii)
 // ---- 本体
 
 class mu_plugin : public IComponent, public IAudioProcessor,
-                  public IEditController, public IMidiMapping
+                  public IEditController, public IMidiMapping, public IUnitInfo
 {
 public:
 	mu_plugin()
@@ -188,9 +227,20 @@ public:
 		m_msgs.reserve(8192);
 		m_engine.set_output_rate(smu2000::vst3::NATIVE_RATE);
 		m_qpc_freq = perf_frequency();
+
+		// 画面で値を触ったら、ホストへ伝える
+		m_engine.set_edit_handlers(
+			[this](const xg::param &p, int part, int value) { on_gui_edit(p, part, value); },
+			[this](bool closing) { on_gui_idle(closing); },
+			[this](u32 addr, int, int value) { on_gui_edit_raw(addr, value); });
 	}
 
-	virtual ~mu_plugin() = default;
+	virtual ~mu_plugin()
+	{
+		m_engine.set_edit_handlers(nullptr, nullptr);
+		if (m_handler)
+			m_handler->release();
+	}
 
 	// ---- FUnknown
 
@@ -214,6 +264,9 @@ public:
 		}
 		if (FUnknownPrivate::iidEqual(_iid, IMidiMapping::iid)) {
 			addRef(); *obj = static_cast<IMidiMapping *>(this); return kResultOk;
+		}
+		if (FUnknownPrivate::iidEqual(_iid, IUnitInfo::iid)) {
+			addRef(); *obj = static_cast<IUnitInfo *>(this); return kResultOk;
 		}
 		*obj = nullptr;
 		return kNoInterface;
@@ -304,7 +357,11 @@ public:
 	tresult PLUGIN_API setActive(TBool state) override
 	{
 		if (state) {
-			m_engine.start();
+			// **ここで起動を待ちきる。**setActive は本スレッドで呼ばれ、時間がかかって
+			// よいところなので、ここで待たないとホストは起動中の機械へ MIDI を流し始める。
+			// 流された分は溜めてあとでまとめて出すので、曲の頭が崩れる（issue #19）
+			if (!m_engine.wait_ready(30000))
+				m_engine.log_line("起動が終わらないまま演奏に入る");
 		} else {
 			m_hush.store(true);
 			m_engine.set_processing(false);
@@ -328,7 +385,13 @@ public:
 		              1000.0 * double(m_worst_ticks) / double(m_qpc_freq),
 		              (unsigned long long)m_late);
 		m_engine.log_line(line);
-		m_busy_ticks = m_produced = m_worst_ticks = m_late = 0;
+		// 1 ブロックに MIDI が溜めきれないほど届いた（8192 件）ときは、捨てた数を書く
+		if (m_dropped) {
+			std::snprintf(line, sizeof(line), "1 ブロックの MIDI が多すぎて捨てたメッセージ %llu 件",
+			              (unsigned long long)m_dropped);
+			m_engine.log_line(line);
+		}
+		m_busy_ticks = m_produced = m_worst_ticks = m_late = m_dropped = 0;
 	}
 
 	tresult PLUGIN_API setState(IBStream *stream) override
@@ -345,39 +408,56 @@ public:
 		if (version < 2)
 			return kResultOk;   // 古い形。出力レベルだけ
 
-		// 機械まるごとの状態。詰めた形で入っている
+		// 機械まるごとの状態。詰めた形で入っている（起動中に保存された曲では長さが 0）
 		int32 packed_size = 0;
-		if (stream->read(&packed_size, sizeof(packed_size), &got) != kResultOk ||
-		    got != sizeof(packed_size) || packed_size <= 0 || packed_size > (64 << 20))
-			return kResultOk;
-		std::vector<uint8_t> packed;
-		packed.resize(size_t(packed_size));
-		if (stream->read(packed.data(), packed_size, &got) != kResultOk ||
-		    got != packed_size)
-			return kResultOk;
 		std::vector<u8> blob;
-		if (!state_unpack(packed.data(), packed.size(), blob))
-			return kResultOk;
-
-		// 起動が終わっていないと戻せない。終わるまで待つ
-		for (int i = 0; i < 300 && m_engine.state() == smu2000::vst3::status::loading; i++)
-			std::this_thread::sleep_for(std::chrono::milliseconds(10));
-		m_engine.load_state(blob.data(), blob.size());
+		if (stream->read(&packed_size, sizeof(packed_size), &got) == kResultOk &&
+		    got == sizeof(packed_size) && packed_size > 0 && packed_size <= (64 << 20)) {
+			std::vector<uint8_t> packed(static_cast<size_t>(packed_size));
+			if (stream->read(packed.data(), packed_size, &got) != kResultOk || got != packed_size ||
+			    !state_unpack(packed.data(), packed.size(), blob))
+				blob.clear();
+		}
 
 		// 版 3 から: 差していた SmartMedia のファイル（UTF-8）。無くなっていたら差さない
+		std::string card;
 		if (version >= 3) {
 			int32 len = 0;
 			if (stream->read(&len, sizeof(len), &got) == kResultOk && got == sizeof(len) && len > 0 && len < 4096) {
 				std::string path(size_t(len), '\0');
-				if (stream->read(path.data(), len, &got) == kResultOk && got == len) {
-					std::string err;
-					if (!m_engine.card_insert(path, err))
-						m_engine.log_line(("SmartMedia を差せない: " + err).c_str());
-				}
+				if (stream->read(path.data(), len, &got) == kResultOk && got == len)
+					card = path;
 			}
-		} else if (!m_engine.card_path().empty()) {
+		}
+		// 版 4 から: XG の値だけの控え（engine::save_xg_setup）。機械まるごとの状態が読めないときに使う
+		std::vector<uint8_t> setup;
+		if (version >= 4) {
+			int32 len = 0;
+			if (stream->read(&len, sizeof(len), &got) == kResultOk && got == sizeof(len) &&
+			    len > 0 && len < (1 << 20)) {
+				setup.resize(size_t(len));
+				if (stream->read(setup.data(), len, &got) != kResultOk || got != len)
+					setup.clear();
+			}
+		}
+
+		// 起動が終わっていないと戻せない。終わるまで待つ
+		m_engine.wait_ready(3000);
+		if (!blob.empty() || !setup.empty())
+			m_engine.load_state(blob.empty() ? nullptr : blob.data(), blob.size(),
+			                    setup.empty() ? nullptr : setup.data(), setup.size());
+
+		if (!card.empty()) {
+			std::string err;
+			if (!m_engine.card_insert(card, err))
+				m_engine.log_line(("SmartMedia を差せない: " + err).c_str());
+		} else if (version < 3 && !m_engine.card_path().empty()) {
 			m_engine.card_eject();
 		}
+		// XG の値が替わったので、ホストの持っている値を読み直させる
+		m_xg.forget_recent();
+		if (m_handler)
+			m_handler->restartComponent(kParamValuesChanged);
 		return kResultOk;
 	}
 
@@ -387,7 +467,7 @@ public:
 		// 開き直しても、音色もエフェクトもそのまま戻る
 		if (!stream)
 			return kResultFalse;
-		int32 version = 3;
+		int32 version = 4;
 		float gain = m_engine.panel().gain();
 		m_engine.card_flush();   // プロジェクトを保存するときに、カードのファイルも揃える
 		int32 written = 0;
@@ -407,6 +487,13 @@ public:
 		stream->write(&len, sizeof(len), &written);
 		if (len)
 			stream->write(const_cast<char *>(card.data()), len, &written);
+		// 版 4: XG の値だけの控え。S-MU2000 の版が変わって機械まるごとの状態が読めなくなっても、
+		// これで音色とエフェクトの設定は戻る（数 KB）
+		const std::vector<uint8_t> setup = m_engine.save_xg_setup();
+		int32 sn = int32(setup.size());
+		stream->write(&sn, sizeof(sn), &written);
+		if (sn)
+			stream->write(const_cast<uint8_t *>(setup.data()), sn, &written);
 		return kResultOk;
 	}
 
@@ -461,12 +548,27 @@ public:
 
 	tresult PLUGIN_API setComponentState(IBStream *) override { return kResultOk; }
 
-	int32 PLUGIN_API getParameterCount() override { return kParamCount; }
+	int32 PLUGIN_API getParameterCount() override { return param_count(); }
 
 	tresult PLUGIN_API getParameterInfo(int32 index, ParameterInfo &info) override
 	{
-		if (index < 0 || index >= kParamCount)
+		if (index < 0 || index >= param_count())
 			return kInvalidArgument;
+		// XG の値（後ろに並べてある）
+		if (index >= kXgFirst) {
+			const autom::entry &e = autom::entries()[size_t(index - kXgFirst)];
+			std::memset(&info, 0, sizeof(info));
+			info.id = e.id;
+			set_str(info.title, e.name.c_str());
+			set_str(info.shortTitle, e.name.c_str());
+			// インサーションのパラメータは種類で範囲が変わるので、目盛りは付けない（割合で連続）
+			info.stepCount = e.k == autom::kind::insertion ? 0 : autom::steps(e);
+			info.defaultNormalizedValue = autom::to_normalized(e, autom::def(e));
+			info.unitId = e.k == autom::kind::insertion ? kXgInsUnit + e.block
+			            : e.is_part ? kXgPartUnit + e.part : kXgMasterUnit;
+			info.flags = ParameterInfo::kCanAutomate;
+			return kResultOk;
+		}
 		// 並びは A の 2096 本、Output、Status、B・C・D の 2096 本ずつ。
 		// 前からあるものの位置を変えないよう、B 以降は後ろに足した
 		if (index == kMidiParams || index == kMidiParams + 1) {
@@ -510,6 +612,11 @@ public:
 		info.unitId = 0;   // kRootUnitId
 		// 4192 本もあるので、一覧に並べさせない
 		info.flags = ParameterInfo::kCanAutomate | ParameterInfo::kIsHidden;
+		// プログラムチェンジはそのチャンネルのユニットに属させ、印を付ける（Cubase 向け。上の unit_of）
+		if (ctrl == 130) {
+			info.unitId = unit_of(port, ch);
+			info.flags |= ParameterInfo::kIsProgramChange | ParameterInfo::kIsList;
+		}
 		return kResultOk;
 	}
 
@@ -525,6 +632,10 @@ public:
 			char g[32];
 			std::snprintf(g, sizeof(g), "%.0f", v * 100.0);
 			set_str(str, g);
+			return kResultOk;
+		}
+		if (const autom::entry *e = xg_entry(id)) {
+			set_str(str, autom::text(*e, autom::to_value(*e, v), m_xg.view_ram()).c_str());
 			return kResultOk;
 		}
 		int32 port, ch, ctrl, slot;
@@ -545,14 +656,21 @@ public:
 			return kInvalidArgument;
 		if (id == kGainId || id == kStatusId)
 			return kResultFalse;
-		int32 port, ch, ctrl, slot;
-		if (!midi_param(id, port, ch, ctrl, slot))
-			return kInvalidArgument;
 		char buf[32];
 		int i = 0;
 		for (; i < 31 && str[i]; i++)
 			buf[i] = char(str[i]);
 		buf[i] = 0;
+		if (const autom::entry *e = xg_entry(id)) {
+			int value = 0;
+			if (!autom::parse(*e, buf, value, m_xg.view_ram()))
+				return kResultFalse;
+			v = autom::to_normalized(*e, value);
+			return kResultOk;
+		}
+		int32 port, ch, ctrl, slot;
+		if (!midi_param(id, port, ch, ctrl, slot))
+			return kInvalidArgument;
 		const double plain = std::atof(buf);
 		v = ctrl == 129 ? std::clamp((plain + 8192.0) / 16383.0, 0.0, 1.0)
 		                : std::clamp(plain / 127.0, 0.0, 1.0);
@@ -563,6 +681,7 @@ public:
 	{
 		if (id == kGainId)   return v * 100.0;
 		if (id == kStatusId) return std::lround(v * 2.0);
+		if (const autom::entry *e = xg_entry(id)) return autom::to_value(*e, v);
 		return is_bend(id) ? std::lround(v * 16383.0) - 8192.0
 		                   : std::lround(v * 127.0);
 	}
@@ -571,6 +690,7 @@ public:
 	{
 		if (id == kGainId)   return std::clamp(plain / 100.0, 0.0, 1.0);
 		if (id == kStatusId) return std::clamp(plain / 2.0, 0.0, 1.0);
+		if (const autom::entry *e = xg_entry(id)) return autom::to_normalized(*e, autom::clamp_value(*e, plain));
 		return is_bend(id) ? std::clamp((plain + 8192.0) / 16383.0, 0.0, 1.0)
 		                   : std::clamp(plain / 127.0, 0.0, 1.0);
 	}
@@ -586,6 +706,9 @@ public:
 			default:                             return 1.0;
 			}
 		}
+		const int xi = autom::index_of(uint32_t(id));
+		if (xi >= 0)
+			return m_xg.shown_normalized(xi);
 		int32 port, ch, ctrl, slot;
 		return midi_param(id, port, ch, ctrl, slot) ? m_value[slot] : 0.0;
 	}
@@ -595,6 +718,12 @@ public:
 		if (id == kGainId) { m_engine.panel().set_gain(float(std::clamp(v, 0.0, 1.0))); return kResultOk; }
 		if (id == kStatusId)
 			return kResultFalse;   // 読むだけ
+		const int xi = autom::index_of(uint32_t(id));
+		if (xi >= 0) {
+			// 音源へは process に来る値で入れる。ここは表示のための控えだけ
+			m_xg.remember(xi, autom::to_value(autom::entries()[size_t(xi)], v), v);
+			return kResultOk;
+		}
 		int32 port, ch, ctrl, slot;
 		if (!midi_param(id, port, ch, ctrl, slot))
 			return kInvalidArgument;
@@ -602,7 +731,18 @@ public:
 		return kResultOk;
 	}
 
-	tresult PLUGIN_API setComponentHandler(IComponentHandler *) override { return kResultOk; }
+	tresult PLUGIN_API setComponentHandler(IComponentHandler *handler) override
+	{
+		if (handler == m_handler)
+			return kResultOk;
+		end_all_edits();
+		if (handler)
+			handler->addRef();
+		if (m_handler)
+			m_handler->release();
+		m_handler = handler;
+		return kResultOk;
+	}
 
 	// 画面。実機のフロントパネル風。中身は gui.exe と同じ ui::panel
 	IPlugView *PLUGIN_API createView(FIDString name) override
@@ -627,31 +767,202 @@ public:
 		return kResultTrue;
 	}
 
+	// ---- IUnitInfo（Cubase のプログラムチェンジ。上の unit_of）
+
+	int32 PLUGIN_API getUnitCount() override { return 1 + kPorts * kChannels + 64 + 1 + 4; }
+
+	tresult PLUGIN_API getUnitInfo(int32 unitIndex, UnitInfo &info) override
+	{
+		if (unitIndex < 0 || unitIndex >= getUnitCount())
+			return kInvalidArgument;
+		std::memset(&info, 0, sizeof(info));
+		if (unitIndex == 0) {
+			info.id = kRootUnitId;
+			info.parentUnitId = kNoParentUnitId;
+			set_str(info.name, "Root");
+			info.programListId = kNoProgramListId;
+			return kResultOk;
+		}
+		// XG の値のユニット（パート 64 とマスター）
+		if (unitIndex > kPorts * kChannels) {
+			const int32 j = unitIndex - 1 - kPorts * kChannels;
+			char name[32];
+			if (j < 64)
+				std::snprintf(name, sizeof(name), "XG Part %c%d", char('A' + j / 16), j % 16 + 1);
+			else if (j == 64)
+				std::snprintf(name, sizeof(name), "XG Master");
+			else
+				std::snprintf(name, sizeof(name), "XG Insertion %d", j - 64);
+			info.id = j < 64 ? kXgPartUnit + j : j == 64 ? kXgMasterUnit : kXgInsUnit + (j - 65);
+			info.parentUnitId = kRootUnitId;
+			set_str(info.name, name);
+			info.programListId = kNoProgramListId;
+			return kResultOk;
+		}
+		const int32 port = (unitIndex - 1) / kChannels, ch = (unitIndex - 1) % kChannels;
+		char name[32];
+		std::snprintf(name, sizeof(name), "%c Ch%d", char('A' + port), ch + 1);
+		info.id = unit_of(port, ch);
+		info.parentUnitId = kRootUnitId;
+		set_str(info.name, name);
+		info.programListId = kProgramList;
+		return kResultOk;
+	}
+
+	int32 PLUGIN_API getProgramListCount() override { return 1; }
+
+	tresult PLUGIN_API getProgramListInfo(int32 listIndex, ProgramListInfo &info) override
+	{
+		if (listIndex != 0)
+			return kInvalidArgument;
+		std::memset(&info, 0, sizeof(info));
+		info.id = kProgramList;
+		set_str(info.name, "Program");
+		info.programCount = kPrograms;
+		return kResultOk;
+	}
+
+	tresult PLUGIN_API getProgramName(ProgramListID listId, int32 programIndex, String128 name) override
+	{
+		if (listId != kProgramList || programIndex < 0 || programIndex >= kPrograms)
+			return kInvalidArgument;
+		char buf[16];
+		std::snprintf(buf, sizeof(buf), "%03d", programIndex + 1);
+		set_str(name, buf);
+		return kResultOk;
+	}
+
+	tresult PLUGIN_API getProgramInfo(ProgramListID, int32, Steinberg::Vst::CString, String128) override
+	{ return kNotImplemented; }
+
+	tresult PLUGIN_API hasProgramPitchNames(ProgramListID, int32) override { return kResultFalse; }
+
+	tresult PLUGIN_API getProgramPitchName(ProgramListID, int32, int16, String128) override
+	{ return kNotImplemented; }
+
+	UnitID PLUGIN_API getSelectedUnit() override { return kRootUnitId; }
+
+	tresult PLUGIN_API selectUnit(UnitID) override { return kResultOk; }
+
+	tresult PLUGIN_API getUnitByBus(MediaType type, BusDirection dir, int32 busIndex,
+	                                int32 channel, UnitID &unitId) override
+	{
+		if (type != kEvent || dir != kInput || busIndex < 0 || busIndex >= kPorts ||
+		    channel < 0 || channel >= kChannels)
+			return kResultFalse;
+		unitId = unit_of(busIndex, channel);
+		return kResultTrue;
+	}
+
+	tresult PLUGIN_API setUnitProgramData(int32, int32, IBStream *) override
+	{ return kNotImplemented; }
+
 private:
 	// process の中で時刻順に並べ直すための入れ物。
-	// 短いものは中に持ち、システムエクスクルーシブはホストの領域を指す
+	// 短いもの（XG の値のパラメータチェンジも）は中に持ち、ホストのシステムエクスクルーシブはホストの領域を指す
 	struct msg {
 		int32          off;
 		int32          seq;
-		uint8          port;          // 0 が MIDI IN A、1 が B
+		uint8          port;          // 0 が MIDI IN A、1 が B、2 が C、3 が D
 		uint8          n;
-		uint8          b[3];
+		uint8          b[16];
 		const uint8   *sysex;
 		uint32         sysex_len;
 	};
 
 	void queue(int32 port, int32 off, uint8 a, uint8 b = 0, uint8 c = 0, int n = 3)
 	{
-		if (m_msgs.size() >= m_msgs.capacity())
+		if (m_msgs.size() >= m_msgs.capacity()) {
+			m_dropped++;
 			return;
+		}
 		// 鳴らしたチャンネルを覚えておく。止めるときはここだけに流す（下の m_hush）
 		if ((a & 0xf0) == 0x90 && c)
-			m_sounded[port ? 1 : 0] |= uint16(1u << (a & 15));
-		m_msgs.push_back({ off, int32(m_msgs.size()), uint8(port), uint8(n), { a, b, c }, nullptr, 0 });
+			m_sounded[port & 3] |= uint16(1u << (a & 15));
+		msg m{ off, int32(m_msgs.size()), uint8(port), uint8(n), {}, nullptr, 0 };
+		m.b[0] = a; m.b[1] = b; m.b[2] = c;
+		m_msgs.push_back(m);
+	}
+
+	void queue_bytes(int32 port, int32 off, const uint8 *bytes, int n)
+	{
+		if (n <= 0 || n > 16)
+			return;
+		if (m_msgs.size() >= m_msgs.capacity()) {
+			m_dropped++;
+			return;
+		}
+		msg m{ off, int32(m_msgs.size()), uint8(port), uint8(n), {}, nullptr, 0 };
+		std::memcpy(m.b, bytes, size_t(n));
+		m_msgs.push_back(m);
+	}
+
+	// ---- XG の値のパラメータ（automation_host.h）
+
+	static const autom::entry *xg_entry(ParamID id)
+	{
+		const int i = autom::index_of(uint32_t(id));
+		return i >= 0 ? &autom::entries()[size_t(i)] : nullptr;
+	}
+
+	// 画面で値を触った（画面の糸）。ホストのオートメーションへ伝える
+	void on_gui_edit(const xg::param &p, int part, int value)
+	{
+		bool began = false;
+		const int i = m_xg.gui_edit(p, part, value, began);
+		if (i < 0 || !m_handler)
+			return;
+		const autom::entry &e = autom::entries()[size_t(i)];
+		if (began)
+			m_handler->beginEdit(e.id);
+		m_handler->performEdit(e.id, autom::to_normalized(e, value));
+	}
+
+	// 画面でインサーションのパラメータを触った（インサーションの設定の窓）
+	void on_gui_edit_raw(u32 addr, int raw)
+	{
+		bool began = false;
+		int value = 0;
+		const int i = m_xg.gui_edit_raw(addr, raw, value, began);
+		if (i < 0 || !m_handler)
+			return;
+		const autom::entry &e = autom::entries()[size_t(i)];
+		if (began)
+			m_handler->beginEdit(e.id);
+		m_handler->performEdit(e.id, autom::to_normalized(e, value));
+	}
+
+	// 画面の 1 コマ。しばらく触られていない値の操作を終える
+	void on_gui_idle(bool closing)
+	{
+		m_xg.gui_idle(closing, [this](int i) {
+			if (m_handler)
+				m_handler->endEdit(autom::entries()[size_t(i)].id);
+		});
+	}
+
+	void end_all_edits() { on_gui_idle(true); }
+
+	// ホストから来た XG の値（音声の糸）。値が変わったところだけ、CC かパラメータチェンジにして流す
+	void xg_points(int i, IParamValueQueue *pq)
+	{
+		const autom::entry &e = autom::entries()[size_t(i)];
+		const int32 np = pq->getPointCount();
+		for (int32 k = 0; k < np; k++) {
+			int32 off = 0;
+			ParamValue v = 0.0;
+			if (pq->getPoint(k, off, v) != kResultOk)
+				continue;
+			m_xg.host_value(i, autom::to_value(e, v), [&](int port, const uint8_t *bytes, int n) {
+				queue_bytes(port, off, bytes, n);
+			});
+		}
 	}
 
 	smu2000::vst3::engine m_engine;
+	autom::host           m_xg{m_engine};
 	std::vector<msg>      m_msgs;
+	IComponentHandler    *m_handler = nullptr;
 	double                m_rate = smu2000::vst3::NATIVE_RATE;
 	double                m_value[kPorts * kMidiParams] = {};
 	// 出力レベルは bridge が持つ。ここは 1 サンプルずつ寄せる途中の値
@@ -661,6 +972,7 @@ private:
 	std::atomic<uint16>   m_sounded[kPorts] = {};
 	// 間に合っているかの記録。音声スレッドだけが触る
 	uint64                m_busy_ticks = 0, m_produced = 0, m_worst_ticks = 0, m_late = 0;
+	uint64                m_dropped = 0;       // 溜めきれずに捨てた MIDI（report で書く）
 	int64                 m_qpc_freq = 1;
 	int32                 m_refs = 1;
 };
@@ -699,6 +1011,7 @@ tresult PLUGIN_API mu_plugin::process(ProcessData &data)
 
 	m_msgs.clear();
 
+	m_xg.begin_block();
 	if (IParameterChanges *changes = data.inputParameterChanges) {
 		const int32 nq = changes->getParameterCount();
 		for (int32 q = 0; q < nq; q++) {
@@ -713,6 +1026,11 @@ tresult PLUGIN_API mu_plugin::process(ProcessData &data)
 				if (pq->getPointCount() > 0 &&
 				    pq->getPoint(pq->getPointCount() - 1, off, v) == kResultOk)
 					m_engine.panel().set_gain(float(std::clamp(v, 0.0, 1.0)));
+				continue;
+			}
+			const int xi = autom::index_of(uint32_t(id));
+			if (xi >= 0) {
+				xg_points(xi, pq);
 				continue;
 			}
 			int32 port, ch, ctrl, slot;
@@ -802,6 +1120,8 @@ tresult PLUGIN_API mu_plugin::process(ProcessData &data)
 				if (m_msgs.size() < m_msgs.capacity())
 					m_msgs.push_back({ off, int32(m_msgs.size()), uint8(port), 0, { 0, 0, 0 },
 					                   e.data.bytes, e.data.size });
+				else
+					m_dropped++;
 				break;
 			}
 			default:

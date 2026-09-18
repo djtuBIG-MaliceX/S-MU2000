@@ -6,6 +6,9 @@
 //   vst3probe <DLL> <MIDI ファイル> <出力 wav> [--rate 48000] [--block 512] [--adc-sine]
 //
 // --adc-sine は A/D INPUT（補助の入力バス）に 440Hz の正弦を流す（入力の道が落ちないかを見る）
+// --automation は XG の値のパラメータ（src/vst3/automation.h）を試す: 一覧、値を送って音源に入ったか、
+//   状態の保存と復元、機械まるごとの状態を抜いて XG の値の控えだけで戻るか
+// --view のとき、画面で値を触ると beginEdit / performEdit / endEdit が出る
 // --data-midi は VSTHost 1.58 のまねで、コントロールチェンジやプログラムチェンジも
 //   パラメータではなく DataEvent（システムエクスクルーシブ扱い）で、しかも 3 byte に
 //   詰めて渡す。付けない時と同じ音が出れば、そういうホストでも正しく鳴る
@@ -22,6 +25,7 @@
 #include "pluginterfaces/vst/ivsteditcontroller.h"
 #include "pluginterfaces/vst/ivstevents.h"
 #include "pluginterfaces/vst/ivstparameterchanges.h"
+#include "pluginterfaces/vst/ivstunits.h"
 
 #include "probe_host.h"
 #include "smf.h"
@@ -228,6 +232,8 @@ public:
 
 	void rewind() { m_pos = 0; }
 	size_t size() const { return m_buf.size(); }
+	const std::vector<uint8> &bytes() const { return m_buf; }
+	void assign(const std::vector<uint8> &b) { m_buf = b; m_pos = 0; }
 
 private:
 	std::vector<uint8> m_buf;
@@ -243,11 +249,31 @@ private:
 
 std::atomic<bool> g_view_quit{false};
 
+// ホストの受け口。プラグインが画面の操作を伝えてきたら書き出す
+class log_handler : public IComponentHandler
+{
+public:
+	tresult PLUGIN_API queryInterface(const TUID, void **obj) override { *obj = this; return kResultOk; }
+	uint32 PLUGIN_API addRef() override  { return 1; }
+	uint32 PLUGIN_API release() override { return 1; }
+	tresult PLUGIN_API beginEdit(ParamID id) override
+	{ std::printf("  beginEdit %u\n", unsigned(id)); begins++; return kResultOk; }
+	tresult PLUGIN_API performEdit(ParamID id, ParamValue v) override
+	{ std::printf("  performEdit %u %.4f\n", unsigned(id), v); performs++; return kResultOk; }
+	tresult PLUGIN_API endEdit(ParamID id) override
+	{ std::printf("  endEdit %u\n", unsigned(id)); ends++; return kResultOk; }
+	tresult PLUGIN_API restartComponent(int32 flags) override
+	{ std::printf("  restartComponent 0x%x\n", unsigned(flags)); restarts++; return kResultOk; }
+	int begins = 0, performs = 0, ends = 0, restarts = 0;
+};
+
 int run_view(IComponent *comp, IAudioProcessor *proc, IEditController *ctrl, int seconds)
 {
 	std::printf("\n---- 画面を出してみる ----\n");
 	if (!ctrl) { std::printf("NG: IEditController が無い\n"); return 1; }
 
+	static log_handler handler;
+	ctrl->setComponentHandler(&handler);
 	IPlugView *view = ctrl->createView(ViewType::kEditor);
 	if (!view) { std::printf("NG: 画面を作れない\n"); return 1; }
 	std::printf("OK: createView\n");
@@ -302,8 +328,269 @@ int run_view(IComponent *comp, IAudioProcessor *proc, IEditController *ctrl, int
 	std::printf("OK: removed\n");
 	host->destroy();
 	view->release();
+	std::printf("画面の操作の知らせ: beginEdit %d / performEdit %d / endEdit %d\n",
+	            handler.begins, handler.performs, handler.ends);
 	std::printf("---- 画面はここまで ----\n");
-	return 0;
+	return handler.begins == handler.ends ? 0 : 1;
+}
+
+// ---- XG の値のパラメータ（--automation）
+
+struct instance {
+	IComponent *comp = nullptr;
+	IAudioProcessor *proc = nullptr;
+	IEditController *ctrl = nullptr;
+};
+
+bool make_instance(IPluginFactory *fac, const TUID cid, instance &in)
+{
+	if (fac->createInstance(reinterpret_cast<FIDString>(cid), reinterpret_cast<FIDString>(IComponent::iid.toTUID()),
+	                        (void **)&in.comp) != kResultOk || !in.comp)
+		return false;
+	in.comp->queryInterface(IAudioProcessor::iid, (void **)&in.proc);
+	in.comp->queryInterface(IEditController::iid, (void **)&in.ctrl);
+	if (!in.proc || !in.ctrl)
+		return false;
+	in.comp->initialize(nullptr);
+	return true;
+}
+
+void start_instance(instance &in, double rate, int block)
+{
+	SpeakerArrangement out_arr = SpeakerArr::kStereo;
+	in.proc->setBusArrangements(nullptr, 0, &out_arr, 1);
+	in.comp->activateBus(kAudio, kOutput, 0, true);
+	ProcessSetup setup{};
+	setup.processMode = kRealtime;
+	setup.symbolicSampleSize = kSample32;
+	setup.maxSamplesPerBlock = block;
+	setup.sampleRate = rate;
+	in.proc->setupProcessing(setup);
+	in.comp->setActive(true);          // 起動が終わるまで待つ
+	in.proc->setProcessing(true);
+}
+
+void stop_instance(instance &in)
+{
+	in.proc->setProcessing(false);
+	in.comp->setActive(false);
+	in.comp->terminate();
+	in.proc->release();
+	in.ctrl->release();
+	in.comp->release();
+	in = instance{};
+}
+
+// 無音の区間を secs 秒ぶん回す。first のときは changes を最初の区間に渡す
+void run_blocks(instance &in, double rate, int block, double secs, param_changes *changes, int repeat_blocks = 1)
+{
+	std::vector<float> l(static_cast<size_t>(block)), r(static_cast<size_t>(block));
+	float *ch[2] = { l.data(), r.data() };
+	AudioBusBuffers ab{};
+	ab.numChannels = 2;
+	ab.channelBuffers32 = ch;
+	event_list ev;
+	param_changes none;
+	ProcessData pd{};
+	pd.processMode = kRealtime;
+	pd.symbolicSampleSize = kSample32;
+	pd.numSamples = block;
+	pd.numOutputs = 1;
+	pd.outputs = &ab;
+	pd.inputEvents = &ev;
+	const int blocks = int(secs * rate / block);
+	for (int k = 0; k < blocks; k++) {
+		pd.inputParameterChanges = (changes && k < repeat_blocks) ? changes : &none;
+		in.proc->process(pd);
+	}
+}
+
+// SysEx を 1 区間で流す（インサーションの種類を決めるのに使う）
+void send_sysex(instance &in, int block, const std::vector<std::vector<uint8>> &messages)
+{
+	std::vector<float> l(static_cast<size_t>(block)), r(static_cast<size_t>(block));
+	float *ch[2] = { l.data(), r.data() };
+	AudioBusBuffers ab{};
+	ab.numChannels = 2;
+	ab.channelBuffers32 = ch;
+	event_list ev;
+	for (const std::vector<uint8> &m : messages) {
+		ev.m_sysex.push_back(m);
+	}
+	for (std::vector<uint8> &m : ev.m_sysex) {
+		Event e{};
+		e.type = Event::kDataEvent;
+		e.data.type = DataEvent::kMidiSysEx;
+		e.data.size = uint32(m.size());
+		e.data.bytes = m.data();
+		ev.addEvent(e);
+	}
+	param_changes none;
+	ProcessData pd{};
+	pd.processMode = kRealtime;
+	pd.symbolicSampleSize = kSample32;
+	pd.numSamples = block;
+	pd.numOutputs = 1;
+	pd.outputs = &ab;
+	pd.inputEvents = &ev;
+	pd.inputParameterChanges = &none;
+	in.proc->process(pd);
+}
+
+std::string title_of(IEditController *ctrl, int32 index, ParamID &id, ParameterInfo &info)
+{
+	if (ctrl->getParameterInfo(index, info) != kResultOk)
+		return std::string();
+	id = info.id;
+	std::string t;
+	for (int i = 0; i < 128 && info.title[i]; i++)
+		t.push_back(info.title[i] < 128 ? char(info.title[i]) : '?');
+	return t;
+}
+
+int run_automation(IPluginFactory *fac, const TUID cid, double rate, int block)
+{
+	std::printf("\n---- XG の値のパラメータ ----\n");
+	int bad = 0;
+	instance a;
+	if (!make_instance(fac, cid, a)) { std::printf("NG: 作れない\n"); return 1; }
+	static log_handler handler;
+	a.ctrl->setComponentHandler(&handler);
+
+	// 一覧。名前 → 番号
+	std::map<std::string, ParamID> ids;
+	std::map<ParamID, int> seen;
+	int xg_count = 0;
+	const int32 count = a.ctrl->getParameterCount();
+	for (int32 i = 0; i < count; i++) {
+		ParamID id = 0;
+		ParameterInfo info{};
+		const std::string t = title_of(a.ctrl, i, id, info);
+		if (seen[id]++)
+			{ std::printf("NG: 番号 %u が重なっている\n", unsigned(id)); bad++; }
+		if (id >= 65536) {
+			xg_count++;
+			ids[t] = id;
+			if (!(info.flags & ParameterInfo::kCanAutomate))
+				{ std::printf("NG: %s がオートメーションできない\n", t.c_str()); bad++; }
+		}
+	}
+	std::printf("パラメータ %d 本（XG の値 %d 本）\n", count, xg_count);
+
+	auto show = [&](const char *name, double plain) {
+		const ParamID id = ids[name];
+		String128 str{};
+		const ParamValue nv = a.ctrl->plainParamToNormalized(id, plain);
+		a.ctrl->getParamStringByValue(id, nv, str);
+		std::printf("  %-18s id %u  値 %g → \"", name, unsigned(id), plain);
+		print16(str);
+		std::printf("\"\n");
+	};
+	for (const char *n : { "A1 Volume", "A1 Pan", "B3 EQ Bass Freq", "D16 Note Shift", "INS1 Param 1", "INS4 Param 16" })
+		if (!ids.count(n)) { std::printf("NG: %s が無い\n", n); bad++; }
+	if (bad)
+		return 1;
+	show("A1 Volume", 100);
+	show("A1 Pan", 0);
+	show("A1 Pan", 40);
+	show("B3 EQ Bass Gain", 70);
+	show("B3 EQ Bass Freq", 12);
+	show("Master Tune", 0x400 + 55);
+	show("Master EQ Q 3", 7);
+
+	start_instance(a, rate, block);
+	run_blocks(a, rate, block, 1.0, nullptr);
+	// インサーション 1 を DISTORTION（1 バイトのパラメータ）、2 を DELAY LCR（2 バイト）にしておく
+	send_sysex(a, block, { { 0xf0, 0x43, 0x10, 0x4c, 0x03, 0x00, 0x00, 0x49, 0x00, 0xf7 },
+	                       { 0xf0, 0x43, 0x10, 0x4c, 0x03, 0x01, 0x00, 0x05, 0x00, 0xf7 } });
+	run_blocks(a, rate, block, 0.5, nullptr);
+
+	// 値を送る。CC で入るもの（A1 Cutoff・A10 Attack・D16 Volume）と、パラメータチェンジで入るもの。
+	// インサーションのパラメータは種類の範囲に対する割合（0-1000）。Drive 0-127 の 500 は 64 になり、読み戻すと 504
+	struct target { const char *name; int value; int back; };
+	const target T[] = {
+		{ "A1 Cutoff", 20, 20 }, { "A10 Attack", 90, 90 }, { "D16 Volume", 50, 50 },
+		{ "A1 EQ Bass Gain", 70, 70 }, { "B3 Pan", 0, 0 }, { "Reverb Return", 100, 100 }, { "Master EQ Gain 3", 58, 58 },
+		{ "C5 Note Shift", 0x40 + 7, 0x40 + 7 }, { "Master Tune", 0x400 - 30, 0x400 - 30 },
+		{ "INS1 Param 1", 500, 504 }, { "INS2 Param 1", 250, 250 }, { "INS2 Param 10", 1000, 1000 },
+	};
+	param_changes changes;
+	for (const target &t : T)
+		changes.get(ids[t.name])->add(0, a.ctrl->plainParamToNormalized(ids[t.name], t.value));
+	// ホストが同じ値を区間ごとに送り続けるのをまねる（2 秒ぶん）
+	run_blocks(a, rate, block, 2.0, &changes, 100000);
+	std::this_thread::sleep_for(std::chrono::milliseconds(1100));   // 見せる値の控えが古くなるのを待つ
+	run_blocks(a, rate, block, 0.3, nullptr);
+
+	auto check = [&](instance &in, const char *what) {
+		int ng = 0;
+		for (const target &t : T) {
+			const ParamID id = ids[t.name];
+			const ParamValue nv = in.ctrl->getParamNormalized(id);
+			const int got = int(std::lround(in.ctrl->normalizedParamToPlain(id, nv)));
+			if (got != t.back) {
+				std::printf("NG: %s %s は %d（%d のはず）\n", what, t.name, got, t.back);
+				ng++;
+			}
+			if (!std::strncmp(t.name, "INS", 3)) {
+				String128 str{};
+				in.ctrl->getParamStringByValue(id, nv, str);
+				std::printf("  %s = ", t.name);
+				print16(str);
+				std::printf("\n");
+			}
+		}
+		std::printf("%s: %d 個のうち %d 個が合った\n", what, int(sizeof(T) / sizeof(T[0])), int(sizeof(T) / sizeof(T[0])) - ng);
+		return ng;
+	};
+	bad += check(a, "送った値を音源から読み戻す");
+
+	// 保存して、別の実体に戻す
+	mem_stream st;
+	a.comp->getState(&st);
+	std::printf("状態 %zu バイト\n", st.size());
+	stop_instance(a);
+
+	instance b;
+	make_instance(fac, cid, b);
+	b.ctrl->setComponentHandler(&handler);
+	st.rewind();
+	b.comp->setState(&st);
+	start_instance(b, rate, block);
+	run_blocks(b, rate, block, 1.5, nullptr);
+	std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+	bad += check(b, "状態を戻した実体");
+	stop_instance(b);
+
+	// 機械まるごとの状態を抜いて、XG の値の控えだけにする（版違いで読めなかったときのまね）
+	const std::vector<uint8> &raw = st.bytes();
+	auto i32 = [&](size_t at) { int32 v = 0; std::memcpy(&v, raw.data() + at, 4); return v; };
+	size_t at = 8;                                   // 版と出力レベル
+	const int32 packed = i32(at); at += 4 + size_t(packed);
+	const int32 card = i32(at); at += 4 + size_t(card);
+	const int32 setup = i32(at); at += 4;
+	std::printf("控え %d バイト（機械まるごと %d バイト）\n", setup, packed);
+	std::vector<uint8> only(raw.begin(), raw.begin() + 8);
+	auto push32 = [&](int32 v) { uint8 b4[4]; std::memcpy(b4, &v, 4); only.insert(only.end(), b4, b4 + 4); };
+	push32(0);
+	push32(0);
+	push32(setup);
+	only.insert(only.end(), raw.begin() + long(at), raw.begin() + long(at) + setup);
+	mem_stream st2;
+	st2.assign(only);
+	instance c;
+	make_instance(fac, cid, c);
+	c.comp->setState(&st2);
+	start_instance(c, rate, block);
+	run_blocks(c, rate, block, 4.0, nullptr);     // 控えは 31250bps の直列で流れる（数 KB で 2 秒ほど）
+	std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+	run_blocks(c, rate, block, 0.2, nullptr);
+	bad += check(c, "XG の値の控えだけで戻した実体");
+	stop_instance(c);
+
+	std::printf("restartComponent %d 回\n", handler.restarts);
+	std::printf("---- XG の値はここまで: %s ----\n", bad ? "NG あり" : "全部合った");
+	return bad ? 1 : 0;
 }
 
 int run_torture(IPluginFactory *fac, const TUID cid)
@@ -385,6 +672,72 @@ int run_torture(IPluginFactory *fac, const TUID cid)
 		c->terminate();
 		p->release();
 		c->release();
+	}
+
+	// 3.4 setActive(true) を抜けた直後の音。**新しい個体**でやる。
+	// ホストは setActive を抜けたら演奏を始めてよいことになっているので、
+	// 起動が終わっていなければ最初の音が溜められて曲の頭が崩れる（issue #19）
+	{
+		IComponent *c = nullptr;
+		fac->createInstance(reinterpret_cast<FIDString>(cid),
+		                    reinterpret_cast<FIDString>(IComponent::iid.toTUID()), (void **)&c);
+		IAudioProcessor *p = nullptr;
+		if (c) c->queryInterface(IAudioProcessor::iid.toTUID(), (void **)&p);
+		if (c && p) {
+			c->initialize(nullptr);
+			c->activateBus(kAudio, kOutput, 0, true);
+			for (int32 b = 0; b < c->getBusCount(kEvent, kInput); b++)
+				c->activateBus(kEvent, kInput, b, true);
+			ProcessSetup su{};
+			su.processMode = kRealtime;
+			su.symbolicSampleSize = kSample32;
+			su.maxSamplesPerBlock = 512;
+			su.sampleRate = 44100.0;
+			p->setupProcessing(su);
+			c->setActive(true);
+			p->setProcessing(true);
+
+			std::vector<float> l(512), rr(512);
+			float *ch[2] = { l.data(), rr.data() };
+			AudioBusBuffers ab{};
+			ab.numChannels = 2; ab.channelBuffers32 = ch;
+			event_list elist;
+			Event ev{};
+			ev.busIndex = 0; ev.sampleOffset = 0; ev.flags = Event::kIsLive;
+			ev.type = Event::kNoteOnEvent;
+			ev.noteOn.channel = 0; ev.noteOn.pitch = 60;
+			ev.noteOn.velocity = 100.0f / 127.0f; ev.noteOn.noteId = -1;
+			elist.addEvent(ev);
+
+			ProcessData pd{};
+			pd.symbolicSampleSize = kSample32;
+			pd.numOutputs = 1; pd.outputs = &ab;
+			pd.numSamples = 512;
+			pd.inputEvents = &elist;
+
+			// 100ms ぶん回して、音が出ているか見る
+			double peak = 0;
+			for (int i = 0; i < 9; i++) {
+				std::fill(l.begin(), l.end(), 0.0f);
+				std::fill(rr.begin(), rr.end(), 0.0f);
+				p->process(pd);
+				pd.inputEvents = nullptr;     // ノートオンは 1 回だけ
+				for (int k = 0; k < 512; k++)
+					peak = std::max(peak, double(std::fabs(l[k])));
+			}
+			if (peak < 0.001) {
+				std::printf("NG: setActive(true) の直後のノートオンで音が出ない"
+				            "（起動を待っていない。issue #19）\n");
+				bad++;
+			} else {
+				std::printf("OK: setActive(true) の直後のノートオンで音が出る（頂 %.3f）\n", peak);
+			}
+			p->setProcessing(false);
+			c->setActive(false);
+			c->terminate();
+		}
+		if (p) p->release();
+		if (c) c->release();
 	}
 
 	// 3.5 状態の保存と復元。**新しい個体**でやる。使い回すと起動の途中で
@@ -569,6 +922,61 @@ int run_torture(IPluginFactory *fac, const TUID cid)
 		}
 		std::printf("OK: MIDI の割り当ては %d 通り（2 口 × 16ch × 131）\n", mapped);
 
+		// Cubase がプログラムチェンジを渡す道。MIDI チャンネル → ユニット（getUnitByBus）→
+		// そのユニットのプログラム一覧 → 同じユニットに属し kIsProgramChange の付いたパラメータ
+		IUnitInfo *u = nullptr;
+		c->queryInterface(IUnitInfo::iid, (void **)&u);
+		if (!u) {
+			std::printf("NG: IUnitInfo が無い（Cubase で MIDI のプログラムチェンジが捨てられる）\n"); bad++;
+		} else {
+			std::map<UnitID, ProgramListID> lists;
+			for (int32 i = 0; i < u->getUnitCount(); i++) {
+				UnitInfo ui{};
+				if (u->getUnitInfo(i, ui) == kResultOk)
+					lists[ui.id] = ui.programListId;
+			}
+			int32 programs = 0;
+			for (int32 i = 0; i < u->getProgramListCount(); i++) {
+				ProgramListInfo li{};
+				if (u->getProgramListInfo(i, li) == kResultOk && li.id == 1)
+					programs = li.programCount;
+			}
+			std::map<UnitID, int> pc_params;
+			for (int32 i = 0; i < e->getParameterCount(); i++) {
+				ParameterInfo pi2{};
+				if (e->getParameterInfo(i, pi2) == kResultOk && (pi2.flags & ParameterInfo::kIsProgramChange))
+					pc_params[pi2.unitId]++;
+			}
+			int good = 0, bus_count = c->getBusCount(kEvent, kInput);
+			for (int32 bus = 0; bus < bus_count; bus++)
+				for (int32 ch = 0; ch < 16; ch++) {
+					UnitID unit = -1;
+					if (u->getUnitByBus(kEvent, kInput, bus, ch, unit) != kResultTrue)
+						continue;
+					auto l = lists.find(unit);
+					if (l == lists.end() || l->second == kNoProgramListId)
+						continue;
+					if (pc_params[unit] != 1)
+						continue;
+					// そのパラメータと IMidiMapping の 130 番が同じものか
+					ParamID via_map = 0;
+					m->getMidiControllerAssignment(bus, int16(ch), CtrlNumber(130), via_map);   // kCtrlProgramChange
+					ParameterInfo pi3{};
+					bool same = false;
+					for (int32 i = 0; i < e->getParameterCount() && !same; i++)
+						if (e->getParameterInfo(i, pi3) == kResultOk && pi3.id == via_map)
+							same = (pi3.flags & ParameterInfo::kIsProgramChange) && pi3.unitId == unit;
+					good += same;
+				}
+			if (good != bus_count * 16 || programs != 128) {
+				std::printf("NG: プログラムチェンジのユニット %d / %d、一覧 %d 音\n", good, bus_count * 16, programs);
+				bad++;
+			} else {
+				std::printf("OK: プログラムチェンジは %d 口 × 16ch ともユニットと 128 音の一覧に繋がる\n", bus_count);
+			}
+			u->release();
+		}
+
 		c->terminate();
 		e->release();
 		m->release();
@@ -651,6 +1059,7 @@ int main(int argc, char **argv)
 	bool one_bus = false;    // 比べる用。MIDI ファイルの口 B も A のバスへ流す
 	bool data_midi = false;  // VSTHost のまね。チャンネルメッセージも DataEvent で渡す
 	bool restart = false;    // DAW の「止めて再生」のまね（流す直前に setProcessing を切り入れする）
+	bool automation = false;
 	int  view_seconds = 0;
 	for (int i = 2; i < argc; i++) {
 		if (!std::strcmp(argv[i], "--rate") && i + 1 < argc) rate = std::atof(argv[++i]);
@@ -661,6 +1070,7 @@ int main(int argc, char **argv)
 		else if (!std::strcmp(argv[i], "--one-bus")) one_bus = true;
 		else if (!std::strcmp(argv[i], "--data-midi")) data_midi = true;
 		else if (!std::strcmp(argv[i], "--restart")) restart = true;
+		else if (!std::strcmp(argv[i], "--automation")) automation = true;
 		else if (!std::strcmp(argv[i], "--view")) view_seconds =
 		    (i + 1 < argc && argv[i + 1][0] != '-') ? std::atoi(argv[++i]) : 20;
 		else if (mid.empty()) mid = argv[i];
@@ -819,6 +1229,17 @@ int main(int argc, char **argv)
 		if (map)  map->release();
 		comp->release();
 		return rc;
+	}
+
+	if (automation) {
+		proc->setProcessing(false);
+		comp->setActive(false);
+		comp->terminate();
+		if (proc) proc->release();
+		if (ctrl) ctrl->release();
+		if (map)  map->release();
+		comp->release();
+		return run_automation(fac, cid, rate, block);
 	}
 
 	if (torture) {

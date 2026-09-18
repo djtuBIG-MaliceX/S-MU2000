@@ -82,6 +82,7 @@ volume 141 154 30         # 音量つまみ  中心 x y と半径
 plg  524 37 341           # MU / PLG-1..3 の表示灯  左端 間隔 y
 card 57 336 201 21        # カードの差し込み口。押すと MIDI ファイルの品書き
 adin 8 44 60 130          # A/D INPUT のジャック
+phones 198 238 74 82      # PHONES のジャック。押すと音の出口（デジタル / アナログ）の品書き
 columns.y 186             # 窓の下の札（PART VOL EXP …）の高さ
 
 low.x 0 12 30 48 55 61 70 78 86 93 0    # LCD 下段の並び
@@ -127,12 +128,17 @@ art 0 0 1000 385 "mu2000-mame.svg"
 道は `panel.txt` からの相対で探す。縦横比は保ったまま、指定した四角の
 真ん中に収める。
 
+MAME の絵を部分的に直したいときは、部品ごとに分けた `art/mame/parts/` から始めると楽
+（`tools/svgsplit.py` で作った。`art/mame/README.md`）。
+
 読めるのは要るぶんだけ。
 
 * `<path d="…">` の `M L H V C Z`（大文字小文字とも）
+* `<rect>`（`rx` `ry` の角の丸みも）、`<circle>`、`<ellipse>`、`<polygon>`、`<polyline>`
 * `transform` の `translate(…)` と `matrix(…)`
 * `style` の `fill` `stroke` `stroke-width`
 
+形は書いてある順に重ねる。`<!-- -->` の中は読まない（古い形を残しておける）。
 弧（`A`）、二次ベジエ（`Q S T`）、勾配、文字、`<image>` は読まない。
 **曲線は読み込むときに折れ線にする**ので、窓を大きくしても粗くならない。
 点線（`stroke-dasharray`）は実線になる。

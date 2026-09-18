@@ -36,8 +36,10 @@
 #include "ui/panel.h"
 #include "ui/fx_editor.h"
 #include "ui/overview.h"
+#include "ui/master_editor.h"
 #include "ui/part_shapes.h"
 #include "ui/pc_editor.h"
+#include "ui/pc_host.h"
 #include "ui/pc_window.h"
 #include "ui/player.h"
 #include "ui/text.h"
@@ -79,6 +81,7 @@ struct window_state {
 	ui::pc_window list{ std::make_unique<ui::overview>() };   // 一覧（F3 か右クリック）
 	ui::pc_window fx{ std::make_unique<ui::fx_editor>() };    // インサーションの設定（一覧でダブルクリック）
 	ui::pc_window shapes{ std::make_unique<ui::part_shapes>() };   // パートの音色（一覧の絵をダブルクリック）
+	ui::pc_window master{ std::make_unique<ui::master_editor>() }; // マスター（一覧のマスターの行をダブルクリック）
 	ui::bridge *br = nullptr;
 	engine     *eng = nullptr;
 	ui::audio_out *out = nullptr;
@@ -164,7 +167,8 @@ void load_settings(std::string *in_name,
                    std::string &out_name, std::string &out_name_b,
                    std::string &audio_name, float *volume = nullptr,
                    std::string *out_name_mu = nullptr, bool *fold_ports34 = nullptr,
-                   std::string *ain_name = nullptr, std::string *card_path = nullptr)
+                   std::string *ain_name = nullptr, std::string *card_path = nullptr,
+                   bool *analog = nullptr)
 {
 	const std::string path = settings_path();
 	if (path.empty())
@@ -191,6 +195,7 @@ void load_settings(std::string *in_name,
 		if (key == "audio_in" && ain_name) *ain_name = val;
 		if (key == "smartmedia" && card_path) *card_path = val;
 		if (key == "ports34" && fold_ports34) *fold_ports34 = val != "drop";
+		if (key == "output" && analog) *analog = val == "analog";
 		if (key == "volume" && volume && !val.empty())
 			*volume = std::clamp(float(std::atof(val.c_str())), 0.0f, 1.0f);
 	}
@@ -223,6 +228,9 @@ void save_settings()
 	if (g_win.br)
 		std::fprintf(f, "volume=%.3f\n", g_win.br->gain());
 	std::fprintf(f, "ports34=%s\n", g_win.play_file.fold_extra_ports() ? "fold" : "drop");
+	// 音の出口。digital（S/PDIF と同じ）か analog（直流を切る。src/analog_out.h）
+	if (g_win.eng)
+		std::fprintf(f, "output=%s\n", g_win.eng->analog.load() ? "analog" : "digital");
 	std::fclose(f);
 }
 
@@ -254,8 +262,10 @@ enum : UINT {
 	ID_CARD_OPEN = 5010, ID_CARD_EJECT = 5011,
 	ID_PLAY_FILE = 5100, ID_STOP_FILE = 5101, ID_PORTS34_FOLD = 5102, ID_PORTS34_DROP = 5103,
 	ID_FACTORY = 5200,
+	ID_NATIVE_FX = 5215,     // エフェクトを C++ で鳴らす（軽量モード）
 	ID_PC_EDITOR = 5201,
 	ID_OVERVIEW = 5202,
+	ID_OUTPUT_DIGITAL = 5300, ID_OUTPUT_ANALOG = 5301,
 };
 
 // 品書きは **W 版**で作る。ソースは UTF-8 なので、A 版に渡すと
@@ -359,11 +369,29 @@ void show_port_menu(HWND hwnd, POINT screen)
 	add_item(top, MF_STRING, ID_OVERVIEW, "一覧を開く	F3");
 	add_item(top, MF_STRING, ID_PC_EDITOR, "エディタを開く	F2");
 	const bool ready = g_win.eng && g_win.eng->state.load() == 1;
+	add_item(top, MF_STRING | (g_win.eng->native_fx.load() ? MF_CHECKED : 0), ID_NATIVE_FX,
+	         "エフェクトを C++ で鳴らす（軽い・音は実機と違う）");
 	add_item(top, MF_STRING | (ready ? 0 : MF_GRAYED), ID_FACTORY, "工場出荷状態に戻す...");
 
 	TrackPopupMenu(top, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON,
 	               screen.x, screen.y, 0, hwnd, nullptr);
 	DestroyMenu(top);
+}
+
+// ---- PHONES のジャック。音の出口を選ぶ
+//
+// デジタルは S/PDIF の出口と同じで、一部の DPCM のサンプルが持つ直流もそのまま出る（実機で確かめた）。
+// アナログは LINE OUT・PHONES のつもりで直流を切る（src/analog_out.h。切れる周波数は仮）
+void show_output_menu(HWND hwnd, POINT screen)
+{
+	HMENU m = CreatePopupMenu();
+	const bool analog = g_win.eng && g_win.eng->analog.load();
+	add_item(m, MF_STRING | MF_GRAYED, 0, "音の出口");
+	AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+	add_item(m, MF_STRING | (analog ? 0 : MF_CHECKED), ID_OUTPUT_DIGITAL, "デジタル（S/PDIF。DPCM の直流も残る）");
+	add_item(m, MF_STRING | (analog ? MF_CHECKED : 0), ID_OUTPUT_ANALOG, "アナログ（LINE OUT・PHONES。直流を切る）");
+	TrackPopupMenu(m, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON, screen.x, screen.y, 0, hwnd, nullptr);
+	DestroyMenu(m);
 }
 
 // ---- カードの差し込み口。SmartMedia を差す・MIDI ファイルを流す
@@ -704,16 +732,12 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 		// パラメータの層: 音源の返事を読み、見えている面の読み返しを頼む
 		if (g_win.br) {
 			g_win.panel.tick(*g_win.br);
-			g_win.pc.frame(g_win.panel.xg(), g_win.panel.ram(), *g_win.br);
-			g_win.list.frame(g_win.panel.xg(), g_win.panel.ram(), *g_win.br);
-			g_win.fx.frame(g_win.panel.xg(), g_win.panel.ram(), *g_win.br);
-			g_win.shapes.frame(g_win.panel.xg(), g_win.panel.ram(), *g_win.br);
-			// 一覧でインサーションの欄をダブルクリックされたら、設定の窓を出す
-			if (ui::xgui::take_fx_request())
-				open_window(hwnd, g_win.fx);
-			// 一覧で VIB・FILTER・EG・EQ の絵をダブルクリックされたら、パートの音色の窓を出す
-			if (ui::xgui::take_part_request())
-				open_window(hwnd, g_win.shapes);
+			// PC の窓（一覧の上の帯）に CPU の負荷を出すため
+			if (g_win.out && g_win.out->produced())
+				g_win.br->set_cpu(float(g_win.out->cpu_percent()));
+			ui::pc_frame_all(g_win.list, g_win.pc, g_win.fx, g_win.shapes, g_win.master,
+			                 g_win.panel.xg(), g_win.panel.ram(), *g_win.br,
+			                 [&](ui::pc_window &w) { open_window(hwnd, w); });
 		}
 		InvalidateRect(hwnd, nullptr, FALSE);
 		// SmartMedia に書いたものを 2 秒ごとにファイルへ書き戻す（抜いたとき・閉じたときも）
@@ -771,11 +795,12 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 		ui::snapshot s;
 		g_win.br->read(s);
 		u64 pressed = g_win.br->buttons();
-		char status[128] = {};
+		char status[320] = {};
 		if (g_win.out && g_win.out->produced())
 			std::snprintf(status, sizeof(status),
-			              "CPU %.0f%%  最悪 %.1f ms  待ち %.0f ms  遅れ %llu   IN: %s   OUT: %s"
+			              "発音 %d/128  CPU %.0f%%  最悪 %.1f ms  待ち %.0f ms  遅れ %llu   IN: %s   OUT: %s"
 			              "   （MIDI IN A のジャックか右クリックで口を選ぶ）",
+			              s.voices_master + s.voices_slave,
 			              g_win.out->cpu_percent(), g_win.out->worst_ms(),
 			              g_win.out->output_ms(),
 			              (unsigned long long)g_win.out->late(),
@@ -809,6 +834,13 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 			show_ain_menu(hwnd, pt);
 			return 0;
 		}
+		// PHONES のジャックは音の出口
+		if (g_win.panel.on_phones(mx, my)) {
+			POINT pt{ mx, my };
+			ClientToScreen(hwnd, &pt);
+			show_output_menu(hwnd, pt);
+			return 0;
+		}
 		// カードの差し込み口は MIDI ファイル
 		if (g_win.panel.on_card_slot(mx, my)) {
 			POINT pt{ mx, my };
@@ -830,6 +862,8 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 		ClientToScreen(hwnd, &pt);
 		if (g_win.panel.on_card_slot(mx, my))
 			show_card_menu(hwnd, pt);
+		else if (g_win.panel.on_phones(mx, my))
+			show_output_menu(hwnd, pt);
 		else
 			show_port_menu(hwnd, pt);
 		return 0;
@@ -866,9 +900,17 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 			g_win.play_file.set_fold_extra_ports(id == ID_PORTS34_FOLD);
 			save_settings();
 		}
+		else if (id == ID_NATIVE_FX)
+			g_win.eng->want_native_fx.store(g_win.eng->native_fx.load() ? 0 : 2);
 		else if (id == ID_FACTORY) choose_factory_reset(hwnd);
 		else if (id == ID_PC_EDITOR) open_window(hwnd, g_win.pc);
 		else if (id == ID_OVERVIEW) open_window(hwnd, g_win.list);
+		else if ((id == ID_OUTPUT_DIGITAL || id == ID_OUTPUT_ANALOG) && g_win.eng) {
+			g_win.eng->analog.store(id == ID_OUTPUT_ANALOG);
+			std::printf("音の出口: %s\n", id == ID_OUTPUT_ANALOG ? "アナログ（直流を切る）" : "デジタル");
+			std::fflush(stdout);
+			save_settings();
+		}
 		if (!g_win.last_error.empty()) {
 			const std::wstring w = ui::to_wide(g_win.last_error);
 			MessageBoxW(hwnd, w.c_str(), L"S-MU2000", MB_OK | MB_ICONWARNING);
@@ -886,6 +928,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 		if (LOWORD(lp) == HTCLIENT &&
 		    (g_win.panel.on_midi_jack(pt.x, pt.y) ||
 		     g_win.panel.on_ad_input(pt.x, pt.y) ||
+		     g_win.panel.on_phones(pt.x, pt.y) ||
 		     g_win.panel.on_card_slot(pt.x, pt.y))) {
 			SetCursor(LoadCursor(nullptr, IDC_HAND));
 			return TRUE;
@@ -1029,10 +1072,14 @@ int main(int argc, char **argv)
 	bool open_list = false;            // 起動したら一覧も出す
 	bool open_fx = false;              // 起動したらインサーションの設定の窓も出す
 	bool open_shapes = false;          // 起動したらパートの音色の窓も出す
+	bool open_master = false;          // 起動したらマスターの窓も出す
 	int win_w = 1000, win_h = 400;   // パネルの論理寸法（1000 × 400）と同じ比
 	bool size_given = false;
 	bool lcd_only = false;
 	bool fast_midi = false;
+	int native_fx = 0;      // --native-fx / --native-fx-full（doc/native-dsp.md）
+	// --native-engine: firmware を走らせない口（doc/native-engine.md）
+	int native_engine = 0;
 	bool grid = false;
 	std::string layout_path, dump_layout, play_path;
 	bool boot_for_shot = false;
@@ -1081,8 +1128,12 @@ int main(int argc, char **argv)
 		else if (!std::strcmp(argv[i], "--list-window")) open_list = true;
 		else if (!std::strcmp(argv[i], "--fx-window")) open_fx = true;
 		else if (!std::strcmp(argv[i], "--shapes-window")) open_shapes = true;
+		else if (!std::strcmp(argv[i], "--master-window")) open_master = true;
 		else if (!std::strcmp(argv[i], "--lcd")) lcd_only = true;
 		else if (!std::strcmp(argv[i], "--fast-midi")) fast_midi = true;
+		else if (!std::strcmp(argv[i], "--native-engine")) native_engine = 1;
+		else if (!std::strcmp(argv[i], "--native-fx")) native_fx = 1;
+		else if (!std::strcmp(argv[i], "--native-fx-full")) native_fx = 2;
 		else if (!std::strcmp(argv[i], "--usb")) usb_host = true;
 		else if (!std::strcmp(argv[i], "--host-midi")) usb_host = false;
 		else if (!std::strcmp(argv[i], "--shot") && i + 1 < argc) shot_path = argv[++i];
@@ -1147,6 +1198,7 @@ int main(int argc, char **argv)
 			"        [--list-window] 一覧の窓も開く（窓では F3 か右クリック）\n"
 			"        [--fx-window] インサーションの設定の窓も開く（一覧でインサーションの欄をダブルクリック）\n"
 			"        [--shapes-window] パートの音色の窓も開く（一覧で VIB などの絵をダブルクリック）\n"
+			"        [--master-window] マスターの窓も開く（一覧でマスターの行をダブルクリック）\n"
 			"        gui --dump-layout panel.txt   いまの配置を書き出す\n"
 			"        gui --list\n"
 			"        gui [<rom ディレクトリ> --boot] --shot 絵.png [--size 1000x400]\n");
@@ -1155,6 +1207,10 @@ int main(int argc, char **argv)
 
 	static engine eng(br, midi_ports[0]);
 	eng.mu.set_fast_midi(fast_midi);
+	if (native_fx) {
+		eng.mu.set_native_fx(native_fx);
+		eng.native_fx.store(native_fx);
+	}
 	for (int p = 1; p < mu2000::MIDI_PORTS; p++)
 		eng.midi_p[p] = &midi_ports[p];
 	eng.mout_b = &mout_b;
@@ -1253,8 +1309,12 @@ int main(int argc, char **argv)
 		std::string ins[mu2000::MIDI_PORTS], b, c, d;
 		float volume = 1.0f;
 		bool fold34 = true;
-		load_settings(ins, b, c, d, &volume, nullptr, &fold34);
+		bool analog = false;
+		load_settings(ins, b, c, d, &volume, nullptr, &fold34, nullptr, nullptr, &analog);
 		br.set_gain(volume);
+		eng.analog.store(analog);
+		if (analog)
+			std::printf("音の出口: アナログ（直流を切る）\n");
 		g_win.play_file.set_fold_extra_ports(fold34);
 
 		// **既定は USB の口**（実機を PC に繋ぐときと同じ姿）。口 C・D は実機では
@@ -1276,6 +1336,8 @@ int main(int argc, char **argv)
 		open_window(hwnd, g_win.list);
 	if (open_shapes && !lcd_only)
 		open_window(hwnd, g_win.shapes);
+	if (open_master && !lcd_only)
+		open_window(hwnd, g_win.master);
 	UpdateWindow(hwnd);
 
 	// 起動は別スレッド。終わったら音を出し始める
@@ -1290,6 +1352,9 @@ int main(int argc, char **argv)
 			eng.publish();
 			return;
 		}
+		// 起動が終わってから入れる（起動には firmware が要る）
+		if (native_engine)
+			eng.mu.set_native_engine(native_engine);
 		eng.state.store(1);
 		eng.publish();
 
@@ -1390,10 +1455,7 @@ int main(int argc, char **argv)
 	// PC の窓に閉じたと知らせる（一覧のミュートを外して受信チャンネルを戻すなど）。
 	// 送ったものは音声の糸が流すので、少し待ってから止める
 	if (g_win.br) {
-		g_win.list.shutdown(*g_win.br);
-		g_win.pc.shutdown(*g_win.br);
-		g_win.fx.shutdown(*g_win.br);
-		g_win.shapes.shutdown(*g_win.br);
+		ui::pc_shutdown_all(g_win.list, g_win.pc, g_win.fx, g_win.shapes, g_win.master, *g_win.br);
 		Sleep(100);
 	}
 
@@ -1440,10 +1502,12 @@ int main(int argc, char **argv)
 	mout_b.close();
 	ain.stop();
 
-	if (out.produced())
+	// 音を出さずに終わったとき（起動に失敗した、音声デバイスを開けなかった）は、どちらも出さない
+	if (out.produced()) {
 		std::printf("CPU %.1f%%、1 回の最悪 %.2f ms、間に合わなかった %llu 回\n",
 		            out.cpu_percent(), out.worst_ms(),
 		            (unsigned long long)out.late());
 		std::printf("%s\n%s\n", out.format_line().c_str(), out.latency_line().c_str());
+	}
 	return 0;
 }

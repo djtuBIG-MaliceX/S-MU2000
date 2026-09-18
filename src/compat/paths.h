@@ -41,7 +41,11 @@
 #else
 #  include <dirent.h>
 #  include <dlfcn.h>
-#  include <mach-o/dyld.h>
+#  if defined(__APPLE__)
+#    include <mach-o/dyld.h>
+#  else
+#    include <unistd.h>
+#  endif
 #  include <sys/stat.h>
 #  include <climits>
 #  include <cstdlib>
@@ -71,6 +75,13 @@ inline std::string exe_dir()
 	if (n == 0 || n >= MAX_PATH)
 		return {};
 	return detail::dir_of(std::string(buf, n));
+#elif !defined(__APPLE__)
+	// Linux: the kernel keeps the running binary's path here, symlinks resolved
+	char real[PATH_MAX] = {};
+	const ssize_t n = ::readlink("/proc/self/exe", real, sizeof(real) - 1);
+	if (n <= 0)
+		return {};
+	return detail::dir_of(std::string(real, size_t(n)));
 #else
 	// _NSGetExecutablePath may hand back a path with symlinks in it, so resolve
 	// it before taking the directory: argv[0]-style paths are not enough once
@@ -96,6 +107,15 @@ inline std::string config_dir()
 	if (!base || !*base)
 		return {};
 	return std::string(base) + "\\S-MU2000\\";
+#elif !defined(__APPLE__)
+	// Linux: where the desktop specification (XDG) puts a program's own data
+	const char *data = std::getenv("XDG_DATA_HOME");
+	if (data && *data)
+		return std::string(data) + "/S-MU2000/";
+	const char *home = std::getenv("HOME");
+	if (!home || !*home)
+		return {};
+	return std::string(home) + "/.local/share/S-MU2000/";
 #else
 	const char *home = std::getenv("HOME");
 	if (!home || !*home)
@@ -116,6 +136,7 @@ inline std::string config_dir()
 // It is only ever read.
 //
 // macOS:   /Library/Application Support/S-MU2000
+// Linux:   /usr/local/share/S-MU2000
 // Windows: %ProgramData%\S-MU2000
 inline std::string shared_config_dir()
 {
@@ -124,6 +145,8 @@ inline std::string shared_config_dir()
 	if (!base || !*base)
 		return {};
 	return std::string(base) + "\\S-MU2000\\";
+#elif !defined(__APPLE__)
+	return "/usr/local/share/S-MU2000/";
 #else
 	return "/Library/Application Support/S-MU2000/";
 #endif

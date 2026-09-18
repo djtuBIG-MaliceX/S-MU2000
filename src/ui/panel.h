@@ -100,6 +100,8 @@ public:
 	// カードの差し込み口と A/D INPUT のジャック。押すと品書きが出る
 	bool on_card_slot(int x, int y) const;
 	bool on_ad_input(int x, int y) const;
+	// PHONES のジャック。押すと音の出口（デジタル / アナログ）を選ぶ品書きが出る
+	bool on_phones(int x, int y) const;
 
 	// ---- 入力。窓からそのまま渡す。戻り値は「描き直しが要るか」
 
@@ -144,6 +146,8 @@ private:
 	std::string fx_text(int ctl) const;
 	void fx_bounds(int ctl, bool &at_min, bool &at_max) const;
 	void step_fx(int ctl, int step, bridge &br);
+	// ダイヤルを掴んで上下に動かす（editor.cpp）
+	bool dial_follow(int y, bridge &br);
 
 	const xg::param *knob_param(int ctl) const;
 	bool value_of(int ctl, int &v) const;
@@ -161,6 +165,8 @@ private:
 	const spot *m_held = nullptr;
 	int  m_drag_x = 0, m_drag_y = 0, m_drag_from = 0;
 	int  m_wheel_angle = 0;
+	// ダイヤルを掴んで上下に動かしているとき（editor.cpp の press / drag）。まだ目盛りにならない端の画素
+	double m_dial_rest = 0.0;
 	double m_volume_now = 1.0;
 
 	// ---- エディタとエフェクトの面の値。**画面では覚えない**。

@@ -75,9 +75,12 @@ branch caught up, and three things the merge left as Windows-only are here now.
   host feeds the unit's input bus (element 0, `SetRenderCallback`) and that goes
   to `engine::fill()`, the same job the VST3's `A/D Input` bus does. The card is
   remembered in the preset by file name only, as on the VST3 side. The bus is
-  **not counted** in `ElementCount` — that one number decides whether a sandboxed
-  host can render the unit at all, and it is the whole of
-  [the long note below](#the-ad-input-bus-and-the-four-properties-it-needs).
+  declared in `SupportedNumChannels` as `[2, 2]` and its scope configures
+  always (format, callback, connection), but it is **not counted in
+  `ElementCount` until the host asks for it** — the count is the only gate, and
+  a host that writes `1` there gets the bus and the input pulled with it.
+  The whole of
+  [the note below](#the-ad-input-bus).
 * **`ARCH=` / `UNIVERSAL=1` now pick their own build directory** (`build-arm64`,
   `build-x86_64`, `build-universal`). Before this an `ARCH=x86_64 make` after a
   native build failed in the link step, with a message about which architecture
@@ -262,6 +265,58 @@ Checked with the switches on both architectures (`build/` and `build-x86_64/`,
 | both JITs off, `SMU2000_SH2_LAZYPC=0`, `SMU2000_SH2_SLOTNATIVE=0`, `SMU2000_SH2_JIT=1` | every combination byte-identical to the default |
 | `make test` | verify 0 mismatches, `JIT 入切` 8 of 8 |
 | arm64 vs x86-64 | the same WAV |
+
+## arm64 JIT: closing the gap to x86-64 (`opt/arm64-jit`)
+
+The SH2 backend was already at opcode-for-opcode parity with x86-64 (same
+`native()` coverage, lazy `pc`, slot-native, block chaining), so the work was
+all on the MEG side: four x86-64-only optimizations ported, plus two small
+arm64-specific ones. Each item was measured alone and kept only on a win.
+Numbers are `build/blocktime roms build/tests/dense.mid 256 5 3` (median of
+runs, MEG ns per sample) on this machine; every step stayed bit-exact
+(`verify`, the full suite, JIT-vs-interpreter WAVs on dense/piano/effects/
+lofi/chord, `SMU2000_MEG_JIT_CHECK` clean).
+
+| Step | MEG master / slave | Kept |
+|---|---|---|
+| branch start | 828 / 737 | — |
+| minimal `mov_imm64` (was always 4 insns) + rand seed in `x24` | 725 / 656 | yes |
+| const region off `x25` (`m_const`/`t`/`offset` sit past the halfword imm12 reach) | 686 / 639 | yes |
+| saturation limits in `x26–x28` (only 3 regs free: `-0x800001`/`-0x800000`/`0x3fffffffff`) | 646 / 605 | yes |
+| early delay-ring commit (`SMU2000_MEG_EARLY`, same analysis as x86-64) | 641 / 601 | yes |
+| inline `get_lfo` (same tables and rule as x86-64) | **634 / 599** | yes |
+
+Block average 0.833 → 0.78 ms (14.3% → 13.4% of real time) over the branch.
+
+Two x86-64 wins did **not** transfer and were reverted, recorded so nobody
+re-tries them:
+
+* **Baked constants (`SMU2000_MEG_BAKE`) lose ~3–4% on arm64** (dense and
+  effects alike). The baked multiply needs the 32-bit coefficient widened to
+  64 bits (`sxtw64`), which x86-64 gets for free inside `imul64i`, and dense
+  has almost no skippable zero-coefficient ops. The `if (bake) return false`
+  refusal is back in place.
+* **Hoisting the SH2 address bounds into `x23–x28` measured flat.**
+  Four instructions saved per memory op against a six-`mov` prologue on every
+  block — the prologue eats the saving on blocks with few memory ops.
+
+One thing the porting turned up was fixed right after the merge:
+`swp30_jit.cpp`'s x86-64 LFO helper call hardcoded the Windows convention
+(`RCX`/`RDX`), and `SEED`/`K_MAX` sit in SysV-volatile `RSI`/`RDI` — without
+`sin-table.bin` the helper path ran and the binary segfaulted (exit 139 under
+Rosetta; arm64 is unaffected). The call now puts its arguments in
+`ARG0`/`ARG1`, and under SysV pushes `SEED` and `K_MAX` around the call
+(two pushes, so the 16-byte alignment holds; Windows x64 doesn't push, since
+there the callee preserves them and owns the 32-byte shadow space above the
+return address). The Windows code bytes are unchanged.
+
+It was checked on Windows by building the MEG JIT with the SysV argument
+registers and calling both the generated block and `call_lfo` through
+`__attribute__((sysv_abi))`, rendering without `sin-table.bin` so every LFO op
+goes through the helper: the code before the fix dies with an access violation
+(0xC0000005), the fix matches the interpreter byte for byte on effects, dense,
+chord and lofi, and the same build with the two pushes removed does not — so
+the test does see a clobbered `SEED`/`K_MAX`.
 
 ## The core needed one change
 
@@ -461,9 +516,12 @@ used before the machine's settings are thrown away.
 
 ### Ports, settings and factory reset
 
-The picker offers the same five choices as the Windows one: MIDI IN A and B, the
-machine's own **MIDI OUT**, and the two THRU ports. The first two and the THRU
-pairs were there from the start; the machine's MIDI OUT is what makes the
+The picker offers the same choices as the Windows one: MIDI IN A-D, the
+machine's own **MIDI OUT**, and the two THRU ports. C and D (parts 33-64) exist
+only over USB on the real machine, so the GUI starts with HOST SELECT = USB as
+`gui.cpp` does, and `--host-midi` gives the DIN ports A and B only. The menu ids
+and the `gui.ini` keys (`midi_in`, `midi_in_b`, `midi_in_c`, `midi_in_d`) are
+gui.cpp's. The machine's MIDI OUT is what makes the
 settings reachable from a librarian or editor over a virtual port. The titles
 are word for word what `gui.cpp` shows, so the two platforms cannot drift: `OUT`
 is what the firmware sends by itself, `THRU` what was received and echoed.
@@ -649,6 +707,33 @@ not assumed), so the factory cannot cast one to the other. The engine is reached
 through a private read-only property (`kEngineProperty`, 64000, in the range
 Apple leaves to everyone else) instead, which travels the ordinary property
 dispatch in plugin.cpp and so arrives with the instance already resolved.
+
+One more thing the editor does for its host rather than for itself. A host that
+keeps a plug-in's window in a panel which never takes key focus (Waveform does)
+makes every click into it a "first mouse" click, and AppKit spends such a click
+activating the window instead of handing it to the view: the panel draws, the
+LCD animates, and no button ever fires. So the view answers `acceptsFirstMouse:`
+YES — the click is delivered *and* the window activates — and it asks for first
+responder where the window is finally known, in `viewDidMoveToWindow`, not in
+`attached()`, which runs before the host has put the view anywhere and therefore
+asks nil. Focus is only taken when the window itself owns it, so a host that
+keeps another control in the same window keeps it.
+
+Whether the events arrive at all is the part no host will tell you about, so the
+view writes the first eight clicks to the engine's log with the three answers
+that name the cases: whether the window was key, whether the click arrived on the
+main thread, and which view it hit (a host that puts something over the panel
+takes them all). A run with no such line at all is the other answer — the window
+never became key and the click never got that far.
+
+Waveform 14 is where this was measured, and what a healthy answer looks like:
+
+```
+クリック 1 回目: 窓 あり、key yes、主の糸 yes、当たった先 SMUPlugView
+```
+
+(the window took key focus, the click arrived on the main thread, and the view it
+hit is the panel — three lines and the panel was live again.)
 
 `aubprobe --torture` walks the host's path from C++ through the Objective-C
 runtime and checks that a view comes back with a live subview in it, and `auval`
@@ -904,129 +989,60 @@ a promise the AU cannot keep here.
   question comes up, ask the reference: the pairs above were read off
   DLSMusicDevice rather than guessed.
 
-### The A/D INPUT bus, and the four properties it needs
+### The A/D INPUT bus
 
 Upstream's VST3 build has an `A/D Input` bus (the machine samples from it in
-`engine::fill()`), and the merge gave the AU an input bus to match. A bus is not
-only a buffer: a host configures it through five properties before it renders
-anything, and `AUBase` is not in the way here — this wrapper answers them by
-hand. Each of the five was a separate hole.
+`engine::fill()`), and the AU has the same bus. It is stereo at element 0 on
+the input scope, and the scope answers always: `SupportedNumChannels` says
+`[2, 2]`, the stream format reads and sets at any rate (the input is resampled
+at the output rate), and `SetRenderCallback` and `MakeConnection` are both
+accepted. A graph connection is stored as the `AudioUnitConnection` it is,
+never folded into the callback struct.
 
-| what the host does | what was missing |
-|---|---|
-| reads `SupportedNumChannels`, sees `[2, 2]` | — |
-| `GetPropertyInfo(StreamFormat, Input)` | answered `noErr` with `size = 0`, `writable = false` |
-| `SetProperty(StreamFormat, Input, 2 ch)` | refused, because of the line above |
-| `GetPropertyInfo(SetRenderCallback, Input)` | not answered at all (`kAudioUnitErr_InvalidProperty`) |
-| `SetProperty(SetRenderCallback, Input, cb)` | — |
-| `SetProperty(MakeConnection, Input, cb)` (a graph connection) | not answered, not accepted |
-| renders, expecting the callback to see the render's timestamp | the callback was handed `mSampleTime = 0` |
-| expecting a callback's error to come back out of `AURender` | swallowed; the block was silenced and `noErr` returned |
+The one gate is `ElementCount` on the input scope: 0 by default, and while it
+is 0 the engine is handed no input and the unit renders from MIDI alone. A
+host that wants the bus writes `1`, which switches the pull on and feeds the
+machine's A/D INPUT; writing `0` hands the bus back and drops the stored
+callback.
 
-The first row was the first regression. A unit that says "that property is here"
-and then "not writable, size 0" is read as one that **cannot be configured at
-all**: `auval` reports
-`Cannot Set Input Num Channels:2 when unit says it can` (`kAudioUnitErr_PropertyNotWritable`,
--10865) and fails the format tests before it ever reaches the render tests. Most
-hosts check validation when they scan for plug-ins and refuse to instantiate
-the unit, so from outside it looked like the AU had died — **no audio and no
-editor**, exactly as reported. Nothing about the engine or the editor was wrong.
-`MakeConnection` is the same shape of problem one step later: `auval` checks it
-under *connection semantics*, and a host that cannot connect the AU to a graph
-will not use it.
+Two contract details the pull keeps (both probed): the render's timestamp
+travels with the pull (`auval`: `AU is not passing time stamp correctly`
+otherwise), and a failing callback's error comes back out of `AURender` with
+the block silenced rather than playing stale buffers.
 
-Two more things about the bus that are easy to get wrong, both now checked:
+Asking for the bus after the unit is initialised does not work in an
+out-of-process host: its graph is built at initialise time, so the element is
+missing from it and every render fails with `-10877` (`InvalidElement`). A
+host adds the bus between `Uninitialize` and `Initialize`.
 
-- **The render's timestamp travels with the pull.** It says where in the stream
-the block sits, and a host handed `0` in its place lines the input up wrongly
-(`auval`: `AU is not passing time stamp correctly`).
-- **A failing callback's error is returned from `AURender`.** The block it did
-not fill is silenced rather than playing whatever the buffers held, and the
-status goes up (`auval`: `Render Input returned an error, but was not returned
-to the caller of AURender`).
+`aubprobe --torture` checks both states. Step 9 is the round trip in process:
+ask for the bus, and the count, the format, the callback and the channel
+matrix all answer, and the callback is pulled once per block; hand it back,
+and the callback is dropped with the unit still rendering. Step 8 is the
+out-of-process side: it instantiates the *installed* component with
+`kAudioComponentInstantiation_LoadOutOfProcess` — the road a sandboxed host
+takes, and the one place a counted-but-unconnected input element fails, since
+that hosting layer builds its graph from the unit's bus counts and every
+render then comes back `-10876` (`NoConnection`). The default unit renders
+there, and a second instantiation that asks for the bus before initialising
+renders with its input pulled (86 times over a second of 512-frame blocks).
+Step 8 needs `make install-au` first, and makes the `S_MU2000_ROMS` path
+absolute — the service inherits the environment but not the working directory.
+(`auval` likewise only looks at `~/Library/Audio/Plug-Ins/Components`, so
+`make install-au` first or its verdict is about the copy installed last time;
+the probes are the other way round — `build/aubprobe` opens the bundle it is
+handed.)
 
-`aubprobe --torture` grew a check for each: both properties answer writable with
-`sizeof(AURenderCallbackStruct)` on the input bus, the callback sees the sample
-time the render was given, and a callback returning
-`kAudioUnitErr_InvalidParameter` makes `AURender` return exactly that. Put any of
-the three bugs back and the probe reports it (two `NG` lines per sample rate) —
-verified by reverting the fix and building, then restoring it.
+#### The real-time-safety harness
 
-#### The element count, and the second regression
-
-There was a worse one behind those, and it only shows up in a **sandboxed** host.
-GarageBand cannot load a plug-in bundle into its own process, so AudioToolbox
-hosts the unit for it, out of process in `AUHostingService`
-(`kAudioComponentInstantiation_LoadOutOfProcess`). That layer builds its graph
-from the unit's **bus counts**, and a unit that counts an input bus nobody
-connected makes a node whose input has no source. Every render then comes back
-`kAudioUnitErr_NoConnection` (-10876): no audio, and the machine never advances,
-so the panel sits on `PowerOn MU2000 EX / Checking PLG` forever. It looked like a
-dead plug-in in GarageBand and a perfectly healthy one everywhere else.
-
-Everything below was measured on this machine, on the same build, changing one
-thing at a time:
-
-| | in process | out of process |
-|---|---|---|
-| `ElementCount(Input) = 1` (input bus counted) | renders, sounds | **`-10876` on every render** |
-| the same, with a callback connected to that bus | renders, sounds | renders, sounds |
-| `ElementCount(Input) = 0` (bus answerable, not counted) | renders, sounds | renders, sounds |
-| `ElementCount(Input) = 0`, `SupportedNumChannels` still `[2, 2]` | renders, sounds | renders, sounds |
-| Apple's `DLSMusicDevice` (`aumu`, no input bus) | renders, sounds | renders, sounds |
-
-Three things follow, and the third is the one that matters:
-
-- **`SupportedNumChannels` is not the trigger.** `[2, 2]` with the bus not
-  counted renders fine out of process, `[0, 2]` with the bus counted still
-  fails, and `auval` passes either way. Only the element count moves the needle.
-- **An input bus is a promise to have it connected.** With one connected, the
-  identical unit renders out of process — so nothing about the plugin's code is
-  wrong, it is the declaration. An instrument in GarageBand never gets its input
-  connected, so for the AU that promise can only be broken.
-- **The bus stays answerable, and is simply not counted.** `StreamFormat` and
-  `SetRenderCallback` on the input scope still work, `engine::fill` still
-  resamples what a host feeds it, and a host that sets the input up explicitly
-  (moving the format, adding the callback) still gets A/D INPUT. What a host no
-  longer sees is a bus in the enumeration — so GarageBand offers no input, which
-  is exactly the freedom it needs to render at all. The VST3 build has no such
-  constraint and continues to advertise its input bus; the standalone GUI
-  captures A/D INPUT as it always did. For the AU, a plug-in that runs beats an
-  input that is listed.
-
-Why it went unnoticed for a while is worth writing down: **`auval` and
-`aubprobe` both run in process.** They open the bundle with `CFBundle` and
-register its factory with `AudioComponentRegister`, which is the road a
-non-sandboxed host takes — so every check in this file passed while GarageBand
-was silent. The probe now has an eighth step that instantiates the *installed*
-component with `kAudioComponentInstantiation_LoadOutOfProcess`, waits for the
-machine over the same round trip, plays a note and requires sound. It runs when
-the bundle it was handed is in a standard components directory, and says so when
-it is not (a bundle in the build tree is not one the registrar can hand out), so
-`make install-au` comes first:
-
-```
-make install-au
-S_MU2000_ROMS=roms build/aubprobe ~/Library/Audio/Plug-Ins/Components/S-MU2000.component --torture
-  ...
-  OK: 別プロセス（AUHostingService）でも Render できた
-  ---- 悪いところ 0 件 ----
-```
-
-Putting the input bus back into the count makes it say
-`NG: 別プロセスの Render が -10876 で落ちる` instead — checked by doing that and
-building, then restoring.
-
-One more thing the check needed before it told the truth: the service inherits
-the environment but not the working directory, so `S_MU2000_ROMS=roms` (relative)
-cannot be resolved from there. The probe now makes that path absolute before it
-hands the work over, and waits for `Status` to reach 1 before playing, or it
-would be measuring the boot rather than the unit.
-
-`auval` only ever looks at `~/Library/Audio/Plug-Ins/Components`, so a fresh
-`build/S-MU2000.component` means nothing to it: `make install-au` first, or the
-verdict is about the copy installed last time. The probes are the other way
-round — `build/aubprobe` opens the bundle it is handed.
+`auval -real-time-safety` — a deeper harness that renders on a real-time
+thread under dtrace — no longer completes on current macOS (it hangs), so
+plain `auval -v` is the validator that runs today. While it still worked it
+taught one thing worth keeping: it built per-bus bookkeeping from the element
+count while wiring whatever the input scope answered, so a unit whose scope
+answered but whose bus was not counted made it crash inside itself. The
+current design is untouched by that either way — the scope answers, the count
+decides whether the engine is fed — and the harness is retired.
 
 ### Where the ROMs are looked for
 

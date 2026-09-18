@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" width="1640" height="680" viewBox="0 0 433.91666 179.91666">
+  <g id="card" inkscape:groupmode="layer" inkscape:label="SmartMedia の差し込み口">
+    <path id="card-1" style="opacity:1;fill:#404040;fill-opacity:1;stroke:none;stroke-width:0.26486;stroke-linecap:round;stroke-linejoin:round" transform="matrix(0.607428,-0.794375,0.831804,0.55507,81.557198,-72.18201)"
+          d="M -208.51409 92.875562 l -4.60071 3.359694 l 40.91359 58.552474 l 4.60072 -3.35969 z M -196.03103 112.36867 l 1.30639 1.86962 l -3.04791 2.22575 l -2.0109 -2.87785 l 1.9323 -1.41107 z" />
+    <path id="card-2" style="fill:none;stroke:#404040;stroke-width:0.529167;stroke-linecap:butt;stroke-linejoin:miter;stroke-dasharray:none;stroke-opacity:1" transform="matrix(1,0,0,1,81.557198,-105.50975)"
+          d="M 27.051415 259.14532 H -53.28425 l 3.31556 2.20288 h 73.704545 z" />
+    <path id="card-3" style="fill:none;stroke:#404040;stroke-width:0.529167;stroke-linecap:butt;stroke-linejoin:miter;stroke-dasharray:none;stroke-opacity:1" transform="matrix(1,0,0,1,81.557198,-105.50975)"
+          d="M -49.96869 261.3482 l -0.0062 2.63687 h 73.716947 l -0.0062 -2.63687 z" />
+    <path id="card-4" style="fill:none;stroke:#404040;stroke-width:0.529167;stroke-linecap:butt;stroke-linejoin:miter;stroke-dasharray:none;stroke-opacity:1" transform="matrix(1,0,0,1,81.557198,-105.50975)"
+          d="M 23.742056 263.98507 h -73.716947 l -3.320728 3.07265 h 80.358403 z" />
+  </g>
+</svg>

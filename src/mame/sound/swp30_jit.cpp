@@ -271,6 +271,9 @@ struct swp30_device::meg_jit {
 		void *buf = nullptr;
 		size_t buf_size = 0;
 		u32 d3 = 0, d2 = 0;
+		// S-MU2000: 訳したときのリバーブ RAM の区画の有効・無効（0x80e）。
+		// 無効な区画への出し入れは訳すときに省くので、変わったら訳し直す
+		u16 revram_enable = 0;
 		~code()
 		{
 #if SMU2000_MEG_JIT
@@ -365,6 +368,7 @@ void swp30_device::meg_jit_rebuild()
 	j.ops = m_meg_ops.data();
 	if (!j.build(j.gen, *m_meg, j.ops, *this, false))
 		j.gen.fn = nullptr;
+	j.gen.revram_enable = m_revram_enable;
 	// プログラムか番地が変わったので、焼き込んだ版は作り直す
 	j.spec.fn = nullptr;
 	j.spec_tried = false;
@@ -386,6 +390,14 @@ bool swp30_device::meg_jit_run()
 	meg_jit *j = m_jit.get();
 	if (!j || !j->gen.fn)
 		return false;
+
+	// S-MU2000: 区画の有効・無効が訳したときと変わっていたら、訳し直すまで解釈実行で回す。
+	// revram_enable_w からも作り直しを頼んでいるが、取りこぼしても正しく鳴るように二重にしておく
+	if (j->gen.revram_enable != m_revram_enable) {
+		meg_jit_invalidate();
+		m_meg_jit_wait = 1;
+		return false;
+	}
 
 	meg_jit::code *c = &j->gen;
 	if (g_meg_bake) {
@@ -1289,9 +1301,23 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 					a.call_abs(reinterpret_cast<void *>(&meg_jit::call_lfo));
 					a.addrsp(8);
 #else
-					a.mov64(RCX, MS);
-					a.imm32(RDX, o.lfo);
+					// sin 表が無いときは補助関数を呼ぶ。引数は規約に合わせて ARG0 = ms、ARG1 = LFO の番号。
+					// 以前は Windows x64 の RCX/RDX に決め打ちで、SysV（macOS・Linux の x86-64）では
+					// 引数が渡らず落ちていた（Rosetta で exit 139。PR #21 の注記）。
+					// SysV では rsi・rdi は呼ぶ先が壊してよいので、そこに置いている SEED と K_MAX を
+					// 積んで戻す（2 つで 16 バイトなので揃えは崩れない）。Windows x64 では呼ぶ先が守るうえ、
+					// 呼ぶ先が影の 32 バイトに書くので積まない
+					if constexpr (sysv_abi) {
+						a.push(SEED);
+						a.push(K_MAX);
+					}
+					a.mov64(ARG0, MS);
+					a.imm32(ARG1, o.lfo);
 					a.call_abs(reinterpret_cast<void *>(&meg_jit::call_lfo));
+					if constexpr (sysv_abi) {
+						a.pop(K_MAX);
+						a.pop(SEED);
+					}
 					load_p_limits();
 #endif
 				}
@@ -1416,7 +1442,12 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 			a.store32(M(o_memr_val + 4 * slot2(k)), RAX);
 			table_done = a.jmp_fwd();
 		}
-		if (o.memop) {
+		// S-MU2000: 無効な区画（0x80e）への出し入れは、訳すときに省く。
+		// 書き込みは落ち、読み出しは 0 になる。有効・無効が変われば訳し直す（meg_jit_run）
+		if (o.memop && BIT(swp.m_revram_enable, o.region)) {
+			if (o.memop != 1)
+				a.store32i(M(o_memr_val + 4 * slot2(k)), 0);
+		} else if (o.memop) {
 			a.loadu16(RAX, M(o_offset + 2 * s32(o.offset_index)));
 			if (o.mem_use_index) {
 				a.load32(RCX, M(o_ram_index));
@@ -1619,6 +1650,8 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 	const s32 o_ram_write = off(&ms, &ms.m_ram_write);
 	const s32 o_ram_index = off(&ms, &ms.m_ram_index);
 	const s32 o_sample   = off(&ms, &ms.m_sample_counter);
+	const s32 o_lfo      = off(&ms, ms.m_lfo.data());
+	const s32 o_lfo_counter = off(&ms, ms.m_lfo_counter.data());
 	const s32 o_seed     = off(&swp, &swp.m_rand_seed);
 	const s32 o_flag_n   = off(&swp, &swp.m_meg_flag_n);
 	const s32 o_flag_z   = off(&swp, &swp.m_meg_flag_z);
@@ -1633,6 +1666,9 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 	    sizeof(swp.m_meg_flag_n) != 1 || sizeof(ms.m_t_value[0]) != 2 || sizeof(ms.m_const[0]) != 2 ||
 	    sizeof(ms.m_offset[0]) != 2 || sizeof(ms.m_m[0]) != 4 || sizeof(ms.m_r[0]) != 4)
 		return false;
+	// The LFO goes inline only with a full quarter-wave table (0x8000
+	// entries), same rule as the x86-64 backend; otherwise call the helper.
+	const u16 *sintab = swp.m_sintab.count() >= 0x8000 ? swp.m_sintab.target() : nullptr;
 
 	// instructions that must leave a t value in the ring (2 later one is read), plus the tail
 	bool need_tval[0x180] = {};
@@ -1643,12 +1679,80 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 			need_tval[k] = true;
 	}
 
+	// A write delayed by three ops can be committed where it is written when
+	// no reader in between can see the difference: no write to the same
+	// register one or two ops ahead of any read (wrapping across samples),
+	// and nothing written by the tail that the next sample takes from the
+	// ring. Same analysis as the x86-64 backend (SMU2000_MEG_EARLY).
+	bool early_r[128] = {}, early_m[128] = {};
+	{
+		bool bad_r[128] = {}, bad_m[128] = {};
+		const auto reads = [&](const meg_state::op &o, bool m, u32 x) {
+			if (!x)
+				return false;
+			bool rd = false;
+			if (o.alu && (o.mmode == 2 || o.mmode == 3) && (o.m2_from_m != 0) == m && (m ? o.sm : o.sr) == x)
+				rd = true;
+			if (o.alu && !m && o.asel == 1 && o.sr == x)
+				rd = true;
+			if (o.alu && m && o.asel == 2 && o.sm == x)
+				rd = true;
+			if (!m && o.dr && o.dr_from_r && o.sr == x)
+				rd = true;
+			if (m && o.dm && o.dm_src == 7 && o.sm == x)
+				rd = true;
+			return rd;
+		};
+		for (u32 j = 0; j != 0x180; j++)
+			for (u32 back = 1; back <= 2; back++) {
+				const meg_state::op &w = ops[(j + 0x180 - back) % 0x180];
+				if (w.dr && reads(ops[j], false, w.dr))
+					bad_r[w.dr] = true;
+				if (w.dm && reads(ops[j], true, w.dm))
+					bad_m[w.dm] = true;
+			}
+		for (u32 k = 0x17d; k != 0x180; k++) {
+			if (ops[k].dr) bad_r[ops[k].dr] = true;
+			if (ops[k].dm) bad_m[ops[k].dm] = true;
+		}
+		static const bool early_on = [] {
+			const char *e = std::getenv("SMU2000_MEG_EARLY");
+			return !(e && e[0] == '0');
+		}();
+		for (u32 x = 1; x != 128; x++) {
+			early_r[x] = early_on && !branchy && !bad_r[x];
+			early_m[x] = early_on && !branchy && !bad_m[x];
+		}
+	}
+
+	// Even a write committed early leaves its ring slot holding the last
+	// value written to it, so a saved state reads back exactly what the
+	// interpreter would leave there.
+	bool last_slot_r[0x180] = {}, last_slot_m[0x180] = {};
+	for (u32 c = 0; c != 3; c++) {
+		for (int k = 0x17f; k >= 0; k--)
+			if (u32(k) % 3 == c && ops[k].dr) { last_slot_r[k] = true; break; }
+		for (int k = 0x17f; k >= 0; k--)
+			if (u32(k) % 3 == c && ops[k].dm) { last_slot_m[k] = true; break; }
+	}
+
 	emitter a;
 	// Block state in callee-saved registers (rbx/r12-r15 in the x86 version).
 	// A carries the value a program instruction computes, E holds an address
 	// across the revram helpers, T takes a materialized struct address; A, C, D,
 	// E and T are all caller-saved and hold nothing across a helper call.
-	const u8 MS = X19, SWP = X20, P = X21, SC = X22, RAM = X23;
+	// SEED keeps the rand() state across the block the way the x86 backend
+	// keeps it in rsi: every dithered write would otherwise load and store it.
+	// CB addresses the constant region (m_const/m_offset/m_lfo/m_t and the t
+	// ring): those tables sit ~12KB into meg_state, past what the halfword
+	// imm12 form reaches, so every access through MS pays an add_off first.
+	// m_m/m_r and the delay rings stay within reach and keep using MS.
+	// KLO/KMN/PMX hold the saturation limits the x86 backend keeps in
+	// registers (its rdi/rbp/r9/r10): -0x800001 and -0x800000 for pack24 and
+	// 0x3fffffffff for the clamp. Only three callee-saved registers are left,
+	// so P_MIN (-0x4000000000, two instructions) stays materialized.
+	const u8 MS = X19, SWP = X20, P = X21, SC = X22, RAM = X23, SEED = X24, CB = X25;
+	const u8 KLO = X26, KMN = X27, PMX = X28;
 	const u8 A = HA, C = HC, D = HD, E = HE, T = X6;
 
 	// [base + disp] with disp known at build time. Each size reaches further
@@ -1674,17 +1778,44 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 	const auto stw   = [&](u32 rt, u32 base, s32 d) { if (d >= 0 && d <= 16380) a.str_w(rt, base, d); else { a.add_off(T, base, d); a.str_w(rt, T, 0); } };
 	const auto ldx   = [&](u32 rt, u32 base, s32 d) { if (d >= 0 && d <= 32760) a.ldr_x(rt, base, d); else { a.add_off(T, base, d); a.ldr_x(rt, T, 0); } };
 	const auto stx   = [&](u32 rt, u32 base, s32 d) { if (d >= 0 && d <= 32760) a.str_x(rt, base, d); else { a.add_off(T, base, d); a.str_x(rt, T, 0); } };
+	// [CB + (d - o_const)]: the constant region, addressed from o_const. The
+	// call sites keep passing absolute struct offsets; the else branch is the
+	// old MS-based path and only guards against the struct layout drifting
+	// past the imm12 reach unnoticed.
+	const s32 o_cbias = o_const;
+	const auto cdh   = [&](u32 rt, s32 d) { const s32 r = d - o_cbias; if (r >= 0 && r <= 8190)  a.ldrh(rt, CB, r);  else { a.add_off(T, MS, d); a.ldrh(rt, T, 0); } };
+	const auto cdh_s = [&](u32 rt, s32 d) {
+		const s32 r = d - o_cbias;
+		if (r >= 0 && r <= 8190)
+			a.ldrsh(rt, CB, r);
+		else {
+			a.add_off(T, MS, d);
+			a.ldrsh(rt, T, 0);
+		}
+		a.sxtw64(rt, rt);
+	};
+	const auto csth   = [&](u32 rt, s32 d) { const s32 r = d - o_cbias; if (r >= 0 && r <= 8190)  a.strh(rt, CB, r);  else { a.add_off(T, MS, d); a.strh(rt, T, 0); } };
 
 	// entry: x0 = ms, x1 = swp, x2 = the reverb RAM. x30 is saved because the
-	// LFO is fetched with BLR, and x19-x23 because they carry the block state.
+	// LFO is fetched with BLR, and x19-x25 because they carry the block state
+	// (x29 is untouched by both the JIT and the helpers, so its save slot
+	// goes to x25 instead).
 	a.stp_x(X19, X20, X31, -16, true);
 	a.stp_x(X21, X22, X31, -16, true);
-	a.stp_x(X23, X30, X31, -16, true);
+	a.stp_x(X23, X24, X31, -16, true);
+	a.stp_x(X25, X30, X31, -16, true);
+	a.stp_x(X26, X27, X31, -16, true);
+	a.stp_x(X28, X29, X31, -16, true);   // x29 is never touched; it only pads the pair
 	a.mov_x(MS, X0);
 	a.mov_x(SWP, X1);
 	a.mov_x(RAM, X2);
 	ldx(P, MS, o_p);
 	ldw(SC, MS, o_sample);
+	ldw(SEED, SWP, o_seed);
+	a.add_off(CB, MS, u32(o_const));
+	a.mov_imm64(KMN, u64(s64(-0x800000)));
+	a.sub_imm64(KLO, KMN, 1);            // -0x800001, one past the low limit
+	a.mov_imm64(PMX, 0x3fffffffff);
 	if (branchy)
 		stw(WZR, SWP, o_skip);
 
@@ -1702,21 +1833,19 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 		a.cmp_x(A, C);
 		a.mov_imm64(D, 0x7fffff);
 		a.csel_x(A, D, A, EQ);
-		a.mov_imm64(C, u64(s64(-0x800001)));
-		a.cmp_x(A, C);
-		a.mov_imm64(D, u64(s64(-0x800000)));
-		a.csel_x(A, D, A, EQ);
+		a.cmp_x(A, KLO);
+		a.csel_x(A, KMN, A, EQ);
 		a.lsl_imm(A, A, 8);
 		a.sar_imm(A, A, 8);
 	};
-	// one step of swp30_device::rand. Output A
+	// one step of swp30_device::rand. Output A; the state lives in SEED
 	const auto rnd = [&]() {
-		ldw(A, SWP, o_seed);
+		a.mov_reg(A, SEED);
 		a.mov_imm32(T, 1664525);
 		a.mul(A, A, T);
 		a.mov_imm32(D, 1013904223);
 		a.add_reg(A, A, D);
-		stw(A, SWP, o_seed);
+		a.mov_reg(SEED, A);
 		a.ror_imm(A, A, 16);
 	};
 	// p plus noise, packed (dm 6, and dr's p). Output A
@@ -1774,11 +1903,11 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 		} else {
 			const meg_state::op &w = ops[k - 3];
 			const u32 s = slot3(k);
-			if (w.dm) {
+			if (w.dm && !early_m[w.dm]) {
 				ldw(C, MS, o_mw_value + 4 * s);
 				stw(C, MS, o_m + 4 * w.dm);
 			}
-			if (w.dr) {
+			if (w.dr && !early_r[w.dr]) {
 				ldw(C, MS, o_rw_value + 4 * s);
 				stw(C, MS, o_r + 4 * w.dr);
 			}
@@ -1861,15 +1990,15 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 			if (o.m1_from_t == 2) {
 				// MULTI COMP follows its envelope: t when the last latch was
 				// negative, the constant otherwise (meg_state::step, doc/upstream.md #29)
-				ldh_s(A, MS, o_t + 2 * o.t);
-				ldh_s(C, MS, o_const + 2 * s32(k));
+				cdh_s(A, o_t + 2 * o.t);
+				cdh_s(C, o_const + 2 * s32(k));
 				ldb(D, SWP, o_flag_n);
 				a.cmp_reg(D, WZR);
 				a.csel_x(A, A, C, NE);
 			} else if (o.m1_from_t)
-				ldh_s(A, MS, o_t + 2 * o.t);
+				cdh_s(A, o_t + 2 * o.t);
 			else
-				ldh_s(A, MS, o_const + 2 * s32(k));
+				cdh_s(A, o_const + 2 * s32(k));
 			if (o.m1_expand)
 				emit_m1_expand(a);
 			switch (o.mmode) {
@@ -1926,17 +2055,15 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 				a.mov_imm64(C, u64(s64(-0x4000000000)));
 				a.cmp_x(A, C);
 				a.csel_x(A, C, A, LT);
-				a.mov_imm64(C, 0x3fffffffff);
-				a.cmp_x(A, C);
-				a.csel_x(A, C, A, GT);
+				a.cmp_x(A, PMX);
+				a.csel_x(A, PMX, A, GT);
 				break;
 			case 2:
 				a.eor_reg(C, C, C);
 				a.cmp_x(A, C);
 				a.csel_x(A, C, A, LT);
-				a.mov_imm64(C, 0x3fffffffff);
-				a.cmp_x(A, C);
-				a.csel_x(A, C, A, GT);
+				a.cmp_x(A, PMX);
+				a.csel_x(A, PMX, A, GT);
 				break;
 			default:
 				a.mov_x(D, A);
@@ -1944,9 +2071,8 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 				a.cmp_x(D, X31);
 				a.csel_x(D, A, D, MI);
 				a.mov_x(A, D);
-				a.mov_imm64(C, 0x3fffffffff);
-				a.cmp_x(A, C);
-				a.csel_x(A, C, A, GT);
+				a.cmp_x(A, PMX);
+				a.csel_x(A, PMX, A, GT);
 				break;
 			}
 			a.mov_x(P, A);
@@ -1964,11 +2090,76 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 		if (o.dm) {
 			switch (o.dm_src) {
 			case 0: case 1: case 2: case 3:
-				a.mov_x(X0, MS);
-				a.mov_imm32(X1, o.lfo);
-				a.mov_imm64(X17, u64(uintptr_t(&meg_jit::call_lfo)));
-				a.blr(X17);
-				a.mov_reg(A, W0);                        // the result comes back in w0
+				if (sintab && o.lfo < 0x18) {
+					// meg_state::get_lfo in machine code, no call (same shape
+					// as the x86-64 backend). Output A. C, D and E are scratch.
+					static constexpr u32 lfo_offsets[16] = {
+						0x00000, 0x02aaa, 0x04000, 0x05555, 0x08000, 0x0aaaa, 0x0c000, 0x0d555,
+						0x10000, 0x12aaa, 0x14000, 0x15555, 0x18000, 0x1aaaa, 0x1c000, 0x1d555,
+					};
+					ldw(A, MS, o_lfo_counter + 4 * s32(o.lfo));
+					a.lsr_imm(A, A, 5);
+					cdh(D, o_lfo + 2 * s32(o.lfo));
+					a.mov_reg(C, D);
+					a.lsr_imm(C, C, 8);
+					a.and_imm(C, C, 3);
+					a.lslv(A, A, C);
+					a.mov_reg(C, D);
+					a.lsr_imm(C, C, 12);
+					a.mov_imm64(E, u64(uintptr_t(lfo_offsets)));
+					a.ldr_w_sr(C, E, C);
+					a.add_reg(A, A, C);
+					a.and_imm(A, A, 0x1ffff);
+					a.lsr_imm(D, D, 10);
+					a.and_imm(D, D, 3);
+					std::vector<size_t> done;
+					a.cmp_imm(D, 0);
+					const size_t not_sine = a.b_cond(NE);
+					{   // sine
+						a.mov_reg(C, A);
+						a.and_imm(C, C, 0x7fff);
+						a.tst_imm(A, 0x8000);
+						const size_t no_rev = a.b_cond(EQ);
+						a.eor_imm(C, C, 0x7fff);
+						a.patch(no_rev);
+						a.mov_imm64(E, u64(uintptr_t(sintab)));
+						a.mov_reg(D, A);
+						a.ldrh_sr(A, E, C);
+						a.tst_imm(D, 0x10000);
+						const size_t no_neg = a.b_cond(EQ);
+						a.eor_imm(A, A, 0xffff);
+						a.patch(no_neg);
+						done.push_back(a.b());
+					}
+					a.patch(not_sine);
+					a.cmp_imm(D, 1);
+					const size_t not_tri = a.b_cond(NE);
+					{   // tri
+						a.add_imm(A, A, 8, 1);               // +0x8000 via imm12 << 12
+						a.and_imm(A, A, 0x1ffff);
+						a.tst_imm(A, 0x10000);
+						const size_t no_fold = a.b_cond(EQ);
+						a.eor_imm(A, A, 0x1ffff);
+						a.patch(no_fold);
+						done.push_back(a.b());
+					}
+					a.patch(not_tri);
+					a.cmp_imm(D, 2);
+					const size_t not_up = a.b_cond(NE);
+					a.lsr_imm(A, A, 1);                              // saw up
+					done.push_back(a.b());
+					a.patch(not_up);
+					a.eor_imm(A, A, 0x1ffff);                        // saw down
+					a.lsr_imm(A, A, 1);
+					for (size_t d : done) a.patch(d);
+					a.lsl_imm(A, A, 7);
+				} else {
+					a.mov_x(X0, MS);
+					a.mov_imm32(X1, o.lfo);
+					a.mov_imm64(X17, u64(uintptr_t(&meg_jit::call_lfo)));
+					a.blr(X17);
+					a.mov_reg(A, W0);                        // the result comes back in w0
+				}
 				break;
 			case 4:
 				ldw(A, MS, o_ram_read);
@@ -1985,7 +2176,12 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 				ldw(A, MS, o_m + 4 * o.sm);
 				break;
 			}
-			stw(A, MS, o_mw_value + 4 * slot3(k));
+			if (k < 0x17d && early_m[o.dm]) {
+				stw(A, MS, o_m + 4 * o.dm);
+				if (last_slot_m[k])
+					stw(A, MS, o_mw_value + 4 * slot3(k));
+			} else
+				stw(A, MS, o_mw_value + 4 * slot3(k));
 		}
 		if (k >= 0x17d || branchy) {
 			a.mov_imm32(C, o.dm);
@@ -1998,7 +2194,12 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 				ldw(A, MS, o_r + 4 * o.sr);
 			else
 				p_packed(!o.no_noise);
-			stw(A, MS, o_rw_value + 4 * slot3(k));
+			if (k < 0x17d && early_r[o.dr]) {
+				stw(A, MS, o_r + 4 * o.dr);
+				if (last_slot_r[k])
+					stw(A, MS, o_rw_value + 4 * slot3(k));
+			} else
+				stw(A, MS, o_rw_value + 4 * slot3(k));
 		}
 		if (k >= 0x17d || branchy) {
 			a.mov_imm32(C, o.dr);
@@ -2039,10 +2240,10 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 		// ---- t ----
 		if (o.t_write) {
 			if (o.t_from_p)
-				ldh(A, MS, o_t_value + 2 * slot2(k));
+				cdh(A, o_t_value + 2 * slot2(k));
 			else
-				ldh(A, MS, o_const + 2 * s32(k));
-			sth(A, MS, o_t + 2 * o.t);
+				cdh(A, o_const + 2 * s32(k));
+			csth(A, o_t + 2 * o.t);
 		}
 		if (need_tval[k]) {
 			a.mov_x(A, P);
@@ -2058,7 +2259,7 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 				a.cmp_x(A, C);
 				a.csel_x(A, C, A, GT);
 			}
-			sth(A, MS, o_t_value + 2 * slot2(k));
+			csth(A, o_t_value + 2 * slot2(k));
 		}
 
 		// ---- memory operation ----
@@ -2067,7 +2268,7 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 			// A read marked with bit 0x23 addresses the reverb RAM absolutely: the
 			// firmware writes the wave or curve table straight into it, so the
 			// sample counter must not be subtracted (meg_state::step, doc/upstream.md #24)
-			ldh(A, MS, o_offset + 2 * s32(o.offset_index));
+			cdh(A, o_offset + 2 * s32(o.offset_index));
 			if (o.mem_use_index) {
 				ldw(C, MS, o_ram_index);
 				a.add_reg(A, A, C);
@@ -2084,8 +2285,14 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 			stw(A, MS, o_memr_val + 4 * slot2(k));
 			table_done = a.b();
 		}
-		if (o.memop) {
-			ldh(A, MS, o_offset + 2 * s32(o.offset_index));
+		// S-MU2000: 無効な区画（0x80e）への出し入れは、訳すときに省く（x86 側と同じ）
+		if (o.memop && BIT(swp.m_revram_enable, o.region)) {
+			if (o.memop != 1) {
+				a.mov_imm32(A, 0);
+				stw(A, MS, o_memr_val + 4 * slot2(k));
+			}
+		} else if (o.memop) {
+			cdh(A, o_offset + 2 * s32(o.offset_index));
 			if (o.mem_use_index) {
 				ldw(C, MS, o_ram_index);
 				a.add_reg(A, A, C);
@@ -2131,10 +2338,10 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 			// write it would have left in the ring and store only its t value
 			if (o.jump && o.t_write) {
 				if (o.t_from_p)
-					ldh(A, MS, o_t_value + 2 * slot2(k));
+					cdh(A, o_t_value + 2 * slot2(k));
 				else
-					ldh(A, MS, o_const + 2 * s32(k));
-				sth(A, MS, o_t + 2 * o.t);
+					cdh(A, o_const + 2 * s32(k));
+				csth(A, o_t + 2 * o.t);
 			}
 			stb(WZR, MS, o_mw_reg + slot3(k));
 			stb(WZR, MS, o_rw_reg + slot3(k));
@@ -2150,7 +2357,7 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 				a.mov_imm64(C, 0x7fff);
 				a.cmp_x(A, C);
 				a.csel_x(A, C, A, GT);
-				sth(A, MS, o_t_value + 2 * slot2(k));
+				csth(A, o_t_value + 2 * slot2(k));
 			}
 			if (normal_done)
 				a.patch(normal_done);
@@ -2159,7 +2366,11 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 
 	// exit
 	stx(P, MS, o_p);
-	a.ldp_x(X23, X30, X31, 16, true);
+	stw(SEED, SWP, o_seed);
+	a.ldp_x(X28, X29, X31, 16, true);
+	a.ldp_x(X26, X27, X31, 16, true);
+	a.ldp_x(X25, X30, X31, 16, true);
+	a.ldp_x(X23, X24, X31, 16, true);
 	a.ldp_x(X21, X22, X31, 16, true);
 	a.ldp_x(X19, X20, X31, 16, true);
 	a.ret();

@@ -11,6 +11,7 @@
 // 実機と同じく、MIDI は 31250bps の直列で MIDI IN A に流し込む。
 // 出来た WAV は MAME の録音と突き合わせるためのもの。
 
+#include "compat/platform.h"
 #include "mu2000.h"
 #include "bootcache.h"
 #include "smf.h"
@@ -163,6 +164,7 @@ int main(int argc, char **argv)
 	bool fast_midi = false;
 	bool usb_host  = false;
 	bool use_bootcache = false;   // --bootcache。起動後の写しから始める（確かめ用）
+	int native_fx = 0;            // --native-fx / --native-fx-full（doc/native-dsp.md）
 	const char *state_at = nullptr; size_t state_sample = 0;   // --state-at（確かめ用）
 	const char *forced_reset = nullptr;
 	const char *swptrace = nullptr;
@@ -175,9 +177,13 @@ int main(int argc, char **argv)
 	u32 meg_tr_from = 0, meg_tr_count = 0, meg_tr_pc0 = 0, meg_tr_pc1 = 0x180;
 	const char *adc_path = nullptr;    // A/D INPUT に流す WAV
 	const char *card_path = nullptr;   // 差す SmartMedia
+	const char *replay = nullptr;      // --replay-swp。記録したレジスタ列を SH-2 無しで流す
+	int native_engine = 0;             // --native-engine。firmware を走らせない口
 	for (int i = 4; i < argc; i++) {
 		if (!std::strcmp(argv[i], "--trace-swp") && i + 1 < argc)
 			swptrace = argv[++i];
+		else if (!std::strcmp(argv[i], "--replay-swp") && i + 1 < argc)
+			replay = argv[++i];
 		else if (!std::strcmp(argv[i], "--boot") && i + 1 < argc)
 			boot = std::atof(argv[++i]);
 		else if (!std::strcmp(argv[i], "--dump-dac") && i + 3 < argc) {
@@ -206,6 +212,12 @@ int main(int argc, char **argv)
 			fast_midi = true;
 		else if (!std::strcmp(argv[i], "--usb"))
 			usb_host = true;
+		else if (!std::strcmp(argv[i], "--native-fx"))
+			native_fx = 1;
+		else if (!std::strcmp(argv[i], "--native-engine"))
+			native_engine = 1;
+		else if (!std::strcmp(argv[i], "--native-fx-full"))
+			native_fx = 2;
 		else if (!std::strcmp(argv[i], "--bootcache"))
 			use_bootcache = true;
 		else if (!std::strcmp(argv[i], "--state-at") && i + 2 < argc) {
@@ -260,6 +272,36 @@ int main(int argc, char **argv)
 
 	if (card_path && !mu.card().load(card_path, err)) { std::fprintf(stderr, "%s\n", err.c_str()); return 1; }
 
+	// --replay-swp: 記録した SWP30 への書き込みを、SH-2 を回さずに同じ時刻へ流し込む
+	// （doc/native-engine.md の段 0。「音は SWP30 だけで作れる」ことの確かめ）
+	struct swp_write { u64 sample; bool master; u32 reg; u16 value; };
+	std::vector<swp_write> replay_list;
+	size_t replay_at = 0;
+	if (replay) {
+		std::FILE *rf = std::fopen(replay, "r");
+		if (!rf) { std::fprintf(stderr, "開けない: %s\n", replay); return 1; }
+		char line[256];
+		while (std::fgets(line, sizeof(line), rf)) {
+			const char *p = line;
+			if (*p == 'R')
+				continue;               // 読み出しは要らない
+			if (*p == 'W')
+				p += 2;
+			unsigned base = 0, reg = 0, val = 0;
+			unsigned long long sample = 0;
+			if (std::sscanf(p, "%x %x %x pc=%*x t=%*f s=%llu", &base, &reg, &val, &sample) != 4)
+				continue;
+			replay_list.push_back({ u64(sample), base == 0x800000, reg, u16(val) });
+		}
+		std::fclose(rf);
+		std::printf("再生する書き込み: %zu 件\n", replay_list.size());
+		if (boot < 0.0) {
+			std::fprintf(stderr, "--replay-swp には --boot <記録したときの起動秒数> が要る\n");
+			return 1;
+		}
+		mu.set_cpu_enabled(false);
+	}
+
 	std::FILE *tf = swptrace ? std::fopen(swptrace, "w") : nullptr;
 	if (tf)
 		mu.set_swp_trace(tf, true);
@@ -283,6 +325,8 @@ int main(int argc, char **argv)
 	mu.set_threaded(!single);
 	mu.set_fast_midi(fast_midi);
 	mu.set_usb_host(usb_host);
+	if (native_fx)
+		mu.set_native_fx(native_fx);
 	// 鍵は起動に使うワーク RAM も混ぜるので reset() の前に作る
 	const u64 boot_key = use_bootcache ? smu2000::bootcache::key(mu) : 0;
 	mu.reset();
@@ -318,7 +362,7 @@ int main(int argc, char **argv)
 			std::fprintf(stderr, "起動を待ったが MIDI 受信が有効にならなかった\n");
 			return 1;
 		}
-		std::printf("起動に %.2f 秒。ここから MIDI を流す\n", boot);
+		std::printf("起動に %.6f 秒。ここから MIDI を流す\n", boot);
 	}
 
 	const size_t boot_samples = size_t(boot * rate + 0.5);
@@ -335,6 +379,9 @@ int main(int argc, char **argv)
 	size_t scheduled_events = 0, scheduled_bytes = 0;
 	size_t tail_start = size_t(-1);
 	const size_t hard_stop = duration_given ? size_t((boot + seconds) * rate) : size_t(-1);
+	// 軽量モードの float 計算で、非正規化数に落ち込まないようにする。
+	// 音源として挿されたときと同じ状態で鳴らすため（compat/platform.h）
+	const smu2000::denormals_off no_denormals;
 	for (size_t i = pcm.size() / 2; ; i++) {
 		if (duration_given && i >= hard_stop)
 			break;
@@ -354,6 +401,10 @@ int main(int argc, char **argv)
 				std::fclose(sf);
 			}
 		}
+		// native の口は、起動が終わってから入れる（起動には firmware が要る）
+		if (native_engine && i == boot_samples)
+			mu.set_native_engine(native_engine);
+
 		// 起動ぶんは**整数で引く**。double(i)/rate - boot と書くと桁落ちで
 		// 1e-12 秒ずれ、イベントの時刻がちょうど境に乗ったときに 1 サンプル動く
 		const double t = (double(i) - double(boot_samples)) / rate;
@@ -383,6 +434,13 @@ int main(int argc, char **argv)
 			const double tin = t * rate;
 			const size_t k = tin < 0 ? adc_l.size() : size_t(tin);
 			mu.set_audio_input(k < adc_l.size() ? adc_l[k] : 0, k < adc_r.size() ? adc_r[k] : 0);
+		}
+		// 記録したときと同じサンプルの頭で入れ直す（CPU はそのサンプルぶんを
+		// SWP30 より先に回すので、頭で入れれば実機と同じ順になる）
+		while (replay_at < replay_list.size() && replay_list[replay_at].sample <= i) {
+			const swp_write &w = replay_list[replay_at];
+			mu.poke_swp(w.master, w.reg, w.value);
+			replay_at++;
 		}
 		s32 l = 0, r = 0;
 		mu.run_sample(l, r);
@@ -465,6 +523,15 @@ int main(int argc, char **argv)
 	}
 
 	write_wav(wav, pcm, rate);
+	if (native_engine)
+		std::printf("native の口: 演奏中に firmware を回したのは %.1f%%\n",
+		            100.0 * mu.native_firmware_share());
+	if (native_engine) {
+		const mu2000::native_stats st = mu.native_counts();
+		std::printf("  鍵: native %llu / firmware %llu（うち写し取り %llu）、そのほかの MIDI %llu\n",
+		            (unsigned long long)st.note_native, (unsigned long long)st.note_fw,
+		            (unsigned long long)st.learn, (unsigned long long)st.other);
+	}
 	std::printf("書き出した: %s（%.1f 秒）\n", wav.c_str(), double(total) / rate);
 	return 0;
 }

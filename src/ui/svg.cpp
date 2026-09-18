@@ -2,6 +2,7 @@
 
 #include "svg.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -53,11 +54,19 @@ bool is_cmd(char c)
 	return std::strchr("MmLlHhVvCcZzAaQqSsTt", c) != nullptr;
 }
 
-// 属性を 1 つ取り出す。name="…" の中身
+// 属性を 1 つ取り出す。name="…" の中身。
+// 名前の前が空白か < のものだけを見る（d を探して id="…" の中の d=" に当たらないように。
+// width を探して stroke-width に当たらないように。Inkscape で保存した絵は id が d の前に来ることがある）
 std::string attr(const std::string &tag, const char *name)
 {
-	std::string key = std::string(name) + "=\"";
-	const size_t at = tag.find(key);
+	const std::string key = std::string(name) + "=\"";
+	size_t at = 0;
+	while ((at = tag.find(key, at)) != std::string::npos) {
+		const char before = at ? tag[at - 1] : ' ';
+		if (before == ' ' || before == '\t' || before == '\n' || before == '\r' || before == '<')
+			break;
+		at += key.size();
+	}
 	if (at == std::string::npos)
 		return {};
 	const size_t start = at + key.size();
@@ -140,6 +149,83 @@ mat parse_transform(const std::string &t)
 	return m;
 }
 
+// 数の属性（"12.5" や "12.5px"）。無ければ def
+double num_attr(const std::string &tag, const char *name, double def = 0.0)
+{
+	const std::string v = attr(tag, name);
+	return v.empty() ? def : std::atof(v.c_str());
+}
+
+// 四角・丸・楕円・多角形を、同じ形のパスの d に直す（読み手は d だけを読む）。
+// 丸みは 3 次ベジエで近づける（弧の命令 A は読まないので）
+std::string shape_to_d(const std::string &name, const std::string &tag)
+{
+	char buf[512];
+	constexpr double K = 0.5522847498;       // 円の 1/4 をベジエで描くときの係数
+	auto ellipse = [&](double cx, double cy, double rx, double ry) {
+		std::snprintf(buf, sizeof(buf),
+		              "M %g,%g C %g,%g %g,%g %g,%g C %g,%g %g,%g %g,%g C %g,%g %g,%g %g,%g C %g,%g %g,%g %g,%g Z",
+		              cx + rx, cy,
+		              cx + rx, cy + ry * K, cx + rx * K, cy + ry, cx, cy + ry,
+		              cx - rx * K, cy + ry, cx - rx, cy + ry * K, cx - rx, cy,
+		              cx - rx, cy - ry * K, cx - rx * K, cy - ry, cx, cy - ry,
+		              cx + rx * K, cy - ry, cx + rx, cy - ry * K, cx + rx, cy);
+		return std::string(buf);
+	};
+	if (name == "circle") {
+		const double r = num_attr(tag, "r");
+		return r > 0 ? ellipse(num_attr(tag, "cx"), num_attr(tag, "cy"), r, r) : std::string();
+	}
+	if (name == "ellipse") {
+		const double rx = num_attr(tag, "rx"), ry = num_attr(tag, "ry");
+		return rx > 0 && ry > 0 ? ellipse(num_attr(tag, "cx"), num_attr(tag, "cy"), rx, ry) : std::string();
+	}
+	if (name == "rect") {
+		const double x = num_attr(tag, "x"), y = num_attr(tag, "y");
+		const double w = num_attr(tag, "width"), h = num_attr(tag, "height");
+		if (w <= 0 || h <= 0)
+			return {};
+		// 片方だけ書いてあれば、もう片方も同じ（SVG の決まり）
+		double rx = num_attr(tag, "rx", -1), ry = num_attr(tag, "ry", -1);
+		if (rx < 0) rx = ry;
+		if (ry < 0) ry = rx;
+		rx = std::clamp(rx, 0.0, w / 2);
+		ry = std::clamp(ry, 0.0, h / 2);
+		if (rx <= 0 || ry <= 0) {
+			std::snprintf(buf, sizeof(buf), "M %g,%g L %g,%g L %g,%g L %g,%g Z", x, y, x + w, y, x + w, y + h, x, y + h);
+			return buf;
+		}
+		std::snprintf(buf, sizeof(buf),
+		              "M %g,%g L %g,%g C %g,%g %g,%g %g,%g L %g,%g C %g,%g %g,%g %g,%g "
+		              "L %g,%g C %g,%g %g,%g %g,%g L %g,%g C %g,%g %g,%g %g,%g Z",
+		              x + rx, y, x + w - rx, y,
+		              x + w - rx + rx * K, y, x + w, y + ry - ry * K, x + w, y + ry,
+		              x + w, y + h - ry,
+		              x + w, y + h - ry + ry * K, x + w - rx + rx * K, y + h, x + w - rx, y + h,
+		              x + rx, y + h,
+		              x + rx - rx * K, y + h, x, y + h - ry + ry * K, x, y + h - ry,
+		              x, y + ry,
+		              x, y + ry - ry * K, x + rx - rx * K, y, x + rx, y);
+		return buf;
+	}
+	if (name == "polygon" || name == "polyline") {
+		const std::string pts = attr(tag, "points");
+		const char *q = pts.c_str();
+		std::string d;
+		double px, py;
+		bool first = true;
+		while (take_num(q, px) && take_num(q, py)) {
+			std::snprintf(buf, sizeof(buf), "%s %g,%g ", first ? "M" : "L", px, py);
+			d += buf;
+			first = false;
+		}
+		if (!d.empty() && name == "polygon")
+			d += "Z";
+		return d;
+	}
+	return {};
+}
+
 } // namespace
 
 
@@ -157,9 +243,25 @@ bool svg_art::load_file(const std::string &path)
 	return load_text(all);
 }
 
-bool svg_art::load_text(const std::string &s)
+bool svg_art::load_text(const std::string &text)
 {
 	clear();
+
+	// コメントは読まない（<!-- --> の中に残した古い形を描かないように）
+	std::string s;
+	s.reserve(text.size());
+	for (size_t at = 0; at < text.size();) {
+		const size_t open = text.find("<!--", at);
+		if (open == std::string::npos) {
+			s.append(text, at, std::string::npos);
+			break;
+		}
+		s.append(text, at, open - at);
+		const size_t close = text.find("-->", open + 4);
+		if (close == std::string::npos)
+			break;
+		at = close + 3;
+	}
 
 	// viewBox。無ければ width / height を使う
 	{
@@ -187,15 +289,36 @@ bool svg_art::load_text(const std::string &s)
 		}
 	}
 
+	// 形は書いてある順に描く。path のほか、rect・circle・ellipse・polygon・polyline も読む
+	// （パスに直して同じように扱う）
+	static const char *const ELEMENTS[] = { "path", "rect", "circle", "ellipse", "polygon", "polyline" };
 	size_t at = 0;
-	while ((at = s.find("<path", at)) != std::string::npos) {
-		const size_t end = s.find('>', at);
+	for (;;) {
+		size_t found = std::string::npos;
+		std::string name;
+		for (const char *e : ELEMENTS) {
+			const std::string open = std::string("<") + e;
+			size_t f = at;
+			while ((f = s.find(open, f)) != std::string::npos) {
+				const char next = f + open.size() < s.size() ? s[f + open.size()] : '>';
+				if (next == ' ' || next == '\t' || next == '\n' || next == '\r' || next == '/' || next == '>')
+					break;
+				f += open.size();            // <pathology> のような別の名前
+			}
+			if (f < found) {
+				found = f;
+				name = e;
+			}
+		}
+		if (found == std::string::npos)
+			break;
+		const size_t end = s.find('>', found);
 		if (end == std::string::npos)
 			break;
-		const std::string tag = s.substr(at, end - at);
+		const std::string tag = s.substr(found, end - found);
 		at = end + 1;
 
-		const std::string d = attr(tag, "d");
+		const std::string d = name == "path" ? attr(tag, "d") : shape_to_d(name, tag);
 		if (d.empty())
 			continue;
 		const std::string style = attr(tag, "style");
@@ -301,10 +424,15 @@ bool svg_art::load_text(const std::string &s)
 				}
 				x = a5; y = a6;
 			} else {
-				// 読まない命令。数を食い潰して次へ
+				// 読まない命令。数を食い潰して次へ。数でも命令でもない字なら 1 つ飛ばす（止まらないように）
 				double junk;
+				const char *before = p;
 				while (*p && !is_cmd(*p) && take_num(p, junk))
 					;
+				if (p == before && *p && !is_cmd(*p)) {
+					p++;
+					cmd = 0;
+				}
 			}
 		}
 		flush(false);

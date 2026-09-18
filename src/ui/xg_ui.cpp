@@ -2,11 +2,15 @@
 
 #include "xg_ui.h"
 
+#include "eq_curve.h"
 #include "fx_help.h"
+#include "fx_icons.h"
 
 #include "imgui.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -72,12 +76,25 @@ const xg::voice_rom *voices() { return g_voices.get(); }
 bool fx_type_menu(const std::vector<xg::fx_type> &types, int current, int &chosen)
 {
 	bool picked = false;
+	// 印を置くぶん、名前の前を空白で空ける
+	const float fs = ImGui::GetFontSize();
+	const int pad = int(std::ceil(fs * 1.35f / std::max(1.0f, ImGui::CalcTextSize(" ").x)));
+	auto with_icon = [&](int msb, const char *label, auto &&submit) {
+		const ImVec2 pos = ImGui::GetCursorScreenPos();
+		ImDrawList *dl = ImGui::GetWindowDrawList();
+		const bool r = submit((std::string(size_t(pad), ' ') + label).c_str());
+		fx_icon(dl, pos, ImGui::GetTextLineHeight(), msb, ImGui::GetColorU32(ImGuiCol_Text));
+		return r;
+	};
 	auto item = [&](const xg::fx_type &t, bool with_code) {
 		const int value = t.msb << 7 | t.lsb;
 		char label[64];
 		if (with_code) std::snprintf(label, sizeof(label), "%-10s  MSB %d / LSB %d", t.name, t.msb, t.lsb);
 		else           std::snprintf(label, sizeof(label), "%s", t.name);
-		if (ImGui::MenuItem(label, nullptr, value == current)) {
+		const bool clicked = (t.msb == 0 || t.msb == 0x40)
+		                   ? with_icon(t.msb, label, [&](const char *l) { return ImGui::MenuItem(l, nullptr, value == current); })
+		                   : ImGui::MenuItem(label, nullptr, value == current);
+		if (clicked) {
 			chosen = value;
 			picked = true;
 		}
@@ -85,14 +102,7 @@ bool fx_type_menu(const std::vector<xg::fx_type> &types, int current, int &chose
 			if (const char *h = fx_type_help(t.msb, t.lsb))
 				ImGui::SetTooltip("%s\n%s", t.name, h);
 	};
-	auto category_of = [](u8 msb) -> int {
-		const auto &cats = xg::fx_categories();
-		for (size_t c = 0; c < cats.size(); c++)
-			for (u8 m : cats[c].msbs)
-				if (m == msb)
-					return int(c);
-		return -1;
-	};
+	auto category_of = [](u8 msb) -> int { return fx_category_of(msb); };
 	// 系統（MSB）ごとに、表の順で
 	auto family = [&](u8 msb) {
 		std::vector<const xg::fx_type *> list;
@@ -155,7 +165,8 @@ bool fx_type_menu(const std::vector<xg::fx_type> &types, int current, int &chose
 	const auto &cats = xg::fx_categories();
 	for (int c : used) {
 		const bool here = current > 0 && (current >> 7) != 0x40 && category_of(u8(current >> 7)) == c;
-		if (ImGui::BeginMenu(c >= 0 ? cats[c].name : "その他")) {
+		const int msb = c >= 0 ? cats[c].msbs[0] : -1;
+		if (with_icon(msb, c >= 0 ? cats[c].name : "その他", [](const char *l) { return ImGui::BeginMenu(l); })) {
 			families_in(c);
 			ImGui::EndMenu();
 		}
@@ -182,16 +193,64 @@ int  g_shape_part = 0;
 bool g_part_request = false;
 }
 
-void request_part(int part) { g_shape_part = std::clamp(part, 0, 31); g_part_request = true; }
+void request_part(int part) { g_shape_part = std::clamp(part, 0, XG_PARTS - 1); g_part_request = true; }
 bool take_part_request() { const bool r = g_part_request; g_part_request = false; return r; }
 int  shape_window_part() { return g_shape_part; }
-void set_shape_window_part(int part) { g_shape_part = std::clamp(part, 0, 31); }
+void set_shape_window_part(int part) { g_shape_part = std::clamp(part, 0, XG_PARTS - 1); }
+
+namespace {
+bool g_master_request = false;
+}
+
+void request_master() { g_master_request = true; }
+bool take_master_request() { const bool r = g_master_request; g_master_request = false; return r; }
 
 const xg::param &P(const char *key)
 {
 	const xg::param *p = xg::find(key);
 	IM_ASSERT(p);
 	return *p;
+}
+
+bool param_slider(const char *key, int part, xg::model &m, bridge &br, const char *label)
+{
+	ImGui::PushID(key);
+	const xg::param &p = P(key);
+	int v = 0;
+	if (!m.get(p, part, v)) {
+		ImGui::BeginDisabled();
+		int dummy = p.min;
+		ImGui::SliderInt(label ? label : p.label, &dummy, p.min, p.max, "--");
+		ImGui::EndDisabled();
+		ImGui::PopID();
+		return false;
+	}
+	// 書式の % は SliderInt の書式として読まれないよう重ねる
+	const bool hz = std::strstr(key, "eq") && std::strstr(key, "freq");
+	const bool q = !std::strncmp(key, "master_eq.q", 11);
+	std::string shown;
+	if (hz) {
+		shown = eq::hz_text(v) + " Hz";
+	} else if (q) {
+		char buf[16];
+		std::snprintf(buf, sizeof(buf), "%.1f", v / 10.0);
+		shown = buf;
+	} else {
+		shown = xg::format(p, v);
+	}
+	std::string text;
+	for (char c : shown) {
+		if (c == '%')
+			text += '%';
+		text += c;
+	}
+	int nv = v;
+	const bool changed = ImGui::SliderInt(label ? label : p.label, &nv, p.min, p.max, text.c_str()) && nv != v;
+	if (changed)
+		br.send(m.set(p, part, nv));
+	help_tip(key);
+	ImGui::PopID();
+	return changed;
 }
 
 std::string part_name(int part)
@@ -236,12 +295,106 @@ std::string voice_text(int msb, int lsb, int prog)
 
 namespace {
 
-// バンクとプログラムを 1 通で選ぶ。MSB と LSB を書いてからプログラムを送る
+// パートの受信チャンネル（口 × 16 + ch）。ほかのパートと同じチャンネルなら（または
+// 分からなければ）-1。チャンネルのメッセージはそのチャンネルのパート全部に効くので
+int own_channel(int part, xg::model &m)
+{
+	const xg::param &rp = P("part.rcv_channel");
+	int rcv = 127;
+	if (!m.get(rp, part, rcv) || rcv < 0 || rcv > 63)
+		return -1;
+	for (int i = 0; i < XG_PARTS; i++) {
+		int other = 127;
+		if (i != part && (!m.get(rp, i, other) || other == rcv))
+			return -1;
+	}
+	return rcv;
+}
+
+// バンクとプログラムを選ぶ。
+// 受信チャンネルがそのパートだけのものなら、普通のバンクセレクト（CC0・CC32）とプログラムチェンジで
+// 送る（SysEx だと LCD に Ex の印が出るので）。写しは set で書き換えるが、返ってくる SysEx は送らない。
+// チャンネルが OFF・ほかのパートと共有・分からないときは、パラメータチェンジで送る
 void select_voice(int part, int msb, int lsb, int prog, xg::model &m, bridge &br)
 {
-	br.send(m.set(P("part.bank_msb"), part, msb));
-	br.send(m.set(P("part.bank_lsb"), part, lsb));
-	br.send(m.set(P("part.program"), part, prog));
+	const int ch = own_channel(part, m);
+	if (ch < 0) {
+		br.send(m.set(P("part.bank_msb"), part, msb));
+		br.send(m.set(P("part.bank_lsb"), part, lsb));
+		br.send(m.set(P("part.program"), part, prog));
+		return;
+	}
+	m.set(P("part.bank_msb"), part, msb);
+	m.set(P("part.bank_lsb"), part, lsb);
+	m.set(P("part.program"), part, prog);
+	const u8 c = u8(ch & 15);
+	const u8 msg[8] = { u8(0xb0 | c), 0x00, u8(msb), u8(0xb0 | c), 0x20, u8(lsb), u8(0xc0 | c), u8(prog) };
+	br.send_port(ch / 16, msg, sizeof(msg));
+}
+
+// ---- 試聴。音色を替えたら、そのパートの受信チャンネルで 1 秒だけ鳴らす
+//
+// 音色の切り替え（パラメータチェンジ）は口 A の送り口、ノートは受信チャンネルの口の送り口に乗るので、
+// 同じコマに送ると読み込む前の音色で鳴ることがある。ノートオンは少し遅らせる。
+// 送るのは画面のコマ（program_pane が描かれるたび）なので、窓を閉じたら audition_stop で止める
+struct audition {
+	int slot = -1, note = -1;          // 鳴らす先（口 × 16 + チャンネル）と鍵
+	double on_at = -1.0, off_at = -1.0;
+	bool sounding = false;
+};
+audition g_audition;
+
+double now_seconds()
+{
+	return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+void audition_off(bridge &br)
+{
+	audition &a = g_audition;
+	if (a.sounding) {
+		const u8 off[3] = { u8(0x80 | (a.slot & 15)), u8(a.note), 64 };
+		br.send_port(a.slot / 16, off, 3);
+	}
+	a = audition{};
+}
+
+// 試聴を始める。受信が OFF（ミュート中など）なら鳴らさない
+void audition_start(int part, int msb, xg::model &m, bridge &br)
+{
+	audition_off(br);
+	int rcv = 127;
+	if (!m.get(P("part.rcv_channel"), part, rcv) || rcv < 0 || rcv > 63)
+		return;
+	audition &a = g_audition;
+	a.slot = rcv;
+	// 鍵盤の右クリックで決めた鍵。決まっていなければドラムキットはスネア、ほかは C3（60）
+	a.note = audition_note() >= 0 ? audition_note() : msb == 127 ? 38 : 60;
+	const double t = now_seconds();
+	a.on_at = t + 0.06;
+	a.off_at = a.on_at + 1.0;
+}
+
+void audition_tick(bridge &br)
+{
+	audition &a = g_audition;
+	if (a.slot < 0)
+		return;
+	const double t = now_seconds();
+	if (!a.sounding && t >= a.on_at) {
+		const u8 on[3] = { u8(0x90 | (a.slot & 15)), u8(a.note), 100 };
+		br.send_port(a.slot / 16, on, 3);
+		a.sounding = true;
+	}
+	if (a.sounding && t >= a.off_at)
+		audition_off(br);
+}
+
+// 音色を替えて試聴する（音色を選ぶ面から）
+void select_and_audition(int part, int msb, int lsb, int prog, xg::model &m, bridge &br)
+{
+	select_voice(part, msb, lsb, prog, m, br);
+	audition_start(part, msb, m, br);
 }
 
 // あるプログラム番号で選べる音色（MSB/LSB の組）。同じ記録に落ちるものは最初の 1 つだけで、
@@ -288,6 +441,11 @@ const std::vector<bank_choice> &bank_choices(const xg::voice_rom &vr, int mode, 
 }
 
 } // namespace
+
+void audition_stop(bridge &br)
+{
+	audition_off(br);
+}
 
 void program_menu(int part, xg::model &m, const xg_snapshot *ram, bridge &br)
 {
@@ -374,7 +532,9 @@ void program_menu(int part, xg::model &m, const xg_snapshot *ram, bridge &br)
 
 
 // 出しっぱなしの音色選び。品書きと違って、押しても閉じないので続けて選べる。
-//   分類（16 の組 + ドラム + 効果音）→ 音色 → バンク違い
+//   左: 分類（16 の組 + ドラム + 効果音）
+//   右上: その分類の基本の音色（キットならキットの並び）
+//   右下: いまの音色のバンク違い
 // 分類は自分で選べるが、外から音色が変わったときは今の音色の分類へ移す
 void program_pane(int part, xg::model &m, const xg_snapshot *ram, bridge &br)
 {
@@ -388,6 +548,8 @@ void program_pane(int part, xg::model &m, const xg_snapshot *ram, bridge &br)
 	const xg::voice_rom *vr = voices();
 	const int now_group = !known ? 0 : msb == 127 ? GROUP_DRUM : msb == 126 ? GROUP_SFX : prog / 8;
 
+	audition_tick(br);
+
 	// 今見ている分類。音色が外から変わったら追いかける
 	static int group = -1;
 	static int last_part = -1, last_seen = -1;
@@ -398,30 +560,47 @@ void program_pane(int part, xg::model &m, const xg_snapshot *ram, bridge &br)
 	last_seen = seen;
 
 	const float fs = ImGui::GetFontSize();
-	ImGui::SetNextItemWidth(-FLT_MIN);
-	const char *group_name = group == GROUP_DRUM ? "ドラムキット" : group == GROUP_SFX ? "効果音キット" : GM_GROUPS[group];
-	if (ImGui::BeginCombo("##group", group_name)) {
-		for (int g = 0; g < 16; g++)
-			if (ImGui::Selectable(GM_GROUPS[g], g == group))
-				group = g;
-		if (ImGui::Selectable("ドラムキット", group == GROUP_DRUM))
-			group = GROUP_DRUM;
-		if (ImGui::Selectable("効果音キット", group == GROUP_SFX))
-			group = GROUP_SFX;
-		ImGui::EndCombo();
-	}
+	const ImGuiStyle &st = ImGui::GetStyle();
+	const ImVec2 avail = ImGui::GetContentRegionAvail();
 
-	// ---- 音色（分類の中の 8 つ、キットなら並んでいるだけ全部）
+	// ---- 左: 分類。いまの音色がある分類には印
+	const float group_w = std::min(fs * 10.5f, avail.x * 0.45f);
+	if (ImGui::BeginChild("groups", ImVec2(group_w, 0), ImGuiChildFlags_Borders)) {
+		for (int g = 0; g < 18; g++) {
+			const char *name = g == GROUP_DRUM ? "ドラムキット" : g == GROUP_SFX ? "効果音キット" : GM_GROUPS[g];
+			char label[64];
+			std::snprintf(label, sizeof(label), "%s%s##g%d", name, known && g == now_group ? " ●" : "", g);
+			if (g == GROUP_DRUM)
+				ImGui::Separator();
+			// 今見ているのと違う分類を押したら、その分類の先頭の音色（キットなら先頭のキット）に替える
+			if (ImGui::Selectable(label, g == group) && g != group) {
+				group = g;
+				if (g < GROUP_DRUM) {
+					select_and_audition(part, 0, 0, g * 8, m, br);
+				} else {
+					const int kmsb = g == GROUP_DRUM ? 127 : 126;
+					int first = 0;
+					while (vr && first < 127 && vr->kit_name(kmsb, first).empty())
+						first++;
+					select_and_audition(part, kmsb, 0, first, m, br);
+				}
+			}
+		}
+	}
+	ImGui::EndChild();
+	ImGui::SameLine();
+
+	// ---- 右: 上に音色、下にバンク違い。中身が無くても枠は残す（並びが跳ねないように）。
+	// 音色は 8 つなら 8 行ぶんの高さ、キットのように多いときは半分まで。残りはバンク違いに回す
 	const bool kits = group >= GROUP_DRUM;
 	const int kit_msb = group == GROUP_DRUM ? 127 : 126;
-	const std::vector<bank_choice> *banks =
-	    (!kits && vr) ? &bank_choices(*vr, mode, set, prog) : nullptr;
-	const bool has_banks = banks && banks->size() > 1;
-	// バンクの並びを出す分だけ、音色の並びを短くする
-	const float bank_h = has_banks ? std::min(fs * 6.5f, ImGui::GetContentRegionAvail().y * 0.45f) : 0.0f;
-	const float list_h = ImGui::GetContentRegionAvail().y - bank_h - (has_banks ? ImGui::GetStyle().ItemSpacing.y : 0.0f);
+	const std::vector<bank_choice> *banks = (known && msb < 126 && vr) ? &bank_choices(*vr, mode, set, prog) : nullptr;
+	const float right_h = ImGui::GetContentRegionAvail().y;
+	const float rows_h = ImGui::GetTextLineHeightWithSpacing() * 8 + st.WindowPadding.y * 2;
+	const float voices_h = kits ? (right_h - st.ItemSpacing.y) * 0.5f : std::min(rows_h, (right_h - st.ItemSpacing.y) * 0.5f);
 
-	if (ImGui::BeginChild("voices", ImVec2(0, list_h), ImGuiChildFlags_Borders)) {
+	ImGui::BeginGroup();
+	if (ImGui::BeginChild("voices", ImVec2(0, voices_h), ImGuiChildFlags_Borders)) {
 		if (kits) {
 			for (int i = 0; i < 128; i++) {
 				std::string kit = vr ? vr->kit_name(kit_msb, i) : std::string();
@@ -432,7 +611,7 @@ void program_pane(int part, xg::model &m, const xg_snapshot *ram, bridge &br)
 				char label[48];
 				std::snprintf(label, sizeof(label), "%3d %s", i + 1, vr ? kit.c_str() : "Kit");
 				if (ImGui::Selectable(label, known && msb == kit_msb && i == prog))
-					select_voice(part, kit_msb, 0, i, m, br);
+					select_and_audition(part, kit_msb, 0, i, m, br);
 			}
 		} else {
 			for (int i = group * 8; i < group * 8 + 8; i++) {
@@ -446,24 +625,32 @@ void program_pane(int part, xg::model &m, const xg_snapshot *ram, bridge &br)
 				std::snprintf(label, sizeof(label), "%3d %s", i + 1, base.c_str());
 				const bool current = known && msb < 126 && i == prog;
 				if (ImGui::Selectable(label, current))
-					select_voice(part, 0, 0, i, m, br);
+					select_and_audition(part, 0, 0, i, m, br);
 			}
 		}
 	}
 	ImGui::EndChild();
 
-	// ---- 同じ番号のバンク違い
-	if (has_banks) {
-		if (ImGui::BeginChild("banks", ImVec2(0, 0), ImGuiChildFlags_Borders)) {
+	// ---- 同じ番号のバンク違い（いまの音色の）
+	if (ImGui::BeginChild("banks", ImVec2(0, 0), ImGuiChildFlags_Borders)) {
+		if (banks && banks->size() > 1) {
+			ImGui::TextDisabled("%3d のバンク違い", prog + 1);
 			for (const bank_choice &c : *banks) {
 				char item[72];
 				std::snprintf(item, sizeof(item), "%s  %d/%d", c.name.c_str(), c.msb, c.lsb);
 				if (ImGui::Selectable(item, known && c.msb == msb && c.lsb == lsb))
-					select_voice(part, c.msb, c.lsb, prog, m, br);
+					select_and_audition(part, c.msb, c.lsb, prog, m, br);
 			}
+		} else if (known && msb >= 126) {
+			ImGui::TextDisabled("キットにはバンク違いが無い");
+		} else if (!vr) {
+			ImGui::TextDisabled("ROM から音色を読めないので、バンク違いを出せない");
+		} else {
+			ImGui::TextDisabled("この音色にはバンク違いが無い");
 		}
-		ImGui::EndChild();
 	}
+	ImGui::EndChild();
+	ImGui::EndGroup();
 }
 
 
@@ -677,6 +864,8 @@ bool  g_help = true;
 int   g_lang = 0;
 float g_zoom = 0.625f;                 // 一覧の表示の大きさ
 float g_shapes_zoom = 0.6f;            // パートの音色の窓の表示の大きさ
+float g_master_zoom = 0.8f;            // マスターの窓の表示の大きさ
+int   g_audition_note = -1;            // 試聴で鳴らす鍵（-1 は決まっていない）
 bool  g_loaded = false;
 
 // Windows: %LOCALAPPDATA%\S-MU2000\editor.ini -- the same place gui.ini lives
@@ -703,6 +892,10 @@ void load_settings()
 			g_zoom = std::clamp(float(std::atof(line + 14)), 0.5f, 1.5f);
 		else if (!std::strncmp(line, "shapes_zoom=", 12))
 			g_shapes_zoom = std::clamp(float(std::atof(line + 12)), 0.4f, 1.5f);
+		else if (!std::strncmp(line, "audition_note=", 14))
+			g_audition_note = std::clamp(std::atoi(line + 14), -1, 127);
+		else if (!std::strncmp(line, "master_zoom=", 12))
+			g_master_zoom = std::clamp(float(std::atof(line + 12)), 0.4f, 1.5f);
 		else if (!std::strncmp(line, "lang=", 5))
 			for (int i = 0; i < NLANG; i++)
 				if (!std::strcmp(line + 5, LANGS[i].code))
@@ -718,8 +911,8 @@ void save_settings()
 		return;
 	smu2000::ensure_dir(path.substr(0, path.find_last_of("\\/")));
 	if (FILE *f = std::fopen(path.c_str(), "wb")) {
-		std::fprintf(f, "help=%d\nlang=%s\noverview_zoom=%.3f\nshapes_zoom=%.3f\n",
-		             g_help ? 1 : 0, LANGS[g_lang].code, g_zoom, g_shapes_zoom);
+		std::fprintf(f, "help=%d\nlang=%s\noverview_zoom=%.3f\nshapes_zoom=%.3f\nmaster_zoom=%.3f\naudition_note=%d\n",
+		             g_help ? 1 : 0, LANGS[g_lang].code, g_zoom, g_shapes_zoom, g_master_zoom, g_audition_note);
 		std::fclose(f);
 	}
 }
@@ -774,6 +967,38 @@ void set_shapes_zoom(float zoom)
 	const float z = std::clamp(zoom, 0.4f, 1.5f);
 	if (z != g_shapes_zoom) {
 		g_shapes_zoom = z;
+		save_settings();
+	}
+}
+
+int audition_note()
+{
+	ensure_loaded();
+	return g_audition_note;
+}
+
+void set_audition_note(int note)
+{
+	ensure_loaded();
+	note = std::clamp(note, -1, 127);
+	if (note != g_audition_note) {
+		g_audition_note = note;
+		save_settings();
+	}
+}
+
+float &master_zoom()
+{
+	ensure_loaded();
+	return g_master_zoom;
+}
+
+void set_master_zoom(float zoom)
+{
+	ensure_loaded();
+	const float z = std::clamp(zoom, 0.4f, 1.5f);
+	if (z != g_master_zoom) {
+		g_master_zoom = z;
 		save_settings();
 	}
 }

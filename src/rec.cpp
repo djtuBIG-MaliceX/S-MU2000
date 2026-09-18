@@ -97,11 +97,11 @@ void write_wav(const std::string &path, const std::vector<short> &pcm, unsigned 
 }
 
 // MIDI ファイルを実時間で流す。midisend.exe と同じことを別スレッドで。
-// SMF のポート指定（`FF 21`）で 2 つの口へ振り分ける。実機の MU2000 は
-// USB で `Yamaha MU2000-1` `-2` … と口が並ぶので、A と B をそこへ渡す
+// SMF のポート指定（`FF 21`）で口 A〜D へ振り分ける。実機の MU2000 は
+// USB で `Yamaha MU2000-1` `-2` … と口が並ぶので、A〜D をそこへ渡す
 std::atomic<bool> g_stop{false};   // 録り終わったら送るのもやめる
 
-void send_midi(int port, int port_b, const std::string &path, double delay)
+void send_midi(const int want[4], const std::string &path, double delay)
 {
 	std::vector<smf::event> events;
 	std::string err;
@@ -109,9 +109,8 @@ void send_midi(int port, int port_b, const std::string &path, double delay)
 		std::fprintf(stderr, "%s\n", err.c_str());
 		return;
 	}
-	HMIDIOUT outs[2] = { nullptr, nullptr };
-	const int want[2] = { port, port_b };
-	for (int i = 0; i < 2; i++) {
+	HMIDIOUT outs[4] = { nullptr, nullptr, nullptr, nullptr };
+	for (int i = 0; i < 4; i++) {
 		if (want[i] < 0)
 			continue;
 		if (midiOutOpen(&outs[i], UINT(want[i]), 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR)
@@ -122,6 +121,12 @@ void send_midi(int port, int port_b, const std::string &path, double delay)
 		for (HMIDIOUT h : outs) if (h) midiOutClose(h);
 		return;
 	}
+	// Windows の眠りの刻みは既定で 15.6ms ある。この中で Sleep(2) と書いても
+	// 15ms 寝過ごすことがあり、そのぶん MIDI が遅れて届く。firmware は 1ms・2.5ms の
+	// 刻みで音を組み立てるので、十数 ms もずれると層の遅れが毎回変わってしまう
+	// （2026-09-17 に、同じ MIDI で 24 音のうち 1 音が 88ms ずれているのを見つけた）。
+	// 刻みを 1ms に詰めてから送る
+	timeBeginPeriod(1);
 	LARGE_INTEGER freq, t0;
 	QueryPerformanceFrequency(&freq);
 	QueryPerformanceCounter(&t0);
@@ -142,7 +147,9 @@ void send_midi(int port, int port_b, const std::string &path, double delay)
 		if (g_stop.load(std::memory_order_acquire))
 			break;
 		if (e.bytes.empty()) continue;
-		out = outs[(e.port && outs[1]) ? 1 : 0];
+		// その口を開いていなければ、前と同じく B（それも無ければ A）へ重ねる
+		const int p = std::min<int>(e.port, 3);
+		out = outs[p] ? outs[p] : (p && outs[1]) ? outs[1] : outs[0];
 		if (e.bytes[0] == 0xf0) {
 			std::vector<char> buf(e.bytes.begin(), e.bytes.end());
 			MIDIHDR h{};
@@ -153,6 +160,9 @@ void send_midi(int port, int port_b, const std::string &path, double delay)
 				while (!(h.dwFlags & MHDR_DONE)) Sleep(1);
 				midiOutUnprepareHeader(out, &h, sizeof(h));
 			}
+		} else if (e.bytes[0] == 0xf5 && e.bytes.size() == 2) {
+			// 口の切り替え（ケーブルメッセージ）。ファイルでは F7 02 F5 nn で入っている
+			midiOutShortMsg(out, DWORD(0xf5) | (DWORD(e.bytes[1]) << 8));
 		} else if (e.bytes[0] < 0xf0) {
 			DWORD msg = e.bytes[0];
 			if (e.bytes.size() > 1) msg |= DWORD(e.bytes[1]) << 8;
@@ -163,11 +173,27 @@ void send_midi(int port, int port_b, const std::string &path, double delay)
 	Sleep(100);
 	for (HMIDIOUT h : outs)
 		if (h) { midiOutReset(h); midiOutClose(h); }
+	timeEndPeriod(1);
 }
 
 // 相手が生きているかを確かめる。MIDI の機器照会（Device Inquiry）を送って
 // 返事が来るかを見る。音が録れないとき、機械が黙っているのか、
 // 音の線（S/PDIF）が切れているのかを分けるため
+// 32 ビットでは lambda を __stdcall の関数ポインタに cast できない（x64 は
+// 呼び出し規約が 1 種類なので通っていた）。CALLBACK 付きの普通の関数にする
+static void CALLBACK inquiry_cb(HMIDIIN, UINT msg, DWORD_PTR inst, DWORD_PTR p1, DWORD_PTR)
+{
+	std::vector<unsigned char> *got = (std::vector<unsigned char> *)inst;
+	if (msg == MIM_DATA) {
+		for (int i = 0; i < 3; i++)
+			got->push_back((unsigned char)((p1 >> (8 * i)) & 0xff));
+	} else if (msg == MIM_LONGDATA) {
+		MIDIHDR *h = (MIDIHDR *)p1;
+		for (DWORD i = 0; i < h->dwBytesRecorded; i++)
+			got->push_back((unsigned char)h->lpData[i]);
+	}
+}
+
 int inquiry(int out_port, int in_port)
 {
 	static std::vector<unsigned char> got;
@@ -178,18 +204,8 @@ int inquiry(int out_port, int in_port)
 		std::fprintf(stderr, "MIDI 出力 %d を開けない\n", out_port);
 		return 1;
 	}
-	auto cb = [](HMIDIIN, UINT msg, DWORD_PTR, DWORD_PTR p1, DWORD_PTR) {
-		if (msg == MIM_DATA) {
-			for (int i = 0; i < 3; i++)
-				got.push_back((unsigned char)((p1 >> (8 * i)) & 0xff));
-		} else if (msg == MIM_LONGDATA) {
-			MIDIHDR *h = (MIDIHDR *)p1;
-			for (DWORD i = 0; i < h->dwBytesRecorded; i++)
-				got.push_back((unsigned char)h->lpData[i]);
-		}
-	};
 	HMIDIIN in = nullptr;
-	if (midiInOpen(&in, UINT(in_port), (DWORD_PTR)(void (CALLBACK *)(HMIDIIN, UINT, DWORD_PTR, DWORD_PTR, DWORD_PTR))cb, 0,
+	if (midiInOpen(&in, UINT(in_port), (DWORD_PTR)inquiry_cb, (DWORD_PTR)&got,
 	               CALLBACK_FUNCTION) != MMSYSERR_NOERROR) {
 		std::fprintf(stderr, "MIDI 入力 %d を開けない\n", in_port);
 		midiOutClose(out);
@@ -255,7 +271,8 @@ int main(int argc, char **argv)
 			std::printf("  %zu: %s\n", i, names[i].c_str());
 		if (names.empty()) std::printf("  （なし）\n");
 		std::printf("\n使い方: rec <番号> <出力 wav> <秒数>\n"
-		            "        [--send <MIDI 出力番号> <MIDI ファイル>] [--send-b <番号>]\n");
+		            "        [--send <MIDI 出力番号> <MIDI ファイル>] [--send-b <番号>]\n"
+		            "        [--send-c <番号>] [--send-d <番号>]\n");
 		return 0;
 	}
 	if (argc < 4) {
@@ -267,15 +284,19 @@ int main(int argc, char **argv)
 	const int index = std::atoi(argv[1]);
 	const std::string wav = argv[2];
 	const double seconds = std::atof(argv[3]);
-	int midi_port = -1, midi_port_b = -1;
+	int midi_ports[4] = { -1, -1, -1, -1 };
 	std::string midi_file;
 	double midi_delay = 0.5;   // 録り始めてから流すまで
 	for (int i = 4; i < argc; i++) {
 		if (!std::strcmp(argv[i], "--send") && i + 2 < argc) {
-			midi_port = std::atoi(argv[++i]);
+			midi_ports[0] = std::atoi(argv[++i]);
 			midi_file = argv[++i];
 		} else if (!std::strcmp(argv[i], "--send-b") && i + 1 < argc)
-			midi_port_b = std::atoi(argv[++i]);
+			midi_ports[1] = std::atoi(argv[++i]);
+		else if (!std::strcmp(argv[i], "--send-c") && i + 1 < argc)
+			midi_ports[2] = std::atoi(argv[++i]);
+		else if (!std::strcmp(argv[i], "--send-d") && i + 1 < argc)
+			midi_ports[3] = std::atoi(argv[++i]);
 		else if (!std::strcmp(argv[i], "--delay") && i + 1 < argc)
 			midi_delay = std::atof(argv[++i]);
 	}
@@ -328,8 +349,8 @@ int main(int argc, char **argv)
 
 	std::thread sender;
 	client->Start();
-	if (midi_port >= 0)
-		sender = std::thread([&] { send_midi(midi_port, midi_port_b, midi_file, midi_delay); });
+	if (midi_ports[0] >= 0)
+		sender = std::thread([&] { send_midi(midi_ports, midi_file, midi_delay); });
 
 	while (got < want) {
 		if (WaitForSingleObject(ev, 2000) != WAIT_OBJECT_0)

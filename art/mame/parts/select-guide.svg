@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" width="1640" height="680" viewBox="0 0 433.91666 179.91666">
+  <g id="select-guide" inkscape:groupmode="layer" inkscape:label="SELECT の横の三角と、下の折れ線">
+    <path id="select-guide-1" style="fill:none;fill-opacity:1;stroke:#404040;stroke-width:0.79375;stroke-linecap:butt;stroke-linejoin:miter;stroke-dasharray:0.79375, 0.79375;stroke-dashoffset:0;stroke-opacity:1" transform="matrix(1,0,0,1,81.557198,-105.50975)"
+          d="M 197.49991 255.20711 l 19.42557 -0.0872 v -19.55587" />
+    <path id="select-guide-2" style="fill:none;stroke:#404040;stroke-width:0.529167;stroke-linecap:butt;stroke-linejoin:miter;stroke-dasharray:none;stroke-opacity:1" transform="matrix(1,0,0,1,81.557198,-105.50975)"
+          d="M 194.75931 224.9738 l 7.42791 -17.5503 c 0.30862 -0.7292 1.11416 -0.70257 1.11416 0.32867 v 37.30171 c 0 1.03123 -0.80554 0.8319 -1.11416 0.10269 l -7.42791 -17.55029 c -0.3086 -0.7292 -0.3086 -1.90328 0 -2.63248 z" />
+  </g>
+</svg>

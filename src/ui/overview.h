@@ -4,7 +4,7 @@
 // 曲を流しながら全体のバランスを見て整える。
 //
 // 1 行に: パートと音色、VEL メーター、VOL / EXP / PAN / P.BEND / MOD / HOLD の棒と数、
-// VIB / FILTER / EG / EQ の絵（点をつまんで変える）、INS、VAR / CHO / REV の棒と数、鳴っている鍵盤。
+// VIB / FILTER / EG / EQ の絵（見るだけ。ダブルクリックでパートの音色の窓）、INS、VAR / CHO / REV の棒と数、鳴っている鍵盤。
 // 値は RAM の写し（panel::tick が層に入れたもの）と、MIDI の見張り（押さえている鍵）から。
 
 #ifndef S_MU2000_UI_OVERVIEW_H
@@ -37,7 +37,8 @@ public:
 	struct column;                   // 列の中身（overview.cpp）
 
 	// 絵の 1 マス。パートの音色の窓（part_shapes）も同じものを大きく描く。
-	// compact は一覧の中の小さなマスのとき。ダブルクリックでパートの音色の窓を頼む
+	// compact は一覧の中の小さなマスのとき。描くだけでマウスでは触れない（ダブルクリックで
+	// パートの音色の窓を頼むのは呼ぶ側）。点をつまんで変えるのは compact でないときだけ
 	//
 	// EG: アタック・ディケイ・リリースの形を描き、点をつまんで動かす
 	static void eg_cell(int part, xg::model &m, bridge &br, float w, float h, bool compact);
@@ -47,9 +48,35 @@ public:
 	static void eq_cell(int part, xg::model &m, bridge &br, float w, float h, bool compact);
 	// ビブラート: 揺れの波の山をつまんで速さと深さ、平らな所の終わりで掛かり始め
 	static void vib_cell(int part, xg::model &m, bridge &br, float w, float h, bool compact);
+	// マスター EQ の 5 つの帯の特性。edit なら点をつまんで周波数とゲイン、ホイールで Q（マスターの窓）。
+	// edit でなければ描くだけ（一覧のマスターの行）
+	static void master_eq_plot(xg::model &m, bridge &br, float w, float h, bool edit);
+
+	// パートの音色の窓の上のペイン: 掛かっているエフェクト（種類の名前まで）、VOL〜HOLD と VAR〜REV の棒
+	// （一覧と同じく触れる）、このパートの鍵盤。窓を閉じたら strip_hidden で鳴らしている鍵を離す
+	void part_strip(int part, xg::model &m, const xg_snapshot &ram, bridge &br);
+	void strip_hidden(bridge &br)
+	{
+		release_keys(br);
+		release_pc_keys(br);
+	}
 
 private:
+	// 1 パートの鍵盤（押さえている鍵が光る。押すと鳴らす）。slot は受信の口 × 16 + ch（無ければ -1）。
+	// marker（パートの音色の窓）なら、右クリックで試聴の鍵を決め（目印を描く）、左で鳴らす。
+	// 一覧では左右どちらでも鳴らす。pc_low は PC のキーボードで弾ける範囲の下の端（-1 なら描かない）
+	void keys_cell(int part, int slot, const xg_snapshot &ram, bridge &br, float w, float h,
+	               bool marker = false, int pc_low = -1);
+	// モジュレーションホイール（CC1）。カーソルを載せてホイールか、上下にドラッグで変える
+	void mod_wheel(int part, int slot, const xg_snapshot &ram, bridge &br, float w, float h);
+	// PC のキーボードで弾く（A W S E D F T G Y H U J K O L P ; が C から、Z / X でオクターブ）
+	void pc_keys(int slot, bridge &br);
+	void release_pc_keys(bridge &br);
+	// 行を選ぶ。パートの音色の窓も同じパートに替える
+	void select_part(int part);
 	void release_keys(bridge &br);          // マウスで鳴らしている鍵を全部離す
+	// 上の帯の右端の、同時発音数（マスタとスレーブの内訳）と CPU の負荷。数字の後ろに棒
+	void meters(bridge &br);
 	// ミュートとソロを音源に効かせる。消すパートは受信チャンネルを OFF にし（先に
 	// そのチャンネルへオールサウンドオフ）、戻すパートは覚えておいたチャンネルに戻す。
 	// 曲の XG リセットなどで受信チャンネルが書き換わったら、覚えを捨ててもう一度消す
@@ -57,9 +84,14 @@ private:
 	// パートの欄の右端の M / S の印
 	void mute_buttons(int part, float x, float y, float w, float h);
 	void row(int part, xg::model &m, const xg_snapshot &ram, bridge &br, float h);
-	// INS 列の 1 マス。右クリックで掛ける・外す・種類、印のドラッグで別のパートへ
-	void ins_cell(int part, xg::model &m, bridge &br, float h);
-	// マスター EQ の 1 マス。5 つの帯の点、ホイールで Q、右クリックで種類
+	// INS 列の 1 マス。掛かっているエフェクトの印（1-4、V）を横に並べる。names なら種類の名前も。
+	// which で並べるものを絞る（パートの音色の窓はインサーションとバリエーションを別の場所に出す）。
+	// 右クリックで掛ける・外す・種類、印のドラッグで別のパートへ、印のダブルクリックで設定の窓
+	enum class fx_which { all, insertions, variation };
+	void ins_cell(int part, xg::model &m, bridge &br, float h, bool names = false, fx_which which = fx_which::all);
+	// パートの帯の 1 行目（VAR の棒の真上）に、バリエーションの種類と繋がり方（x0-x1 の幅に収める）
+	void variation_label(int part, xg::model &m, bridge &br, float x0, float y, float x1);
+	// マスター EQ の 1 マス。見るだけで、ダブルクリックでマスターの窓
 	void master_eq_cell(xg::model &m, bridge &br, float h);
 	// 上のマスターの表。マスターボリューム、移調、リバーブ・コーラス・バリエーションの種類と戻り、
 	// インサーション 1-4 の種類と掛け先、全パートの鍵盤
@@ -78,6 +110,13 @@ private:
 	// 配列の初期化で -1 を並べるのは 64 個では長いので、開くときに埋める（reset_rows）
 	int    m_playing[XG_PARTS];
 	int    m_playing_slot[XG_PARTS] = {};
+	// PC のキーボードで弾いている音（キーごと。-1 は鳴らしていない）と、その口×チャンネル
+	int    m_pc_note[17] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 };
+	int    m_pc_slot[17] = {};
+	int    m_pc_base = 60;                 // A の鍵（C3）
+	// モジュレーションホイールで送った値と時刻（RAM の写しが追いつくまではこちらを出す）
+	int    m_mod_sent = -1;
+	double m_mod_sent_at = -10.0;
 	xg::model *m_model = nullptr;     // 閉じたときに受信チャンネルを戻すため（draw で覚える）
 	bool   m_mute[XG_PARTS] = {}, m_solo[XG_PARTS] = {};
 	int    m_saved_rcv[XG_PARTS];     // ミュートで OFF にする前の受信チャンネル（-1 は消していない）

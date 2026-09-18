@@ -411,6 +411,11 @@ void sh7042_device::state(state_io &s)
 	// 内蔵の周辺。生まれた順にたどる
 	m_intc->state(s);
 	m_adc0->state(s);
+	// S-MU2000: 中速の SH7042 は A/D 変換器を 2 つ持つ。2 つ目（AN4）を写し忘れていたので、
+	// 状態を戻すと HOST SELECT の読み値が 0 に戻り、firmware が「USB ではない」と見て
+	// USB の受信を止めていた（issue #18）。版 8 から写す
+	if (s.version() >= 8 && m_adc1)
+		m_adc1->state(s);
 	m_bsc->state(s);
 	m_cmt->state(s);
 	m_dmac->state(s);

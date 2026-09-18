@@ -7,6 +7,7 @@
 #include "xg/fx_params.h"
 #include "xg/fx_types.h"
 #include "fx_help.h"
+#include "fx_icons.h"
 #include "eq_curve.h"
 
 #include <algorithm>
@@ -347,7 +348,7 @@ void fx_editor::draw(xg::model &m, const xg_snapshot &, bridge &br)
 	ImGui::TextUnformatted("種類");
 	ImGui::SameLine();
 	ImGui::SetNextItemWidth(fs * 11);
-	if (ImGui::BeginCombo("##type", has_type ? xg::fx_name(type).c_str() : "--", ImGuiComboFlags_HeightLarge)) {
+	if (begin_fx_combo("##type", has_type ? type : -1, ImGuiComboFlags_HeightLarge)) {
 		// 品書きの形（分類 → 系統 → LSB 違い）で選ぶ
 		int chosen = 0;
 		if (fx_type_menu(xg::ins_types(), has_type ? type : -1, chosen)) {
@@ -392,7 +393,9 @@ void fx_editor::draw(xg::model &m, const xg_snapshot &, bridge &br)
 	// 名前のプレート
 	const std::string title = has_type ? xg::fx_name(type) : "--";
 	ImFont *font = ImGui::GetFont();
-	dl->AddText(font, fs * 1.9f, ImVec2(pos.x + fs * 1.8f, pos.y + fs * 0.8f), IM_COL32(250, 250, 240, 255), title.c_str());
+	if (has_type)
+		fx_icon(dl, ImVec2(pos.x + fs * 1.8f, pos.y + fs * 0.85f), fs * 1.9f, msb, IM_COL32(250, 250, 240, 230));
+	dl->AddText(font, fs * 1.9f, ImVec2(pos.x + fs * (has_type ? 4.2f : 1.8f), pos.y + fs * 0.8f), IM_COL32(250, 250, 240, 255), title.c_str());
 	char sub[64];
 	std::snprintf(sub, sizeof(sub), "INSERTION %d  →  %s", slot, part < XG_PARTS + 2 ? part_name(part).c_str() : "OFF");
 	dl->AddText(ImVec2(pos.x + fs * 1.9f, pos.y + fs * 3.0f), IM_COL32(250, 250, 240, 150), sub);

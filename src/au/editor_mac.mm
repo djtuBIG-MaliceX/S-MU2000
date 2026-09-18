@@ -95,6 +95,15 @@ bool view_info(CFURLRef *out_bundle_url, CFStringRef *out_class_name)
 
 - (BOOL)isFlipped { return YES; }
 
+// The panel handles the clicks, but a host that hands the click to this frame
+// (a window that does not take key focus makes the first click a "first mouse"
+// one) should get the same answer as the panel does
+- (BOOL)acceptsFirstMouse:(NSEvent *)event
+{
+	(void)event;
+	return YES;
+}
+
 - (void)dealloc
 {
 	// plug_view counts its own references (it implements FUnknown's addRef /

@@ -100,16 +100,25 @@ void sh_intc_device::internal_interrupt(int vector)
 
 void sh_intc_device::set_input(int inputnum, int state)
 {
-	if(BIT(m_lines, inputnum) == state)
+	if(int(BIT(m_lines, inputnum)) == state)
 		return;
-	if(BIT(m_icr, 7-inputnum)) {
-		// Level interrupt
+	// S-MU2000: **線の状態を覚える**。覚えていないと、下の 2 つが効かない。
+	//  ・レベルの割り込みで、まだ線が立っているのに interrupt_taken が保留を消してしまう
+	//  ・同じ値で 2 度呼ばれたときの早戻り
+	if(state)
+		m_lines |= 1 << inputnum;
+	else
+		m_lines &= ~(1 << inputnum);
+	// S-MU2000: ICR のビットは **0 がレベル（ロー）、1 が立ち下がり**（SH7042 の仕様）。
+	// ここは逆に見ていた。interrupt_taken のほうは正しく見ているので、食い違っていた
+	if(!BIT(m_icr, 7-inputnum)) {
+		// レベル
 		if(state)
 			m_pending[64 >> 5] |= 1 << inputnum;
 		else
 			m_pending[64 >> 5] &= ~(1 << inputnum);
 	} else {
-		// Edge interrupt
+		// 立ち下がり（縁）
 		if(state)
 			m_pending[64 >> 5] |= 1 << inputnum;
 	}
@@ -147,6 +156,12 @@ void sh_intc_device::ipr_w(offs_t offset, u16 data, u16 mem_mask)
 {
 	COMBINE_DATA(&m_ipr[offset]);
 	logerror("ipr_w %x, %04x @ %04x\n", offset, data, mem_mask);
+	// S-MU2000: **優先度を変えたら選び直す**。firmware は受け取りが詰まると
+	// その割り込みの優先度を 0 に落として止め、掃けてから戻す。選び直さないと、
+	// 止めている間に立った保留がそのまま残り、戻しても二度と上がらない。
+	// MU2000 では、USB の口へ 1 秒に 2 万バイト近い設定データを流すと firmware が
+	// これをやり、以後 MIDI を 1 バイトも受け取らなくなっていた（X で報告された testxg.mid）
+	update_irq();
 }
 
 

@@ -58,9 +58,9 @@ int message_length(u8 status)
 {
 	if (status >= 0xf8) return 1;                    // real-time
 	switch (status) {
-	case 0xf1: case 0xf3: return 2;
+	case 0xf1: case 0xf3: case 0xf5: return 2;   // F5 nn: cable message
 	case 0xf2:            return 3;
-	case 0xf4: case 0xf5: case 0xf6: case 0xf7: return 1;
+	case 0xf4: case 0xf6: case 0xf7: return 1;
 	default: break;
 	}
 	const u8 kind = status & 0xf0;

@@ -42,7 +42,7 @@ enum : u8 {
 // 64-bit register numbers share the encoding; the instruction class selects
 // the width. X17 is the intra-procedure-call scratch (see mov_imm64_x17).
 enum : u8 { X0 = 0, X1 = 1, X2 = 2, X3 = 3, X4 = 4, X5 = 5, X6 = 6, X7 = 7, X8 = 8, X9 = 9,
-             X16 = 16, X17 = 17, X19 = 19, X20 = 20, X21 = 21, X22 = 22, X23 = 23, X29 = 29, X30 = 30, X31 = 31 };
+             X16 = 16, X17 = 17, X19 = 19, X20 = 20, X21 = 21, X22 = 22, X23 = 23, X24 = 24, X25 = 25, X26 = 26, X27 = 27, X28 = 28, X29 = 29, X30 = 30, X31 = 31 };
 
 // Condition codes for B.cond / CSET, plus the aliases CMP/HS and CMP/LO use.
 enum : u8 { EQ, NE, CS, HS = CS, CC, LO = CC, MI, PL, VS, VC, HI, LS, GE, LT, GT, LE, AL };
@@ -109,15 +109,22 @@ struct emitter {
 		else { movz(rd, lo, 0); movk(rd, hi, 1); }
 	}
 
-	// 64-bit constant into an x register (four chunks; sf=1 form, since a w-form
-	// movz/movk here would leave the upper half of the register undefined and
-	// the selftest's function pointer would sign-extend the low word)
+	// 64-bit constant into an x register. Only the nonzero 16-bit chunks are
+	// emitted (a movz for the highest one, movk for the rest), so small
+	// values take one instruction instead of four: the MEG JIT materializes
+	// constants like 0x800000 per sample, and helper-call addresses only need
+	// three chunks on macOS (high chunk is zero).
 	void mov_imm64(u32 rd, u64 v)
 	{
-		emit(0xD2800000u | 0 << 21 | u32(v & 0xffff) << 5 | rd);          // movz x
-		emit(0xF2800000u | 1 << 21 | u32((v >> 16) & 0xffff) << 5 | rd);  // movk x, hw=1
-		emit(0xF2800000u | 2 << 21 | u32((v >> 32) & 0xffff) << 5 | rd);  // movk x, hw=2
-		emit(0xF2800000u | 3 << 21 | u32((v >> 48) & 0xffff) << 5 | rd);  // movk x, hw=3
+		int top = -1;
+		for (int hw = 3; hw >= 0; hw--)
+			if ((v >> (hw * 16)) & 0xffff) { top = hw; break; }
+		if (top < 0) { emit(0xD2800000u | 0 << 21 | 0 << 5 | rd); return; }   // movz xd, #0
+		emit(0xD2800000u | u32(top) << 21 | u32((v >> (top * 16)) & 0xffff) << 5 | rd);
+		for (int hw = top - 1; hw >= 0; hw--) {
+			const u32 chunk = u32((v >> (hw * 16)) & 0xffff);
+			if (chunk) emit(0xF2800000u | u32(hw) << 21 | chunk << 5 | rd);
+		}
 	}
 
 	// ---- register moves and extends ----
