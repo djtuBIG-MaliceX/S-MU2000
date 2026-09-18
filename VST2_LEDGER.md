@@ -405,7 +405,43 @@ MinGW appends `-mingw`/`-mingw-clang`). Static `/MT` CRT everywhere.
 
 ---
 
+## Clean-room VST2 ABI layer + nightly release CI (2026-09-19) — **DONE**
+
+Enables **nightly VST2 CI** without ever touching the proprietary SDK (supersedes
+the "VST2 gated OFF on CI" line in P6 for the nightly workflow).
+
+- `third_party/vst2/vst2_abi.h` — PR [tarboh/S-MU2000#16](https://github.com/tarboh/S-MU2000/pull/16)
+  (drel4, `983d2d8`, BSD-3-Clause) vendored verbatim + provenance `README.md`.
+- `cmake/vst2_compat/{compat_aeffect_core,compat_aeffect_extended}.h` — clean-room
+  declaration of the full public VST2.4 ABI surface iPlug2 compiles against
+  (all `eff*` 0–79 / master 0–49 numbers, deprecated entries DECLARED with their
+  `__nameDeprecated` spellings so numbering is immutable, dual-arch static_asserts).
+  Own file names; the SDK names `aeffect.h`/`aeffectx.h` only ever exist as
+  configure-time copies into the UNTRACKED `iPlug2/Dependencies/IPlug/VST2_SDK/`.
+- `cmake/iplug2_paths.cmake` — provider resolution: real SDK → preexisting stub
+  drop → clean-room pair; `SMU2000_VST2_PREFER_COMPAT=ON` forces clean-room
+  (CI default); status line reports `vst2=TRUE/{sdk|sdk-stub|compat}`.
+- Parity gates (dev-box only; SDK is read, never copied to repo):
+  `tools/vst2_abi_check.py` (377 SDK enumerators under FORCE_DEPRECATED semantics —
+  all match; catches off-by-number spaces like `kVstAutomationUnsupported=0`),
+  `tools/vst2_abi_check.cpp` compiled twice (SDK vs compat) diffing 55
+  sizeof/offsetof facts on **both** x64+Win32; orchestrated by
+  `tools/vst2_abi_check.ps1 -Sdk <vstsdk2.4/pluginterfaces/vst2.x>`.
+  `tools/vst2_host_probe.cpp` + `tools/vst2_probe_run.ps1` editor round-trip:
+  **PASS x64 + Win32** against compat-built DLLs.
+- Findings baked into compat: real 2.4 `aeffect.h` defines `ERect` itself (aeditel
+  not needed); `effOfflineNotify/Prepare/Run` stay PLAIN-named under
+  FORCE_DEPRECATED (iPlug2's opcode logger references them); automation states
+  start at `kVstAutomationUnsupported=0` (naïve `Off=0` was a real off-by-one).
+- `.github/workflows/nightly.yml` — push `main`+`iPlug-experiment` + dispatch:
+  matrix ci-win64/ci-win32 `PREFER_COMPAT=ON` → VST2 `.dll` + CLAP `.clap`,
+  PE-machine + LoadLibrary/`VSTPluginMain` smoke gates (DLL NOT booted — no ROMs,
+  hard rule #1 → `ROM-REQUIRED.txt` ships), per-arch zips → rolling `nightly`
+  prerelease (delete-then-recreate tag, `contents: write`, concurrency serialized).
+  `build-native.yml` untouched (general PR/branch check).
+
 ## Boot gating + snapshot cache (2026-09-16) — sync boot so the song head isn't eaten
+
 
 **Problem.** The engine booted the MU2000 firmware on a BACKGROUND thread
 (`engine::start()` → `boot()` spins `run_sample()` until `midi_ready()`, 6.6 s of samples
@@ -574,4 +610,11 @@ this harness. No plugin/GUI/editor regression observed on any arch.
         sh_adc/sh_sci C4805 warnings).
 
 ### Wave schedule — COMPLETE (P0–P7 green)
+
+- [x] Clean-room VST2 ABI + nightly release CI — **DONE 2026-09-19** (section
+      "Clean-room VST2 ABI layer" above). Opcode gate 377/377, struct gate 55
+      facts x 2 arches, editor probe PASS Win32+x64 on compat-built DLLs.
+      `nightly.yml` YAML-validated; first real run happens on push to GitHub
+      (nothing pushed yet).
+
 

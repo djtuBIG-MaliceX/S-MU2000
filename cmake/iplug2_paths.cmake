@@ -11,6 +11,9 @@
 #   SMU2000_VST2_SDK_DIR   - vstsdk2.4 root ($ENV{VST2_SDK_DIR}, then D:/opt/vst/vstsdk2.4,
 #                            then the iPlug2/Dependencies/IPlug/VST2_SDK stub); aeffect.h must
 #                            be found in <root> or <root>/pluginterfaces/vst2.x
+#   SMU2000_VST2_PREFER_COMPAT - OFF (default). When ON (or when no SDK is found — the CI
+#                            case), cmake/vst2_compat's clean-room pair is copied (renamed)
+#                            into the untracked stub dir instead. Never commit SDK files.
 #   SMU2000_CLAP_DIR       - dir containing CLAP_SDK + CLAP_HELPERS
 #                            (default: iPlug2/Dependencies/IPlug)
 #   SMU2000_VST3_SDK_DIR   - OPTIONAL vst3sdk checkout ($ENV{VST3_SDK_DIR}, then D:/opt/vst/vst3sdk)
@@ -69,39 +72,84 @@ foreach(_cand "${SMU2000_VST2_SDK_DIR}/pluginterfaces/vst2.x" "${SMU2000_VST2_SD
 endforeach()
 
 set(SMU2000_VST2_STUB_DIR "${SMU2000_IPLUG_DEPS_DIR}/VST2_SDK")
+
+# Clean-room VST2 ABI layer (see third_party/vst2/README.md). Committed under
+# OUR names only; at configure time the two files are copied (renamed) into the
+# UNTRACKED stub dir so stock IPlugVST2.cpp resolves its includes there. Used
+# when no proprietary SDK is available (CI) — or forced via PREFER_COMPAT to
+# validate the clean-room build on SDK-bearing machines.
+option(SMU2000_VST2_PREFER_COMPAT
+  "Ignore any found vstsdk2.4 and build against the committed clean-room VST2 ABI layer (cmake/vst2_compat)." OFF)
+set(SMU2000_VST2_COMPAT_DIR "${CMAKE_CURRENT_LIST_DIR}/vst2_compat")
+set(SMU2000_VST2_PROVIDER "")    # sdk | sdk-stub | compat (informational)
+
+# Did a previous configure drop OUR clean-room pair into the stub?
+set(_smu2000_stub_ae "${SMU2000_VST2_STUB_DIR}/aeffect.h")
+set(_smu2000_stub_is_compat FALSE)
+if(EXISTS "${_smu2000_stub_ae}")
+  file(READ "${_smu2000_stub_ae}" _smu2000_stub_head LIMIT 2048)
+  if(_smu2000_stub_head MATCHES "SMU2000_VST2_COMPAT_CORE_H")
+    set(_smu2000_stub_is_compat TRUE)
+  endif()
+endif()
+
 set(SMU2000_VST2_SUPPORTED TRUE)
-if(_smu2000_vst2_hdr)
-  # Upstream VST2.cmake compiles against the submodule stub dir: drop the two headers
-  # (the only ones IPlugVST2.cpp needs) there if missing. Untracked, gitignored.
-  if(NOT EXISTS "${SMU2000_VST2_STUB_DIR}/aeffect.h")
+if(SMU2000_VST2_PREFER_COMPAT)
+  if(EXISTS "${SMU2000_VST2_COMPAT_DIR}/compat_aeffect_core.h" AND EXISTS "${SMU2000_VST2_COMPAT_DIR}/compat_aeffect_extended.h")
     file(MAKE_DIRECTORY "${SMU2000_VST2_STUB_DIR}")
-    foreach(_h aeffect.h aeffectx.h)
-      if(EXISTS "${_smu2000_vst2_hdr}/${_h}")
-        configure_file("${_smu2000_vst2_hdr}/${_h}" "${SMU2000_VST2_STUB_DIR}/${_h}" COPYONLY)
-      endif()
-    endforeach()
-    message(STATUS "SMU2000: copied VST2 headers from ${_smu2000_vst2_hdr} to ${SMU2000_VST2_STUB_DIR}")
-  endif()
-  if(EXISTS "${SMU2000_VST2_STUB_DIR}/aeffect.h" AND EXISTS "${SMU2000_VST2_STUB_DIR}/aeffectx.h")
-    message(STATUS "SMU2000: VST2 SDK headers OK (${SMU2000_VST2_STUB_DIR})")
+    configure_file("${SMU2000_VST2_COMPAT_DIR}/compat_aeffect_core.h"    "${_smu2000_stub_ae}" COPYONLY)
+    configure_file("${SMU2000_VST2_COMPAT_DIR}/compat_aeffect_extended.h" "${SMU2000_VST2_STUB_DIR}/aeffectx.h" COPYONLY)
+    set(SMU2000_VST2_PROVIDER compat)
+    message(STATUS "SMU2000: PREFER_COMPAT — clean-room VST2 ABI layer dropped into ${SMU2000_VST2_STUB_DIR} (any real SDK ignored)")
   else()
     set(SMU2000_VST2_SUPPORTED FALSE)
   endif()
-else()
-  if(EXISTS "${SMU2000_VST2_STUB_DIR}/aeffect.h")
+elseif(_smu2000_vst2_hdr AND (NOT EXISTS "${_smu2000_stub_ae}" OR _smu2000_stub_is_compat))
+  # Upstream VST2.cmake compiles against the submodule stub dir: drop the two
+  # headers (the only ones IPlugVST2.cpp needs) there when missing — or refresh
+  # them when a previous configure had placed our compat pair and a real SDK
+  # became available. Untracked, gitignored.
+  file(MAKE_DIRECTORY "${SMU2000_VST2_STUB_DIR}")
+  foreach(_h aeffect.h aeffectx.h)
+    if(EXISTS "${_smu2000_vst2_hdr}/${_h}")
+      configure_file("${_smu2000_vst2_hdr}/${_h}" "${SMU2000_VST2_STUB_DIR}/${_h}" COPYONLY)
+    endif()
+  endforeach()
+  set(SMU2000_VST2_PROVIDER sdk)
+  message(STATUS "SMU2000: copied VST2 headers from ${_smu2000_vst2_hdr} to ${SMU2000_VST2_STUB_DIR}")
+  if(NOT EXISTS "${SMU2000_VST2_STUB_DIR}/aeffect.h" OR NOT EXISTS "${SMU2000_VST2_STUB_DIR}/aeffectx.h")
+    set(SMU2000_VST2_SUPPORTED FALSE)
+  endif()
+elseif(EXISTS "${_smu2000_stub_ae}" AND EXISTS "${SMU2000_VST2_STUB_DIR}/aeffectx.h")
+  if(_smu2000_stub_is_compat)
+    # Re-drop our pair so a configure always refreshes it from the committed source.
+    configure_file("${SMU2000_VST2_COMPAT_DIR}/compat_aeffect_core.h"    "${_smu2000_stub_ae}" COPYONLY)
+    configure_file("${SMU2000_VST2_COMPAT_DIR}/compat_aeffect_extended.h" "${SMU2000_VST2_STUB_DIR}/aeffectx.h" COPYONLY)
+    set(SMU2000_VST2_PROVIDER compat)
+    message(STATUS "SMU2000: clean-room VST2 ABI pair refreshed in ${SMU2000_VST2_STUB_DIR} (no vstsdk2.4 found)")
+  else()
+    set(SMU2000_VST2_PROVIDER sdk-stub)
     message(STATUS "SMU2000: VST2 headers already present in ${SMU2000_VST2_STUB_DIR}; SMU2000_VST2_SDK_DIR unused")
-  else()
-    set(SMU2000_VST2_SUPPORTED FALSE)
   endif()
+elseif(EXISTS "${SMU2000_VST2_COMPAT_DIR}/compat_aeffect_core.h" AND EXISTS "${SMU2000_VST2_COMPAT_DIR}/compat_aeffect_extended.h")
+  # No SDK anywhere: this is the CI/nightly path.
+  file(MAKE_DIRECTORY "${SMU2000_VST2_STUB_DIR}")
+  configure_file("${SMU2000_VST2_COMPAT_DIR}/compat_aeffect_core.h"    "${_smu2000_stub_ae}" COPYONLY)
+  configure_file("${SMU2000_VST2_COMPAT_DIR}/compat_aeffect_extended.h" "${SMU2000_VST2_STUB_DIR}/aeffectx.h" COPYONLY)
+  set(SMU2000_VST2_PROVIDER compat)
+  message(STATUS "SMU2000: clean-room VST2 ABI layer -> ${SMU2000_VST2_STUB_DIR} (aeffect.h/aeffectx.h generated at build time; SDK never committed)")
+else()
+  set(SMU2000_VST2_SUPPORTED FALSE)
 endif()
 if(NOT SMU2000_VST2_SUPPORTED)
   if(SMU2000_BUILD_VST2)
     message(FATAL_ERROR
-      "VST2 SDK headers (aeffect.h/aeffectx.h) not found: SMU2000_VST2_SDK_DIR='${SMU2000_VST2_SDK_DIR}' has no aeffect.h and ${SMU2000_VST2_STUB_DIR} is a bare stub.\n"
+      "VST2 SDK headers (aeffect.h/aeffectx.h) not found: SMU2000_VST2_SDK_DIR='${SMU2000_VST2_SDK_DIR}' has no aeffect.h, ${SMU2000_VST2_STUB_DIR} is a bare stub, and the clean-room pair (${SMU2000_VST2_COMPAT_DIR}) is missing.\n"
       "Fix: copy aeffect.h + aeffectx.h from vstsdk2.4\\pluginterfaces\\vst2.x into\n"
       "  ${SMU2000_VST2_STUB_DIR}\n"
       "  (this machine: D:/opt/vst/vstsdk2.4), or pass -DSMU2000_VST2_SDK_DIR / set env VST2_SDK_DIR,\n"
-      "  or configure with -DSMU2000_BUILD_VST2=OFF (proprietary SDK cannot run on CI).")
+      "  or restore cmake/vst2_compat/ (clean-room, used automatically on CI),\n"
+      "  or configure with -DSMU2000_BUILD_VST2=OFF.")
   else()
     message(STATUS "SMU2000: VST2 SDK absent — VST2 target disabled (SMU2000_BUILD_VST2=OFF)")
   endif()
@@ -222,4 +270,4 @@ else()
   message(STATUS "SMU2000: roms: ${SMU2000_ROMS_DIR} (staging ${SMU2000_COPY_ROMS})")
 endif()
 
-message(STATUS "SMU2000: SDK wiring OK — iPlug2=${IPLUG2_DIR} (vst2=${SMU2000_VST2_SUPPORTED} clap=${SMU2000_CLAP_SUPPORTED} vst3-optional=${SMU2000_VST3_SUPPORTED})")
+message(STATUS "SMU2000: SDK wiring OK — iPlug2=${IPLUG2_DIR} (vst2=${SMU2000_VST2_SUPPORTED}/${SMU2000_VST2_PROVIDER} clap=${SMU2000_CLAP_SUPPORTED} vst3-optional=${SMU2000_VST3_SUPPORTED})")

@@ -3,6 +3,8 @@
 #include <windows.h>
 #include <cstdio>
 #include "aeffect.h"
+// ERect is fully defined by aeffect.h in both the real SDK (2.4) and the
+// clean-room compat headers — no aeditel.h needed.
 
 typedef VstIntPtr (VSTCALLBACK *MasterCallback)(AEffect*, VstInt32, VstInt32, VstIntPtr, void*, float);
 typedef AEffect*  (VSTCALLBACK *MainEntry)(MasterCallback);
