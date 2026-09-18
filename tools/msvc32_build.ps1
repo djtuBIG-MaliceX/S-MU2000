@@ -51,10 +51,14 @@ $engine = @(
 )
 
 # per-tool mains (Makefile link lines; verify does NOT link mu2000)
+# midibench: the vst3 engine (SMU2000_VST2 MIDI-path A/B bench, tools/midi_bench.cpp) —
+# same engine sources as the CMake smu2000_engine target, incl. its xgui stub.
 $mainMap = @{
   verify    = @('src/verify.cpp')
   render    = @('src/mu2000.cpp', 'src/smf.cpp', 'src/render.cpp')
   statetest = @('src/mu2000.cpp', 'src/smf.cpp', 'src/statetest.cpp')
+  midibench = @('src/mu2000.cpp', 'src/vst3/engine.cpp', 'engine/xgui_plugin_stub.cpp',
+                'tools/midi_bench.cpp')
 }
 
 # accept both -Tools a,b (native arg passing arrives as one string) and -Tools a b

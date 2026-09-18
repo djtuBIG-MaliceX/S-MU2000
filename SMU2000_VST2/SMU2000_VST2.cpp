@@ -1,6 +1,5 @@
 #include "SMU2000_VST2.h"
 
-#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 
@@ -48,11 +47,10 @@ SMU2000_VST2::SMU2000_VST2(const InstanceInfo& info)
 {
   m_engine = std::make_unique<smu2000::vst3::engine>();
   m_engine->set_output_rate(GetSampleRate());
-  // Warm the MIDI queue heap once, off the audio path (see midi_event comment in the
-  // header): dense MIDI must never malloc on the audio thread. clear() keeps capacity,
-  // so after the first block this is the steady-state footprint (~128 KB + 64 KB).
-  m_midi_q.reserve(8192);
-  m_midi_bytes.reserve(8192 * 8);
+  // Warm the MIDI queue heap once, off the audio path (see midi_queue.h): dense MIDI
+  // must never malloc on the audio thread. clear() keeps capacity, so after the first
+  // block this is the steady-state footprint (~128 KB + 64 KB).
+  m_midi_q.reserve(8192, 8192 * 8);
   // Boot synchronously here: the host starts its timeline the moment the instance
   // exists and a plug-in cannot pause it, so the old async boot streamed the first
   // 2-5 s of every song out as silence with the song-start MIDI queued behind it
@@ -88,67 +86,14 @@ void SMU2000_VST2::ProcessBlock(sample** inputs, sample** outputs, int nFrames)
     return;
   }
 
-  // Hosts deliver events unordered within effProcessEvents / in_events; the engine
-  // consumes its serial queue sample-sequentially, so order by sample offset first.
-  // Cheap linear scan first: well-behaved hosts arrive sorted and never pay a sort.
-  // std::sort (not stable_sort — stable_sort mallocs a scratch buffer per block; the
-  // POD events make sort's swaps memmove-cheap) with the arena pos as arrival-order
-  // tie-break, which keeps host ordering for events sharing an offset.
-  bool sorted = true;
-  for (size_t i = 1; i < m_midi_q.size(); ++i)
-  {
-    if (m_midi_q[i].offset < m_midi_q[i - 1].offset) { sorted = false; break; }
-  }
-  if (!sorted)
-  {
-    std::sort(m_midi_q.begin(), m_midi_q.end(),
-              [](const midi_event& a, const midi_event& b)
-              { return a.offset != b.offset ? a.offset < b.offset : a.pos < b.pos; });
-  }
-
-  // Walk the block in segments: render up to each event's offset, then clock that
-  // event's bytes onto the serial line, so note on/off lands at the right sample
-  // instead of the block start. Each fill() releases m_machine on return, so calling
-  // midi() between fill() calls is lock-safe; the 31250 bps model then spaces bytes.
-  int produced = 0;
-  size_t i = 0;
-  while (i < m_midi_q.size())
-  {
-    int off = m_midi_q[i].offset;
-    if (off < 0) off = 0;
-    if (off > nFrames) off = nFrames;  // clamp past-the-end to the block tail
-
-    if (off > produced)
-    {
-      m_engine->fill(outputs[0] + produced, outputs[1] + produced, off - produced, nullptr, nullptr);
-      produced = off;
-    }
-
-    // All events landing on this sample go onto the line before the next run_sample().
-    while (i < m_midi_q.size() && m_midi_q[i].offset <= off)
-    {
-      const midi_event& ev = m_midi_q[i];
-      m_engine->midi(m_midi_bytes.data() + ev.pos, ev.len, ev.port);
-      ++i;
-    }
-  }
-
-  if (produced < nFrames)
-    m_engine->fill(outputs[0] + produced, outputs[1] + produced, nFrames - produced, nullptr, nullptr);
-
-  // Offsets are block-relative and fully drained above, so both buffers empty every
-  // block; clear() keeps the reserved capacity — no allocation in the steady state.
-  m_midi_q.clear();
-  m_midi_bytes.clear();
-}
-
-void SMU2000_VST2::Push(int offset, int port, const uint8_t* bytes, uint32_t n)
-{
-  // Arena append = arrival order, so pos is the sort stability tie-break (see header).
-  const uint32_t pos = (uint32_t) m_midi_bytes.size();
-  if (n)
-    m_midi_bytes.insert(m_midi_bytes.end(), bytes, bytes + n);
-  m_midi_q.push_back(midi_event{offset, pos, n, (uint8_t) port});
+  // Fixed-window drain (see midi_queue.h): the queue is chronologically sorted by
+  // construction (queue::push), so there is NO sorting here at all. Events inside a
+  // 32-sample window go onto the serial line at window start (isolated events stay
+  // exactly on-sample); engine->fill() runs at most ceil(nFrames/32) times per block
+  // whatever the event density — each call is an m_machine lock round-trip, which is
+  // what the old per-distinct-offset slicing multiplied into a mutex storm on dense
+  // MIDI. fill() releases m_machine on return, so midi() between fills stays lock-safe.
+  smu2000::midi::drain_fixed_window(m_midi_q, *m_engine, outputs[0], outputs[1], nFrames);
 }
 
 void SMU2000_VST2::ProcessMidiMsg(const IMidiMsg& msg)
@@ -157,13 +102,14 @@ void SMU2000_VST2::ProcessMidiMsg(const IMidiMsg& msg)
   const int n = (nibble == 0xC0 || nibble == 0xD0) ? 2 : 3;  // ProgramChange/ChannelAT are 2 bytes
   const uint8_t bytes[3] = {msg.mStatus, msg.mData1, msg.mData2};
   // offset = sample offset into the coming ProcessBlock(); port 0 = parts 1-16, channel
-  // lives in the status byte. Append-only hot path — no sort, no malloc (see header).
-  Push(msg.mOffset, 0, bytes, (uint32_t) n);
+  // lives in the status byte. Hot path is a plain append for time-sorted hosts (the
+  // VST2/CLAP delivery contract); only actual disorder pays the insert-at-tail memmove.
+  m_midi_q.push(msg.mOffset, 0, bytes, (uint32_t) n);
 }
 
 void SMU2000_VST2::ProcessSysEx(const ISysEx& msg)
 {
-  Push(msg.mOffset, 0, reinterpret_cast<const uint8_t*>(msg.mData), (uint32_t) msg.mSize);
+  m_midi_q.push(msg.mOffset, 0, reinterpret_cast<const uint8_t*>(msg.mData), (uint32_t) msg.mSize);
 }
 
 bool SMU2000_VST2::SerializeState(IByteChunk& chunk) const

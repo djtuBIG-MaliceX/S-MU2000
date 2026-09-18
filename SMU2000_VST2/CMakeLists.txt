@@ -76,6 +76,7 @@ else()
       target_sources(smu2000_vst2 PRIVATE
         SMU2000_VST2.cpp
         SMU2000_VST2.h
+        midi_queue.h
         config.h
         ${IPLUG2_DIR}/IPlug/VST2/IPlugVST2.cpp)
       target_include_directories(smu2000_vst2 PRIVATE
@@ -117,6 +118,7 @@ else()
       target_sources(smu2000_vst2 PRIVATE
         SMU2000_VST2.cpp
         SMU2000_VST2.h
+        midi_queue.h
         config.h
         ${IPLUG2_DIR}/IPlug/VST2/IPlugVST2.cpp)
       target_include_directories(smu2000_vst2 PRIVATE
@@ -159,6 +161,7 @@ else()
       target_sources(smu2000_clap PRIVATE
         SMU2000_VST2.cpp
         SMU2000_VST2.h
+        midi_queue.h
         config.h
         ${IPLUG2_DIR}/IPlug/CLAP/IPlugCLAP.cpp)
       target_include_directories(smu2000_clap PRIVATE
@@ -191,6 +194,7 @@ else()
       target_sources(smu2000_clap PRIVATE
         SMU2000_VST2.cpp
         SMU2000_VST2.h
+        midi_queue.h
         config.h
         ${IPLUG2_DIR}/IPlug/CLAP/IPlugCLAP.cpp)
       target_include_directories(smu2000_clap PRIVATE

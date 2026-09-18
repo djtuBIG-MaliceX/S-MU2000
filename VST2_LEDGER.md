@@ -552,6 +552,26 @@ this harness. No plugin/GUI/editor regression observed on any arch.
         reserve + append-only hot path + sortedness check (no per-msg/per-block mallocs); also
         fixed the LNK2001 HEAD-break from upstream `5901ea5` via `engine/xgui_plugin_stub.cpp`.
         VST2+CLAP Win32+x64 rebuilt clean.
+  - [x] MIDI path rework: insert-sorted + fixed-window drain — **DONE 2026-09-19** (supersedes
+        the scan-in-ProcessBlock half of P2-FIX2; POD+arena + ctor reserve unchanged). New
+        `SMU2000_VST2/midi_queue.h` (shared with `tools/midi_bench.cpp`): ordering kept AT
+        INSERTION like iplug `IMidiQueueBase::Add` (plain append for time-sorted hosts — the
+        VST2/CLAP delivery contract; CLAP events.h:344), so ProcessBlock NEVER scans/sorts on
+        healthy input; `kDisorderLimit=4096` chaos guard caps adversarial hosts at one
+        `std::sort`/block via `queue::heal()` (never the insert-at-tail O(n²)). Consumption =
+        `MidiSynth::kDefaultBlockSize`(32)-sample windows with event-gap jumping: engine
+        fill()/m_machine round-trips capped at ceil(nFrames/32) per block regardless of
+        density (bench: 257→16 fills/blk @ ~281 ev/blk); isolated events stay exactly
+        on-sample, dense clusters ≤31 samples early (serial line's own byte spacing ~14).
+        `tools/midi_bench.cpp` (`msvc32_build.ps1 -Tools midibench`) A/B vs the old path,
+        interleaved same-stream + DSP-stubbed plumbing runs: plumbing dense-sorted 1.27x
+        faster, shuffled/reversed within noise of old (no regression, guard proven); engine
+        wall-time within ±0.5% (DSP ~10 ms/blk dominates on this box — the win is headroom
+        + bounded worst case, not wall %). SMU2000_VST2.{h,cpp} slimmed to queue + drain;
+        midi_queue.h added to all four plugin target source lists. VST2+CLAP x64 rebuilt
+        green 2026-09-19 (fresh `vs-x64` configure after build-tree clean); **Win32
+        `vs-win32` also green same day** (VST2 `.dll` + CLAP `.clap`; only the pre-existing
+        sh_adc/sh_sci C4805 warnings).
 
 ### Wave schedule — COMPLETE (P0–P7 green)
 
