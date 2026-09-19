@@ -1766,7 +1766,27 @@ void overview::meters(bridge &br)
 	const float all = vw + (cpu >= 0.0f ? gap + cw : 0.0f);
 	const float h = ImGui::GetFrameHeight();
 
-	ImGui::SameLine(std::max(ImGui::GetCursorPosX() + fs, ImGui::GetWindowContentRegionMax().x - all));
+	// **どちらの口で鳴らしているか**（F4 で切り替わる）。
+	// 聞き比べのとき、いまどちらを聞いているのか分からないと困る
+	const int eng = br.engine();
+	const char *eng_text = eng == 1 ? "口: native" : "口: firmware";
+	const float ew = eng >= 0 ? ImGui::CalcTextSize(eng_text).x + fs : 0.0f;
+	ImGui::SameLine(std::max(ImGui::GetCursorPosX() + fs,
+	                         ImGui::GetWindowContentRegionMax().x - all
+	                         - (eng >= 0 ? ew + gap : 0.0f)));
+	if (eng >= 0) {
+		const ImVec2 e0 = ImGui::GetCursorScreenPos(), e1(e0.x + ew, e0.y + h);
+		dl->AddRectFilled(e0, e1, eng == 1 ? IM_COL32(150, 90, 30, 200)
+		                                   : IM_COL32(50, 90, 60, 200), fs * 0.25f);
+		dl->AddText(ImVec2(e0.x + fs * 0.5f, e0.y + (h - fs) * 0.5f),
+		            col(ImGuiCol_Text), eng_text);
+		ImGui::InvisibleButton("##engine", ImVec2(ew, h));
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("いま鳴らしている口（F4 で切り替え）\n"
+			                  "firmware: 実機の firmware が鳴らす（効果も実機どおり）\n"
+			                  "native: SH-2 を止めて、こちらが式でレジスタを組んで鳴らす");
+		ImGui::SameLine(0.0f, gap);
+	}
 	const ImVec2 pos = ImGui::GetCursorScreenPos();
 	const float ty = pos.y + (h - fs) * 0.5f;
 	// 枠は角を丸める。中の棒は、枠の端に着いている側だけ枠に合わせて丸め、伸びる先の端は四角いまま

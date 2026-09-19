@@ -416,10 +416,84 @@ void mu2000::build_bus()
 	m_bus = mem_bus();
 
 	// 000000-3fffff: プログラム ROM
-	if (m_prog && !m_prog->empty())
+	// SMU2000_ROMTRACE=<pc16進> なら、その辺りの命令が読んだ ROM の番地を出す
+	if (m_prog && !m_prog->empty() && std::getenv("SMU2000_ROMTRACE")) {
+		const u32 want = u32(std::strtoul(std::getenv("SMU2000_ROMTRACE"), nullptr, 16));
+		const u8 *base = m_prog->data();
+		mem_bus::device d;
+		d.start = 0x000000; d.end = 0x3fffff;
+		// want は**読まれる側の番地**。表の引き方を見るための仕掛け
+		auto note = [this, want](offs_t a, u32 v, int size) {
+			if (a >= want && a < want + 0x100)
+				std::fprintf(stderr, "romread pc=%06x 番地=%06x = %x (%d bit)\n",
+				             m_cpu ? m_cpu->pc() : 0, u32(a), v, size * 8);
+		};
+		d.r8  = [base, note](offs_t a) { const u8 v = base[a]; note(a, v, 1); return v; };
+		d.r16 = [base, note](offs_t a) {
+			const u16 v = u16(base[a] << 8 | base[a + 1]); note(a, v, 2); return v;
+		};
+		d.r32 = [base, note](offs_t a) {
+			const u32 v = u32(base[a]) << 24 | u32(base[a + 1]) << 16 |
+			              u32(base[a + 2]) << 8 | base[a + 3];
+			note(a, v, 4);
+			return v;
+		};
+		m_bus.add_device(std::move(d));
+	} else if (m_prog && !m_prog->empty()) {
 		m_bus.add_region(0x000000, 0x3fffff, m_prog->data(), false);
+	}
 	// 400000-43ffff: ワーク RAM
-	m_bus.add_region(0x400000, 0x43ffff, m_ram.data(), true);
+	// SMU2000_RAMTRACE=<pc16進> が立っていれば、素通しの region ではなく
+	// device として繋いで、**その番地の命令が読んだワーク RAM の番地**を出す。
+	// 実機がどの表を引いているかを外から突き止めるための仕掛け（とても遅い）
+	if (const char *tp = std::getenv("SMU2000_RAMTRACE")) {
+		const u32 want = u32(std::strtoul(tp, nullptr, 16));
+		mem_bus::device d;
+		d.start = 0x400000; d.end = 0x43ffff;
+		auto note = [this, want](offs_t a, u32 v, int size) {
+			const u32 pc = m_cpu ? m_cpu->pc() : 0;
+			if (pc >= want && pc <= want + 0x100)
+				std::fprintf(stderr, "ramread s=%llu pc=%06x 番地=%06x = %x (%d bit)\n",
+				             (unsigned long long)trace_sample(),
+				             pc, u32(a), v, size * 8);
+		};
+		d.r8  = [this, note](offs_t a) {
+			const u8 v = m_ram[a - 0x400000]; note(a, v, 1); return v;
+		};
+		d.r16 = [this, note](offs_t a) {
+			const u16 v = u16(m_ram[a - 0x400000] << 8 | m_ram[a - 0x400000 + 1]);
+			note(a, v, 2);
+			return v;
+		};
+		d.r32 = [this, note](offs_t a) {
+			const u8 *p = m_ram.data() + (a - 0x400000);
+			const u32 v = u32(p[0]) << 24 | u32(p[1]) << 16 | u32(p[2]) << 8 | p[3];
+			note(a, v, 4);
+			return v;
+		};
+		// SMU2000_RAMWRITE=<番地16進> で、その番地に**書いた**命令の番地を出す
+		const char *wp = std::getenv("SMU2000_RAMWRITE");
+		const u32 wa = wp ? u32(std::strtoul(wp, nullptr, 16)) : 0xffffffffu;
+		auto notew = [this, wa](offs_t a, u32 v, int size) {
+			if (a <= wa && wa < a + u32(size))
+				std::fprintf(stderr, "ramwrite s=%llu pc=%06x 番地=%06x = %x (%d bit)\n",
+				             (unsigned long long)trace_sample(),
+				             m_cpu ? m_cpu->pc() : 0, u32(a), v, size * 8);
+		};
+		d.w8  = [this, notew](offs_t a, u8 v)  { notew(a, v, 1); m_ram[a - 0x400000] = v; };
+		d.w16 = [this, notew](offs_t a, u16 v) {
+			notew(a, v, 2);
+			m_ram[a - 0x400000] = u8(v >> 8); m_ram[a - 0x400000 + 1] = u8(v);
+		};
+		d.w32 = [this, notew](offs_t a, u32 v) {
+			notew(a, v, 4);
+			u8 *p = m_ram.data() + (a - 0x400000);
+			p[0] = u8(v >> 24); p[1] = u8(v >> 16); p[2] = u8(v >> 8); p[3] = u8(v);
+		};
+		m_bus.add_device(std::move(d));
+	} else {
+		m_bus.add_region(0x400000, 0x43ffff, m_ram.data(), true);
+	}
 	// 1000000-107ffff: DRAM
 	m_bus.add_region(0x1000000, 0x107ffff, m_dram.data(), true);
 	// fffff000-ffffffff: CPU 内蔵 RAM
@@ -489,6 +563,12 @@ void mu2000::build_bus()
 				m_swp_watch(base == 0x800000, reg, u16(v >> 16));
 				m_swp_watch(base == 0x800000, reg + 1, u16(v));
 			}
+			// **録りは写し取りと別の口**（1 つしか無いと、次の写し取りが
+			// 始まったときに前の録りが切れる）
+			if (m_traj_rec && base == 0x800000) {
+				traj_watch(reg, u16(v >> 16));
+				traj_watch(reg + 1, u16(v));
+			}
 			note_fw_swp(base == 0x800000, reg, u16(v >> 16));
 			note_fw_swp(base == 0x800000, reg + 1, u16(v));
 			dev.write16(reg, u16(v >> 16));
@@ -502,6 +582,8 @@ void mu2000::build_bus()
 				             m_swp_trace_reads ? "W " : "", base, (a - base) >> 1, v, m_cpu->pc(), double(m_cpu->total_cycles()) / 28000000.0, (unsigned long long)trace_sample());
 			if (m_swp_watch)
 				m_swp_watch(base == 0x800000, (a - base) >> 1, v);
+			if (m_traj_rec && base == 0x800000)
+				traj_watch((a - base) >> 1, v);
 			note_fw_swp(base == 0x800000, (a - base) >> 1, v);
 			dev.write16((a - base) >> 1, v);
 			hold((a - base) >> 1);
@@ -998,6 +1080,10 @@ void mu2000::midi_step(u64 now)
 // 報告があり、LCD を描いているのも firmware なので筋が合う
 void mu2000::note_fw_swp(bool master, u32 reg, u16 value)
 {
+	// **包絡線の格子の位相を拾う**。native の口が始まる前は firmware が
+	// 普通に走っているので、そのときの 0x00 の書き込みが格子の目にあたる
+	if (master && !m_native_engine && reg < 0x1000 && (reg % 64) == 0)
+		m_ndrv.set_eg_phase(u32(trace_sample()));
 	if (!m_native_engine || !master)
 		return;
 	// **firmware が鍵を押した瞬間のマスク**を拾う。これが firmware の
@@ -1041,8 +1127,8 @@ void mu2000::set_native_engine(int mode)
 	m_nq.clear();
 	m_sx_pos = -1;
 	m_traj_rec = false;
-	m_traj_left = 0;
-	m_traj_cals = nullptr;
+	for (traj_rec &t : m_trajs)
+		t = traj_rec();
 	m_ne_clock = 0;
 	for (u64 &t : m_rx_at)
 		t = 0;
@@ -1077,6 +1163,9 @@ void mu2000::set_native_engine(int mode)
 			             (unsigned long long)trace_sample());
 		m_swpm.write16(reg, value);
 	});
+	// **チップの「音程の包絡線が着いた」印**を native の口にも見せる。
+	// 実機の firmware も内部レジスタ 4 の bit14 で同じものを見ている（0x12B81C）
+	m_ndrv.set_peg_peek([this](int chan) { return m_swpm.peg_reached(chan); });
 }
 
 // 音色の 1 音目を firmware に鳴らさせて、スロットに書かれた値を写し取る
@@ -1192,6 +1281,7 @@ void mu2000::native_learn_finish()
 			if (int(cals.size()) >= m_learn_want)
 				break;
 			cal.cal_vel  = m_learn_vel;
+			cal.cal_note = m_learn_note;
 			cal.cal_vol  = m_ndrv.part_vol(m_learn_part);
 			cal.cal_expr = m_ndrv.part_expr(m_learn_part);
 			cal.cal_pan  = m_ndrv.part_pan(m_learn_part);
@@ -1207,7 +1297,7 @@ void mu2000::native_learn_finish()
 		const int ndcal = int(cals.size());
 		const u64 dkey = m_learn_drum;
 		m_ndrv.learn_drum(m_learn_drum, std::move(cals));
-		traj_start(0, dkey, ndcal);
+		traj_start(0, dkey, ndcal, 0);
 		m_learn_drum = 0;
 		return;
 	}
@@ -1296,6 +1386,7 @@ void mu2000::native_learn_finish()
 			}
 		}
 		cal.cal_vel  = m_learn_vel;
+		cal.cal_note = m_learn_note;
 		cal.cal_vol  = m_ndrv.part_vol(m_learn_part);
 		cal.cal_expr = m_ndrv.part_expr(m_learn_part);
 		cal.cal_pan  = m_ndrv.part_pan(m_learn_part);
@@ -1330,8 +1421,9 @@ void mu2000::native_learn_finish()
 				             xg::nv::key_follow(e2), xg::nv::wave_set(e2), "\n");
 		}
 	}
+	const u32 learn_ctx = cals.empty() ? 0 : cals[0].cal_ctx;
 	m_ndrv.learn(m_learn_rec, std::move(cals));
-	traj_start(m_learn_rec, 0, ncal);
+	traj_start(m_learn_rec, 0, ncal, learn_ctx);
 }
 
 
@@ -1345,7 +1437,7 @@ void mu2000::native_learn_finish()
 namespace {
 
 constexpr u32 CAL_MAGIC = 0x43563253u;   // "S2VC"
-constexpr u32 CAL_VERSION = 7;
+constexpr u32 CAL_VERSION = 9;
 
 void put8(std::vector<u8> &v, u8 x) { v.push_back(x); }
 void put16v(std::vector<u8> &v, u16 x) { v.push_back(u8(x)); v.push_back(u8(x >> 8)); }
@@ -1370,6 +1462,7 @@ void write_cals(std::vector<u8> &out, u8 kind, u64 key, const std::vector<xg::nv
 		put64v(out, c.mask);
 		put16v(out, u16(c.base_level));
 		put16v(out, u16(c.cal_vel));
+		put16v(out, u16(c.cal_note));
 		put16v(out, u16(c.cal_vol));
 		put16v(out, u16(c.cal_expr));
 		put16v(out, u16(c.cal_pan));
@@ -1433,6 +1526,7 @@ bool mu2000::native_cal_load(const u8 *data, size_t n)
 			c.mask = r.g64();
 			c.base_level = s16(r.g16());
 			c.cal_vel = s16(r.g16());
+			c.cal_note = s16(r.g16());
 			c.cal_vol = s16(r.g16());
 			c.cal_expr = s16(r.g16());
 			c.cal_pan = s16(r.g16());
@@ -1472,73 +1566,117 @@ bool mu2000::native_cal_load(const u8 *data, size_t n)
 }
 
 // 写し取った音が鳴っている間、firmware がフィルタ（0x00・0x01・0x04）を
-// どう動かすかを録る。あとの音でも同じように動かせば、音色の動きまで揃う
-void mu2000::traj_start(u32 rec, u64 drum_key, int ncal)
+// どう動かすかを録る。あとの音でも同じように動かせば、音色の動きまで揃う。
+// **同時に何本も走らせる**（空きが無ければ録らない）
+void mu2000::traj_start(u32 rec, u64 drum_key, int ncal, u32 ctx)
 {
 	if (!ncal)
 		return;
-	m_traj_cals = drum_key ? m_ndrv.drum_cals_of(drum_key) : m_ndrv.cals_of(rec, m_learn_part);
-	if (!m_traj_cals)
+	std::vector<xg::nv::voice_cal> *cals =
+	    drum_key ? m_ndrv.drum_cals_of(drum_key) : m_ndrv.cals_of_ctx(rec, ctx);
+	if (!cals)
 		return;
+	int slot = -1;
+	for (int k = 0; k < TRAJ_MAX && slot < 0; k++)
+		if (!m_trajs[k].left)
+			slot = k;
+	if (slot < 0)
+		return;                      // 空きが無い。この音色は次の音でやり直す
+	traj_rec &t = m_trajs[slot];
+	t = traj_rec();
+	t.cals = cals;
+	t.rec_key = rec;
+	t.ctx = ctx;
+	t.drum_key = drum_key;
 	// 写し取ったチャンネルの順が、そのまま写し取りの並び
 	int n = 0;
 	for (int ch = 0; ch < 64; ch++)
-		m_traj_chan[ch] = (m_learn_keyed & (u64(1) << ch)) ? n++ : -1;
+		t.chan[ch] = (m_learn_keyed & (u64(1) << ch)) ? s8(n++) : s8(-1);
 	// 鍵を押した瞬間からの控えを、まず入れる
-	{
-		int n2 = 0;
-		int idx[64];
-		for (int ch = 0; ch < 64; ch++)
-			idx[ch] = (m_learn_keyed & (u64(1) << ch)) ? n2++ : -1;
-		for (const auto &e : m_learn_traj)
-			if (e.first < 64 && idx[e.first] >= 0 &&
-			    size_t(idx[e.first]) < m_traj_cals->size())
-				(*m_traj_cals)[idx[e.first]].filter_env.push_back(e.second);
-	}
+	for (const auto &e : m_learn_traj)
+		if (e.first < 64 && t.chan[e.first] >= 0 &&
+		    size_t(t.chan[e.first]) < cals->size())
+			(*cals)[t.chan[e.first]].filter_env.push_back(e.second);
 	m_learn_traj.clear();
-	m_traj_n = 0;
+	t.start = m_learn_key_clock ? m_learn_key_clock : m_ne_clock;
+	t.left = 44100 * 3;              // 3 秒ぶん見る（押している間の動きを取り切る）
 	m_traj_rec = true;
 	m_ndrv.set_recording(true);
-	m_traj_rec_key = rec;
-	m_traj_drum_key = drum_key;
-	m_traj_start = m_learn_key_clock ? m_learn_key_clock : m_ne_clock;
-	m_traj_left = 44100;                 // 1 秒ぶん見る
-	set_swp_watch([this](bool master, u32 reg, u16 value) {
-		if (!master)
-			return;
-		const int ch = int(reg / 64), r = int(reg % 64);
-		if (ch >= 64 || m_traj_chan[ch] < 0)
-			return;
-		// 離しに入ったらそこで打ち切る（離しの動きは鳴らすときには要らない）。
+}
+
+// SWP30 への書き込みを、録っている全部の本に配る
+void mu2000::traj_watch(u32 reg, u16 value)
+{
+	const int ch = int(reg / 64), r = int(reg % 64);
+	if (ch >= 64)
+		return;
+	for (traj_rec &t : m_trajs) {
+		if (!t.left || t.chan[ch] < 0)
+			continue;
+		// **離しに入っても止めない**。実機はフィルタを離しのあいだも動かす。
+		// 写し取りの元にした音が短いと、録れる段のほとんどが離しのあとになる。
+		// ここから先の段には印を付けて、鳴らすときは離した時刻から流す。
 		// ただし鳴らし始めてすぐは見ない。前の音の離しが同じスロットに来る
 		if (r == 0x09 && (value & 0x8000)) {
-			if (m_ne_clock - m_traj_start > 44100 / 10)
-				m_traj_left = 1;
-			return;
+			if (m_ne_clock - t.start > 44100 / 10 && !t.rel_at[ch])
+				t.rel_at[ch] = m_ne_clock;
+			continue;
 		}
 		// フィルタ（0x00・0x01・0x04）と LFO（0x05・0x0a）。
 		// LFO は「かけ始めるまでの間」や深さの増やし方を firmware がソフトでやっている
 		if (r != 0x00 && r != 0x01 && r != 0x04 && r != 0x05 && r != 0x0a)
-			return;
-		if (m_traj_n >= 2048 || size_t(m_traj_chan[ch]) >= m_traj_cals->size())
-			return;
+			continue;
+		if (t.n >= 4096 || size_t(t.chan[ch]) >= t.cals->size())
+			continue;
 		// **その場で**写し取りに足す。いま鳴っている native の音も、
 		// 次の tick でこの段を拾う（xg/native_driver.h の tick）
-		(*m_traj_cals)[m_traj_chan[ch]].filter_env.push_back(
-		    xg::nv::fstep{ u32(m_ne_clock - m_traj_start), u8(r), value });
-		m_traj_n++;
-	});
+		const u64 rel = t.rel_at[ch];
+		(*t.cals)[t.chan[ch]].filter_env.push_back(
+		    xg::nv::fstep{ u32(m_ne_clock - (rel ? rel : t.start)),
+		                   u8(r), value, u8(rel ? 1 : 0) });
+		t.n++;
+	}
 }
 
-void mu2000::traj_finish()
+// 1 サンプルぶん進めて、終わった本を片付ける
+void mu2000::traj_step()
 {
-	set_swp_watch(nullptr);
-	m_traj_rec = false;
-	m_ndrv.set_recording(false);
-	if (std::getenv("SMU2000_NATIVE_DEBUG"))
-		std::fprintf(stderr, "traj rec=%06x drum=%llx 段 %u%c", m_traj_rec_key,
-		             (unsigned long long)m_traj_drum_key, m_traj_n, 10);
-	m_traj_cals = nullptr;
+	for (int k = 0; k < TRAJ_MAX; k++)
+		if (m_trajs[k].left && --m_trajs[k].left == 0)
+			traj_finish_one(k);
+	m_traj_rec = traj_any();
+	if (!m_traj_rec)
+		m_ndrv.set_recording(false);
+}
+
+void mu2000::traj_finish_one(int i)
+{
+	traj_rec &t = m_trajs[i];
+	// 録れた段が少なければ、写し取りごと捨ててつぎの音でやり直す。
+	// 回数を切っておかないと、短い音しか鳴らさない音色がいつまでも
+	// firmware 送りのままになる
+	bool again = false;
+	if (!t.drum_key && t.rec_key && t.n < TRAJ_ENOUGH) {
+		const u64 k = u64(t.rec_key) | (u64(t.ctx) << 32);
+		int &n = m_traj_tries[k];
+		if (n < TRAJ_TRIES) {
+			n++;
+			again = true;
+			m_ndrv.drop_cal(t.rec_key, t.ctx);
+		}
+	}
+	if (std::getenv("SMU2000_NATIVE_DEBUG")) {
+		u32 nrel = 0, ntot = 0;
+		if (!again && t.cals && !t.cals->empty()) {
+			ntot = u32((*t.cals)[0].filter_env.size());
+			for (const auto &e : (*t.cals)[0].filter_env)
+				nrel += e.rel ? 1 : 0;
+		}
+		std::fprintf(stderr, "traj rec=%06x drum=%llx 段 %u（写し1 は %u 段、うち離し %u）%s%c",
+		             t.rec_key, (unsigned long long)t.drum_key, t.n,
+		             ntot, nrel, again ? "（短いので取り直す）" : "", 10);
+	}
+	t = traj_rec();
 }
 
 // バンクとプログラムから音色の記録を引いて、native の口に渡す。
@@ -1561,6 +1699,35 @@ void mu2000::native_select_voice(int part)
 	m_ndrv.set_record(part, rec, rec ? 0 : -1);
 }
 
+// **受け取り終えた XG の SysEx を native の側にも効かせる**。
+// 43 1n 4C hh mm ll dd… のうち、いま見るのは 08 pp ll（パートの設定）だけ。
+// ここを入れるまでは、パートの設定を SysEx で送る曲（CC ではなく SysEx で
+// 送りや音量を決める打ち込みは珍しくない）で、firmware がその SysEx を
+// 処理し終えるまで native が古い値のまま鳴らしていた。native の口では
+// firmware を 100ms につき 5ms しか回さないので、その遅れは 1 秒を超える
+void mu2000::native_sysex(u64 fire)
+{
+	if (m_sx_pos < 7)
+		return;
+	if (!(m_sx[0] == 0x43 && (m_sx[1] & 0xf0) == 0x10 && m_sx[2] == 0x4c))
+		return;
+	const u8 hh = m_sx[3], mm = m_sx[4], ll = m_sx[5];
+	if (hh != 0x08 || mm >= 32)
+		return;
+	// **1 回の SysEx で続けて何バイトも書ける**（ll から順に並ぶ）
+	const int n = m_sx_pos - 6;
+	for (int i = 0; i < n && i + 6 < int(sizeof(m_sx)); i++) {
+		const u8 addr = u8(ll + i), dd = m_sx[6 + i] & 0x7f;
+		if (addr == 0x01 || addr == 0x02 || addr == 0x03) {
+			// バンクと音色。音色の指定と同じ行列に乗せる
+			m_nq.push_back({ fire, 4, u8(mm),
+			                 u8(addr == 0x01 ? 0 : addr == 0x02 ? 1 : 2), dd });
+		} else if (addr <= 0x28) {
+			m_nq.push_back({ fire, 5, u8(mm), addr, dd });
+		}
+	}
+}
+
 // 待っている native の出来事を、時が来たものから実行する
 void mu2000::native_pump()
 {
@@ -1575,6 +1742,23 @@ void mu2000::native_pump()
 			break;
 		case 2: m_ndrv.control(e.part, e.d0, e.d1); break;
 		case 3: m_ndrv.bend(e.part, int(e.d1) << 7 | e.d0); break;
+		// **音色の指定も行列に乗せる**。CC は線の遅れを模して行列に入れて
+		// いるのに、音色の指定だけその場で効かせていたので、順番が入れ替わって
+		// いた。曲が「CC91 → 音色の指定」の順で送っていても、こちらでは
+		// 音色の指定が先に効き、そのあと CC91 が上書きしてしまう。
+		// 実機では音色の指定がパートのつまみを音色の既定値に戻すので、
+		// 送りの値が 7 音ぶん違っていた（doc/native-engine.md の 6.53）
+		case 4:
+			if (e.part >= 0 && e.part < 64) {
+				if (e.d0 == 0) m_prog_sel[e.part].msb = e.d1;
+				else if (e.d0 == 1) m_prog_sel[e.part].lsb = e.d1;
+				else m_prog_sel[e.part].prog = e.d1;
+				native_select_voice(e.part);
+			}
+			break;
+		// XG のパートの設定（08 pp ll）。ワーク RAM の並びと同じなので、
+		// 番地をそのまま渡す
+		case 5: m_ndrv.set_part_param(e.part, e.d0, e.d1); break;
 		default: break;
 		}
 	}
@@ -1598,6 +1782,13 @@ bool mu2000::native_midi(u8 byte, int port)
 				m_sx_pos = 0;
 				m_fw_hold = std::max(m_fw_hold, u32(44100 / 30));
 			} else {
+				// **F7 で XG のパートの設定を自分にも効かせる**。native の口では
+				// firmware を 100ms につき 5ms しか回さないので、firmware が
+				// この SysEx を処理し終えるのは 1 秒以上あと。それまで待つと、
+				// 曲の頭の何音かが古いつまみの値で鳴る（利用者の曲で、送りを
+				// SysEx で 33 にしているのに CC91 の 40 のまま鳴っていた）
+				if (byte == 0xf7)
+					native_sysex(fire);
 				m_sx_pos = -1;
 				m_fw_hold = std::max(m_fw_hold, u32(44100 / 30));
 			}
@@ -1633,14 +1824,14 @@ bool mu2000::native_midi(u8 byte, int port)
 	if (m_sx_pos >= 0) {
 		// 長い SysEx（MEG のプログラムなど）の間は待ちを切らさない
 		m_fw_hold = std::max(m_fw_hold, u32(44100 / 200));
-		if (m_sx_pos < 6)
+		if (m_sx_pos < int(sizeof(m_sx)))
 			m_sx[m_sx_pos] = byte;
 		m_sx_pos++;
 		// XG のパラメータチェンジ（43 1n 4C hh mm ll …）かどうかは 3 バイトで分かる。
 		// そうならもう 1 バイト（ll）まで待って細かく分ける。そうでないもの
 		// （GM システムオンなど）は 5 バイトで決める＝前と同じ
 		const bool xg_param = m_sx[0] == 0x43 && (m_sx[1] & 0xf0) == 0x10 && m_sx[2] == 0x4c;
-		if (m_sx_pos >= (xg_param ? 6 : 5)) {
+		if (m_sx_pos == (xg_param ? 6 : 5)) {
 			// **重いのは「MEG のプログラムを書き直すもの」だけ**。
 			// `nativeplay --sxsettle` で SWP30 を触り終わるまでを測った:
 			//   00 00 7E XG システムオン       212ms
@@ -1669,7 +1860,8 @@ bool mu2000::native_midi(u8 byte, int port)
 				m_fw_hold = std::max(m_fw_hold, u32(44100 * 3 / 10));
 				m_fw_why = 1;
 			}
-			m_sx_pos = -1;
+			// ここでは**止めない**。F7 まで受け取って、パートの設定なら
+			// 値まで読む（native_sysex）
 		}
 		return false;
 	}
@@ -1678,8 +1870,7 @@ bool mu2000::native_midi(u8 byte, int port)
 	// 音色の指定（1 バイト）。自分で記録を引いて、firmware にも渡す
 	if (kind == 0xc0) {
 		const int part2 = (n.status & 0x0f) + port * 16;
-		m_prog_sel[part2].prog = byte & 0x7f;
-		native_select_voice(part2);
+		m_nq.push_back({ fire, 4, u8(part2), 2, u8(byte & 0x7f) });
 		m_ne_stats.other++;
 		// 記録はこちらで引けたが、firmware も自分の下ごしらえに時間が要る
 		// （5ms に詰めると piano の残差が -58dB から -53dB に落ちる）
@@ -1719,8 +1910,8 @@ bool mu2000::native_midi(u8 byte, int port)
 	if (kind == 0xb0) {
 		m_ne_stats.other++;
 		const int cc = n.d0 & 0x7f;
-		if (cc == 0x00) { m_prog_sel[part].msb = byte & 0x7f; native_select_voice(part); }
-		if (cc == 0x20) { m_prog_sel[part].lsb = byte & 0x7f; native_select_voice(part); }
+		if (cc == 0x00) m_nq.push_back({ fire, 4, u8(part), 0, u8(byte & 0x7f) });
+		if (cc == 0x20) m_nq.push_back({ fire, 4, u8(part), 1, u8(byte & 0x7f) });
 		const bool mine = m_ndrv.handles_cc(n.d0 & 0x7f);
 		if (mine)
 			m_nq.push_back({ fire, 2, u8(part), u8(n.d0 & 0x7f), u8(byte & 0x7f) });
@@ -1768,7 +1959,14 @@ bool mu2000::native_midi(u8 byte, int port)
 	// まだ写し取っていない音（ドラムは音ごと）。firmware に鳴らさせて覚える
 	const u32 rec = m_ndrv.record_of(part);
 	const bool drum = m_ndrv.is_drum(part);
-	// 知らない CC で firmware に任せているパートは、写し取っても使わない
+	// 知らない CC で firmware に任せているパートは、写し取っても使わない。
+	// **前の音色のフィルタの動きを録っている間は始めない**（m_traj_rec）。
+	// 写し取りも録りも SWP30 の覗き口（set_swp_watch）を 1 つしか持てないので、
+	// 新しい写し取りを始めると前の録りがそこで切れる。実測では、曲の頭で
+	// 3 パートがほぼ同時に鳴り出すと、最後の 1 つ以外は **4 段（139ms）**で
+	// 切れていた（実機は 110 段・1.1 秒かけてフィルタを閉じる）。
+	// 録り終わるまで待つぶん、その音色が native になるのは遅れるが、
+	// その間は firmware が鳴らすので音は正しい
 	if ((rec || drum) && !m_learning && !m_ndrv.delegated(part)) {
 		m_learn_note = note;
 		m_learn_vel = vel;
@@ -1987,6 +2185,13 @@ void mu2000::run_sample(s32 &left, s32 &right)
 		// MIDI の溜まり具合は、止まっているときだけ見る（毎サンプル数えると重い）
 		if (m_fw_note_total && m_ne_clock < m_fw_note_until)
 			m_fw_hold = std::max(m_fw_hold, u32(2));
+		// **フィルタの動きを録っている間は firmware を全速で回す**。
+		// 包絡線を動かしているのは firmware のソフトで、10ms ごとに
+		// 0x00・0x01・0x04 を書き直す。細く回している（100ms につき 5ms）
+		// ままだと firmware の時間が 20 分の 1 しか進まず、1 秒の窓で
+		// 実機の 5% ぶんしか録れない。音色 1 つにつき 1 秒だけの負担
+		if (m_traj_rec)
+			m_fw_hold = std::max(m_fw_hold, u32(2));
 		// **firmware を細く回し続ける**。ここを入れるまでは、全部 native で
 		// 鳴る曲だと MIDI が来たときしか CPU を回さず、firmware が丸ごと
 		// 止まっていた。その結果:
@@ -2036,8 +2241,8 @@ void mu2000::run_sample(s32 &left, s32 &right)
 		if (!m_nq.empty())
 			native_pump();
 		m_ndrv.tick(m_ne_clock);
-		if (m_traj_rec && m_traj_left && --m_traj_left == 0)
-			traj_finish();
+		if (m_traj_rec)
+			traj_step();
 	}
 	if (run_cpu)
 		run_cycles(cycles);

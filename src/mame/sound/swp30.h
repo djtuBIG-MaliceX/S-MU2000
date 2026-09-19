@@ -441,6 +441,11 @@ private:
 	std::array<u16, 0x40> m_peg_rate = {};
 	std::array<s32, 0x40> m_peg_cur = {};
 	std::array<u8,  0x40> m_peg_reached = {};
+public:
+	// **ピッチ EG が目標に着いたか**。firmware は内部レジスタ 4 の bit14 で
+	// これを見て次の段へ進む（0x12B81C）。native の口も同じものを見る
+	bool peg_reached(int chan) const { return m_peg_reached[chan] != 0; }
+private:
 	void peg_step(int chan);
 	std::array<filter_block,    0x40> m_filter = {};
 	std::array<iir1_block,      0x40> m_iir1 = {};

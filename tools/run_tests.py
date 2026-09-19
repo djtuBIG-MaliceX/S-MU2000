@@ -252,6 +252,16 @@ def step_threading(rep, roms, first):
 
 
 
+# **波形の相関の下限**（試験ごと）。いま出ている値から少し余裕を引いたもの。
+# ここを下回ったら落ちる ＝ 形が崩れたら気づける。
+# porta と dense がまだ低いのは分かっている不具合（doc/native-engine.md の 6.82）
+SHAPE_MIN = {
+    "piano":   0.98, "chord":  0.95, "drums": 0.85, "effects": 0.98,
+    "dense":   0.40, "port_b": 0.98, "bend":  0.98, "lofi":    0.98,
+    "egcc":    0.98, "porta":  0.38, "at":    0.95, "sxparam": 0.95,
+}
+
+
 def step_native_engine(rep, roms, cases):
     """**firmware を走らせない口**（doc/native-engine.md の段 2）が、既定の道と
     同じ大きさで鳴るか。1 音ずつの波形までは合わないので、大きさ（rms）と
@@ -285,6 +295,53 @@ def step_native_engine(rep, roms, cases):
     note = ("いちばん違ったのは %s の %+.2f dB" % (worst_name, worst)) if ok \
         else "、".join(bad)
     rep.add("native の口", ok, note)
+    step_native_shape(rep, cases)
+
+
+def step_native_shape(rep, cases):
+    """**波形そのもの**が既定の道と合っているか。大きさ（rms）だけ見ていると、
+    音程の包絡線が丸ごと抜けていても気づけなかった（doc の 6.80）。
+    1 秒ごとに相関を取り、そのいちばん悪いものを見る"""
+    import math
+    worst = 2.0
+    worst_name = ""
+    bad = []
+    for name in cases:
+        wa = WORK / ("%s.wav" % name)
+        wb = WORK / ("%s_ne.wav" % name)
+        if not wa.exists() or not wb.exists():
+            continue
+        fa, ra, ca, _ = fpmod.load_wav(str(wa))
+        fb, rb, cb, _ = fpmod.load_wav(str(wb))
+        n = min(len(fa) // ca, len(fb) // cb)
+        skip = int(round(BOOT_AT * ra))
+        cs = []
+        for s0 in range(skip, n - ra, ra):
+            sa = fa[s0 * ca:(s0 + ra) * ca:ca]
+            sb = fb[s0 * cb:(s0 + ra) * cb:cb]
+            na = sum(float(x) * x for x in sa)
+            nb = sum(float(x) * x for x in sb)
+            if na < 1e4 or nb < 1e4:
+                continue
+            num = sum(float(x) * float(y) for x, y in zip(sa, sb))
+            cs.append(num / math.sqrt(na * nb))
+        if not cs:
+            continue
+        med = sorted(cs)[len(cs) // 2]
+        if os.environ.get('SHAPE_VERBOSE'):
+            print('    %-10s 波形の相関 中央 %.0f%% 最小 %.0f%%'
+                  % (name, 100 * med, 100 * min(cs)))
+        if med < worst:
+            worst, worst_name = med, name
+        if med < SHAPE_MIN.get(name, 0.9):
+            bad.append("%s %.0f%%" % (name, 100 * med))
+    if worst > 1.5:
+        rep.add("native の形", True, "測れなかった")
+        return
+    ok = not bad
+    note = ("いちばん低いのは %s の %.0f%%" % (worst_name, 100 * worst)) if ok \
+        else "、".join(bad) + "（下限を割った）"
+    rep.add("native の形", ok, note)
 
 def step_xg(rep, roms):
     """定義表の番地・大きさ・範囲が firmware と合っているか。音は見ない"""

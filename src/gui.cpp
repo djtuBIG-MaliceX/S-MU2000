@@ -740,6 +740,8 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 			// PC の窓（一覧の上の帯）に CPU の負荷を出すため
 			if (g_win.out && g_win.out->produced())
 				g_win.br->set_cpu(float(g_win.out->cpu_percent()));
+			// いまどちらの口で鳴らしているか（F4 で切り替わる）を一覧の帯へ
+			g_win.br->set_engine(g_win.eng ? g_win.eng->native_engine.load() : -1);
 			ui::pc_frame_all(g_win.list, g_win.pc, g_win.fx, g_win.shapes, g_win.master,
 			                 g_win.panel.xg(), g_win.panel.ram(), *g_win.br,
 			                 [&](ui::pc_window &w) { open_window(hwnd, w); });

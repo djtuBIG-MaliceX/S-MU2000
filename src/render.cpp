@@ -414,6 +414,21 @@ int main(int argc, char **argv)
 			if (i >= tail_start + size_t(3.0 * rate))
 				break;
 		}
+		// SMU2000_RAMWATCH=1: パートのつまみが**いつ**変わるかを 0.5 秒ごとに見る。
+		// firmware は native の口では細切れにしか回らないので、曲が送った値を
+		// 処理し終える時刻がずれる。その遅れを目で見るための窓
+		if (std::getenv("SMU2000_RAMWATCH") && i > size_t(boot * rate) &&
+		    (i - size_t(boot * rate)) % 22050 == 0) {
+			const std::vector<u8> &rr = mu.nvram();
+			std::fprintf(stderr, "ram s=%zu", i - size_t(boot * rate));
+			for (int p = 0; p < 4; p++) {
+				const u32 b = xg::ram::part_base(p);
+				if (b + 0x1a < rr.size())
+					std::fprintf(stderr, "  p%d 音量=%d 送り=%d コーラス=%d 明=%d", p,
+					             rr[b + 0x0b], rr[b + 0x13], rr[b + 0x12], rr[b + 0x18]);
+			}
+			std::fprintf(stderr, "\n");
+		}
 		if (state_at && i == size_t(boot * rate) + state_sample) {
 			const std::vector<u8> st = mu.save_state();
 			if (std::FILE *sf = std::fopen(state_at, "wb")) {

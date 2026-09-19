@@ -95,6 +95,26 @@ public:
 		return rec >= VOICES && rec + 16 <= VOICES_END ? rec : 0;
 	}
 
+	// **ドラムの 1 打の記録**を引く（firmware の 0x134DB8）。
+	//   キットの番号 = パートの塊の +0x110
+	//   表の先頭     = rd32(0x292250 + キット * 4)
+	//   ずれ         = rd16(表の先頭 + 鍵 * 2)   （0xFFFF なら鳴らない）
+	//   記録         = 0x283DD0 + ずれ
+	// 実機が鳴らした値と突き合わせて確かめた（Standard Kit はキット番号 36 で、
+	// 鍵 36→284196・鍵 38→28C2DE・鍵 42→28C332）。
+	// **記録の並びは旋律の要素（84 バイト）とは別**で、まだ解いていない
+	// （フィルタの第 2 係数が +20 にある。旋律は +80。doc の 6.85）
+	u32 drum_record(int kit, int note) const
+	{
+		if (!m_ok || !(kit & 0x80))
+			return 0;                       // 特別なキットはまだ真似していない
+		const u32 base = rd32(DRUM_KIT_TABLE + u32(kit & 0x7f) * 4);
+		if (base < 0x200000 || base + 256 > m_rom->size())
+			return 0;
+		const u16 off = word(base + u32(note & 0x7f) * 2);
+		return off == 0xffff ? 0 : DRUM_RECORDS + off;
+	}
+
 	// 記録の名前（lookup の戻り値から）
 	std::string record_name(u32 rec) const
 	{
@@ -166,10 +186,18 @@ private:
 	static constexpr u32 GROUP_LSBC9_0  = 0x292640;
 	static constexpr u32 GROUP_LSBC9_1  = 0x2926c0;
 	static constexpr u32 VOICE_TABLE    = 0x267f50;   // 組 × 128 プログラム。値の 2 倍が VOICES からの距離
+	// ドラム（firmware の 0x134DB8）
+	static constexpr u32 DRUM_KIT_TABLE = 0x292250;   // キット → 鍵ごとのずれの表（4 バイト）
+	static constexpr u32 DRUM_RECORDS   = 0x283dd0;   // ずれの元になる番地
 
 	u8 byte(u32 a) const { return (*m_rom)[a]; }
 	const u8 *at(u32 a) const { return m_rom->data() + a; }
 	u16 word(u32 a) const { return u16((*m_rom)[a] << 8 | (*m_rom)[a + 1]); }
+	u32 rd32(u32 a) const
+	{
+		return u32((*m_rom)[a]) << 24 | u32((*m_rom)[a + 1]) << 16 |
+		       u32((*m_rom)[a + 2]) << 8 | (*m_rom)[a + 3];
+	}
 
 	u32 record(const u8 *part_ram) const
 	{

@@ -73,6 +73,7 @@ def main():
             j += 1
     print('時刻で対応づいた音 %d 個' % len(pairs))
     tally = collections.Counter()
+    size = collections.Counter()
     shown = 0
     for k, (fs, fslots, ns, nslots) in enumerate(pairs):
         # スロット番号は違って当たり前。**波形の番地（0x16/0x17）で要素を
@@ -101,6 +102,10 @@ def main():
                 av, bv = a.get(rr), b.get(rr)
                 if av != bv:
                     tally['0x%02x' % rr] += 1
+                    if av is not None and bv is not None:
+                        # **ずれの大きさ**も足す。上位・下位で意味が違うので
+                        # 上位バイトと下位バイトに分けて見る
+                        size['0x%02x' % rr] += abs((av >> 8) - (bv >> 8)) * 256                             + abs((av & 0xff) - (bv & 0xff))
                     if shown < limit:
                         print('  音%3d (s=%d/%d) レジスタ 0x%02x  firmware=%s native=%s'
                               % (k, fs, ns, rr,
@@ -110,7 +115,9 @@ def main():
     print()
     print('=== 違ったレジスタの多い順 ===')
     for rr, c in tally.most_common(30):
-        print('  %-14s %d 回' % (rr, c))
+        print('  %-8s %3d 回  ずれの合計 %6d（1 回あたり %.1f）'
+              % (rr, c, size[rr], size[rr] / c if c else 0))
+    print('  ずれの合計（全部） %d' % sum(size.values()))
 
 
 main()

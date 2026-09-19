@@ -87,6 +87,12 @@ public:
 	void set_cpu(float percent) { m_cpu.store(percent, std::memory_order_relaxed); }
 	float cpu() const             { return m_cpu.load(std::memory_order_relaxed); }
 
+	// いまどちらの口で鳴らしているか。0 = firmware（実機どおり）、1 = native
+	// （SH-2 を止めてこちらが鳴らす）、-1 = 分からない（プラグインなど）。
+	// gui が F4 の切り替えを書き、一覧の帯が読んで出す
+	void set_engine(int e) { m_engine.store(e, std::memory_order_relaxed); }
+	int engine() const     { return m_engine.load(std::memory_order_relaxed); }
+
 	void read(snapshot &out) const
 	{
 		for (;;) {
@@ -215,6 +221,7 @@ private:
 	std::atomic<int>      m_wheel{0};
 	std::atomic<float>    m_gain{1.0f};
 	std::atomic<float>    m_cpu{-1.0f};
+	std::atomic<int>      m_engine{-1};
 	std::atomic<unsigned> m_seq{0};
 	snapshot              m_snap;
 	std::atomic<unsigned> m_xg_seq{0};

@@ -22,6 +22,7 @@
 #include "mame/video/hd44780.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <cstring>
 #include <atomic>
@@ -327,7 +328,9 @@ public:
 	u8   m_fw_why = 0;                   // いまの hold の理由（1 SysEx / 2 そのほか）
 	// SysEx の頭を少し覚えて、長く回す必要があるかを見分ける
 	int  m_sx_pos = -1;
-	u8   m_sx[6] = {};
+	// XG のパラメータチェンジは 43 1n 4C hh mm ll dd… の形。パートの設定
+	// （08 pp ll）は自分でも効かせたいので、値まで取っておく
+	u8   m_sx[24] = {};
 
 	struct native_stats { u64 note_native = 0, note_fw = 0, learn = 0, other = 0; };
 	native_stats native_counts() const { return m_ne_stats; }
@@ -395,34 +398,77 @@ private:
 	// 内訳: MIDI は 1 バイト 10 ビット・31250 baud なので 14.1 サンプルかかる。
 	// 3 バイトの鍵で 42 サンプル、残り 32 サンプルが firmware の中の手間
 	static constexpr u32 NATIVE_DELAY = 74;
-	static constexpr u32 NATIVE_PROC  = 32;          // バイトを受け終えてから鳴るまで
-	static constexpr u64 RX_BYTE_TICK = 903;         // 1 バイト（1/64 サンプル単位）
+	// **バイトを受け終えてから鳴るまで**。`SMU2000_NATIVE_PROC` で振れる
+	// （キーオンの時刻を実機と合わせる調べもの用。doc の 6.73）
+	static u32 native_proc()
+	{
+		static const u32 v = std::getenv("SMU2000_NATIVE_PROC")
+		                   ? u32(std::atoi(std::getenv("SMU2000_NATIVE_PROC"))) : 32;
+		return v;
+	}
+	// 1 バイト（1/64 サンプル単位）。`SMU2000_RX_BYTE` で振れる（0 にすると
+	// 和音の音が全部同じ時刻に出る。相対のずれを調べる用。doc の 6.78）
+	static u64 rx_byte_tick()
+	{
+		static const u64 v = std::getenv("SMU2000_RX_BYTE")
+		                   ? u64(std::atoi(std::getenv("SMU2000_RX_BYTE"))) : 903;
+		return v;
+	}
 	u64  m_rx_at[MIDI_PORTS] = {};                   // その口が次のバイトを受け終える時刻
-	struct nev { u64 at; u8 kind, part, d0, d1; };   // kind 0=離し 1=押し 2=CC 3=ベンド
+	// kind 0=離し 1=押し 2=CC 3=ベンド 4=音色の指定 5=XG のパートの設定（08 pp d0=d1）
+	struct nev { u64 at; u8 kind, part, d0, d1; };
 	std::deque<nev> m_nq;
 	u64  m_ne_clock = 0;
 	u32  m_nown[64][4] = {};       // native で鳴らしている鍵（パートごとに 128 ビット）
 
 	void native_pump();
 	// 写し取った音の、フィルタの動きを録る（doc/native-engine.md の 6.17）
-	bool m_traj_rec = false;
-	u32  m_traj_left = 0;
-	u64  m_traj_start = 0;
-	u32  m_traj_rec_key = 0;
-	u64  m_traj_drum_key = 0;
-	int  m_traj_chan[64];          // チャンネル → 何番目の写し取りか（-1 は使わない）
-	std::vector<xg::nv::voice_cal> *m_traj_cals = nullptr;
-	u32  m_traj_n = 0;
-	void traj_start(u32 rec, u64 drum_key, int ncal);
-	void traj_finish();
+	// **フィルタの動きの録り**。同時に何本も走らせる。
+	// 1 本しか持てなかったころは、次の音色の写し取りが始まると前の録りが
+	// そこで切れていた。切れないように「録っている間は写し取りを始めない」
+	// ようにしていたが、そうすると窓を延ばせず、押している間の包絡線が
+	// 1 秒で止まっていた（doc/native-engine.md の 6.61）
+	struct traj_rec {
+		std::vector<xg::nv::voice_cal> *cals = nullptr;
+		u64  start = 0;
+		u32  left = 0;          // 0 なら空き
+		u32  n = 0;
+		u32  rec_key = 0;
+		u32  ctx = 0;
+		u64  drum_key = 0;
+		s8   chan[64] = {};     // チャンネル → 何番目の写しか（-1 は関係なし）
+		u64  rel_at[64] = {};   // そのスロットを離した時刻（0 はまだ）
+	};
+	static constexpr int TRAJ_MAX = 6;
+	traj_rec m_trajs[TRAJ_MAX];
+	bool traj_any() const
+	{
+		for (const traj_rec &t : m_trajs)
+			if (t.left)
+				return true;
+		return false;
+	}
+	void traj_step();               // 1 サンプルぶん進める
+	void traj_watch(u32 reg, u16 value);
+	bool m_traj_rec = false;        // どれか 1 本でも録っているか（native_driver へ渡す用）
+	void traj_start(u32 rec, u64 drum_key, int ncal, u32 ctx);
+	void traj_finish_one(int i);
+
+	// **短すぎる写しは取り直す**。フィルタの動きは firmware に鳴らさせた
+	// 1 音から録るので、その音が短いと途中で切れる。切れたぶんは native で
+	// 鳴らすときに「そこで止まった音」になり、実機より暗い（利用者の曲で
+	// 中域が 1dB 足りなかった）。何度か取り直して、いちばん長いものを使う
+	static constexpr u32 TRAJ_ENOUGH = 60;   // 60 段 ＝ 0.6 秒ぶん
+	static constexpr int TRAJ_TRIES  = 4;
+	std::map<u64, int> m_traj_tries;
 	// そのバイトを受け終える時刻を進めて、鳴らすべき時刻（サンプル）を返す
 	u64 rx_advance(int port)
 	{
 		const u64 now = m_ne_clock * 64;
 		if (m_rx_at[port] < now)
 			m_rx_at[port] = now;
-		m_rx_at[port] += RX_BYTE_TICK;
-		return m_rx_at[port] / 64 + NATIVE_PROC;
+		m_rx_at[port] += rx_byte_tick();
+		return m_rx_at[port] / 64 + native_proc();
 	}
 	bool nown(int part, int note) const
 	{ return (m_nown[part][(note >> 5) & 3] & (u32(1) << (note & 31))) != 0; }
@@ -437,6 +483,8 @@ private:
 	struct part_prog { u8 msb = 0, lsb = 0, prog = 0; };
 	part_prog m_prog_sel[64];
 	void native_select_voice(int part);
+	// 受け取り終えた XG の SysEx を、native の側にも効かせる
+	void native_sysex(u64 fire);
 
 	// 口ごとの MIDI の読み取り
 	struct nmidi { u8 status = 0; u8 d0 = 0; int have = 0; };
