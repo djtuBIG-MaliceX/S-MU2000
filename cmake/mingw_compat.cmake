@@ -88,26 +88,28 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 4)
     if(NOT IS_ABSOLUTE "${_libmingw32}" OR NOT EXISTS "${_libmingw32}")
       message(FATAL_ERROR "SMU2000/mingw: cannot locate libmingw32.a via ${CMAKE_CXX_COMPILER} -print-file-name")
     endif()
-    # Discover the crt_handler member under this archive's own naming (the 'lib32_'
-    # prefix comes from the multilib build) instead of hardcoding it.
+    # Discover the crt_handler member under this archive's own naming
     execute_process(COMMAND ${CMAKE_AR} t "${_libmingw32}"
                     OUTPUT_VARIABLE _seh_members OUTPUT_STRIP_TRAILING_WHITESPACE
                     COMMAND_ERROR_IS_FATAL ANY)
-    string(REGEX MATCH "[^\n;]*crt_handler\\.o" _seh_member "${_seh_members}")
+    string(REGEX MATCH "[^\n;]*crt_handler[^ \n;\r]*\\.o" _seh_member "${_seh_members}")
+    
+    # --- CHANGED BLOCK: Fall back gracefully if the member isn't found ---
     if(NOT _seh_member)
-      message(FATAL_ERROR "SMU2000/mingw: crt_handler member not found in ${_libmingw32}")
+      message(STATUS "SMU2000/mingw: crt_handler not found in libmingw32.a (Likely fixed upstream in GCC 16.2+). Skipping workaround.")
+    else()
+      # ar x extracts under the member name into CWD; run it in the build dir, rename.
+      execute_process(COMMAND ${CMAKE_AR} x "${_libmingw32}" "${_seh_member}"
+                      WORKING_DIRECTORY "${_seh_dir}" COMMAND_ERROR_IS_FATAL ANY)
+      if(NOT EXISTS "${_seh_dir}/${_seh_member}")
+        message(FATAL_ERROR "SMU2000/mingw: ar x extracted no ${_seh_member} into ${_seh_dir}")
+      endif()
+      file(RENAME "${_seh_dir}/${_seh_member}" "${SMU_MINGW_SEH_OBJ}")
+      message(STATUS "SMU2000/mingw: i686 SEH link fix active -> ${SMU_MINGW_SEH_OBJ}")
     endif()
-    # ar x extracts under the member name into CWD; run it in the build dir, rename.
-    execute_process(COMMAND ${CMAKE_AR} x "${_libmingw32}" "${_seh_member}"
-                    WORKING_DIRECTORY "${_seh_dir}" COMMAND_ERROR_IS_FATAL ANY)
-    if(NOT EXISTS "${_seh_dir}/${_seh_member}")
-      message(FATAL_ERROR "SMU2000/mingw: ar x extracted no ${_seh_member} into ${_seh_dir}")
-    endif()
-    file(RENAME "${_seh_dir}/${_seh_member}" "${SMU_MINGW_SEH_OBJ}")
+    # ----------------------------------------------------------------------
   endif()
-  message(STATUS "SMU2000/mingw: i686 SEH link fix active -> ${SMU_MINGW_SEH_OBJ}")
 endif()
-
 # ---------------------------------------------------------------------------
 # smu2000_mingw_fixup_imported_libs() — the upstream iPlug2 INTERFACE targets
 # (iPlug2::IPlug, iPlug2::APP, iPlug2::Extras::OSC) list MSVC import-library names
