@@ -959,7 +959,7 @@ private:
 		const part_cc &pc = m_cc[s.part];
 		return nv::pitch_reg(nv::read_wave(s.wave), s.note, nv::key_follow(s.elem),
 		                     nv::bend_cents(pc.bend, pc.range) + nv::elem_tune(s.elem)
-		                     + s.glide / 256);
+		                     + s.glide / 256, nv::key_pivot(s.elem));
 	}
 
 	void apply_bend(int part)
@@ -1069,8 +1069,9 @@ private:
 		const int now = m_cc[part].pan, was = c.cal_pan;
 		if (now < 0 || now == was)
 			return c.reg[0x32];
-		const int l = nv::clamp_att((c.reg[0x32] >> 8) + nv::pan_att(now) - nv::pan_att(was));
-		const int r = nv::clamp_att((c.reg[0x32] & 0xff) + nv::pan_att(128 - now) - nv::pan_att(128 - was));
+		const int l = nv::clamp_att((c.reg[0x32] >> 8) + nv::pan_att(m_rom, now) - nv::pan_att(m_rom, was));
+		const int r = nv::clamp_att((c.reg[0x32] & 0xff) + nv::pan_att(m_rom, 128 - now)
+		                            - nv::pan_att(m_rom, 128 - was));
 		return u16(l << 8 | r);
 	}
 
