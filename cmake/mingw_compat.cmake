@@ -97,6 +97,8 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 4)
     # --- CHANGED BLOCK: Fall back gracefully if the member isn't found ---
     if(NOT _seh_member)
       message(STATUS "SMU2000/mingw: crt_handler not found in libmingw32.a (Likely fixed upstream in GCC 16.2+). Skipping workaround.")
+      # FIX: Unset the variable so it evaluates to FALSE in conditional checks
+      unset(SMU_MINGW_SEH_OBJ) 
     else()
       # ar x extracts under the member name into CWD; run it in the build dir, rename.
       execute_process(COMMAND ${CMAKE_AR} x "${_libmingw32}" "${_seh_member}"
@@ -110,6 +112,7 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 4)
     # ----------------------------------------------------------------------
   endif()
 endif()
+
 # ---------------------------------------------------------------------------
 # smu2000_mingw_fixup_imported_libs() — the upstream iPlug2 INTERFACE targets
 # (iPlug2::IPlug, iPlug2::APP, iPlug2::Extras::OSC) list MSVC import-library names
