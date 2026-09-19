@@ -106,8 +106,9 @@ public:
 	// （フィルタの第 2 係数が +20 にある。旋律は +80。doc の 6.85）
 	u32 drum_record(int kit, int note) const
 	{
-		if (!m_ok || !(kit & 0x80))
-			return 0;                       // 特別なキットはまだ真似していない
+		// **bit7 が立っているときは別の道**（0x134DF0。SFX など）。まだ真似していない
+		if (!m_ok || (kit & 0x80))
+			return 0;
 		const u32 base = rd32(DRUM_KIT_TABLE + u32(kit & 0x7f) * 4);
 		if (base < 0x200000 || base + 256 > m_rom->size())
 			return 0;

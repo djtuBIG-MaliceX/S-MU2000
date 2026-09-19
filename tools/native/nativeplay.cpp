@@ -1967,10 +1967,23 @@ int main(int argc, char **argv)
 	} else {
 		// **その鍵と強さで実際に鳴る要素**を選ぶ（EPiano1 のように強さで
 		// 要素が切り替わる音色がある。要素 0 で決め打つと測り間違える）
+		// **遅れない要素を先に選ぶ**。firmware は byte72 の遅れが無い要素から
+		// 鳴らすので、遅れる要素を選ぶと実機と別のスロットを見ることになる
+		// （Syn Strings は要素 0 が byte72=2 で、パンが左右逆に出ていた）
 		const u8 *elem = xg::nv::element(rom, rec, 0);
-		for (int i = 0, n = xg::nv::element_count(rom, rec); i < n; i++) {
-			const u8 *e2 = xg::nv::element(rom, rec, i);
-			if (xg::nv::element_active(e2, note, vel)) { elem = e2; break; }
+		{
+			const int n = xg::nv::element_count(rom, rec);
+			const u8 *fallback = nullptr;
+			for (int i = 0; i < n; i++) {
+				const u8 *e2 = xg::nv::element(rom, rec, i);
+				if (!xg::nv::element_active(e2, note, vel))
+					continue;
+				if (!fallback)
+					fallback = e2;
+				if (!xg::nv::elem_delay(e2)) { fallback = e2; break; }
+			}
+			if (fallback)
+				elem = fallback;
 		}
 		// 先に 1 音だけ firmware に鳴らしてもらって癖を写し取る
 		const std::vector<u8> before1 = mu.save_state();

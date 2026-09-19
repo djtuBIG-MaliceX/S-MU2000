@@ -1183,7 +1183,7 @@ public:
 			                                  vel);
 			// 音程の包絡線の行き先（byte31）。初めの高さと同じなら書かない
 			{
-				const u16 tgt = nv::peg_reg(m_rom, nv::peg_cents(el, el[31], vel));
+				const u16 tgt = nv::peg_reg(m_rom, nv::peg_cents(el, el[31], vel), el);
 				su.peg_tgt = tgt == sr.v[0x10] ? 0xffff : tgt;
 			}
 			// **段 0 から始める**。実機は 10ms ごとに「着いたか」を見て次の段へ
@@ -1263,6 +1263,8 @@ public:
 				       nv::release_reg(m_rom, s.elem, note, note_att(s, part)));
 			// ドラムは離しでも音を切らない（実機も打ったら鳴りきる）
 			s.on = false;
+			// **ドラムも「鳴っている」ことにする**。離しの段は無いが、
+			// 打の尾が残っている間はスロットを空けない（6.89）
 			s.rel = s.elem != nullptr;
 			s.rel_at = m_clock;
 			s.rel_att = s.att;
@@ -1329,8 +1331,22 @@ public:
 			su.att = att0 + 2 * (nv::velocity_att(m_rom, vel) - nv::velocity_att(m_rom, c.cal_vel));
 			const int att = note_att(su, part);
 			su.lfo = c.has(0x0a) ? c.reg[0x0a] : 0;
+			// **式で組む道**（`SMU2000_DRUM_EXACT=1`）。記録の 42 バイトから
+			// 0x00・0x02・0x04・0x06-0x08・0x11・0x12-0x17 を出す（6.86・6.87）。
+			// パン・送り・EQ は写し取りのまま（パートの設定を含むので）
+			const u8 *drec = nullptr;
+			if (nv::drum_exact() && m_ram)
+				drec = nv::drum_record(m_rom,
+				                       int(m_ram[ram::part_base(part) + nv::PART_KIT]), note);
+			nv::slot_regs dr;
+			if (drec)
+				dr = nv::drum_note(m_rom, drec, att);
 			for (int i = 0; i < 0x40; i++)
-				if (c.has(i))
+				if (drec && (dr.write & (u64(1) << i)) && i != 9 && i != 0x32
+				    && i != 0x33 && i != 0x34 && !(i >= 0x20 && i <= 0x2b)
+				    && i != 0x03 && i != 0x05 && i != 0x0a)
+					m_poke(u32(slot) * 64 + u32(i), dr.v[i]);
+				else if (c.has(i))
 					m_poke(u32(slot) * 64 + u32(i),
 					       i == 9 ? u16(att)
 					              : (i == 0x32 ? pan_reg(c, part)
@@ -1460,7 +1476,7 @@ private:
 		const int lvl  = nv::peg_level_of(s.elem, s.pstage);
 		m_poke(u32(i) * 64 + 0x0b, u16(rate << 8));
 		m_poke(u32(i) * 64 + 0x10,
-		       nv::peg_reg(m_rom, nv::peg_cents(s.elem, lvl, s.pvel)));
+		       nv::peg_reg(m_rom, nv::peg_cents(s.elem, lvl, s.pvel), s.elem));
 	}
 
 	void key_on(u64 mask)
