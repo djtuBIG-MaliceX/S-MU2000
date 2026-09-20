@@ -2,11 +2,13 @@ name: Nightly VST2+CLAP Release
 
 # Rolling prerelease ("nightly") published on every push to the long-lived
 # branches, with downloadable Win32 + x64 VST2 (.dll) and CLAP (.clap)
-# artifacts. Difference from build-native.yml: VST2 is NOT gated OFF — it
-# builds against the committed clean-room ABI layer (cmake/vst2_compat, see
-# third_party/vst2/README.md), which cmake/iplug2_paths.cmake drops (renamed)
-# into the untracked iPlug2 stub dir automatically when no proprietary
-# vstsdk2.4 exists (always the case on GitHub runners).
+# artifacts plus the standalone native tool exes (smu2000_render/live/gui)
+# under tools/ in each arch zip. Difference from build-native.yml: VST2 is NOT
+# gated OFF — it builds against the committed clean-room ABI layer
+# (cmake/vst2_compat, see third_party/vst2/README.md), which
+# cmake/iplug2_paths.cmake drops (renamed) into the untracked iPlug2 stub dir
+# automatically when no proprietary vstsdk2.4 exists (always the case on GitHub
+# runners).
 #
 # The VST2 SDK itself is never referenced, downloaded or committed here
 # (hard rule #3). ROMs are never staged on CI (hard rule #1) — every artifact
@@ -76,11 +78,14 @@ jobs:
       run: cmake --build --preset ${{ matrix.preset }}-release
       shell: pwsh
 
-    - name: "Gate: VST2 + CLAP artifacts exist (${{ matrix.arch }})"
+    - name: "Gate: VST2 + CLAP + tool artifacts exist (${{ matrix.arch }})"
       run: |
         $art = @(
           "build-cmake/vst2/${{ matrix.arch }}/Release/SMU2000_VST2.dll",
-          "build-cmake/clap/${{ matrix.arch }}/Release/SMU2000_VST2.clap"
+          "build-cmake/clap/${{ matrix.arch }}/Release/SMU2000_VST2.clap",
+          "build-cmake/tools/${{ matrix.arch }}/Release/smu2000_render.exe",
+          "build-cmake/tools/${{ matrix.arch }}/Release/smu2000_live.exe",
+          "build-cmake/tools/${{ matrix.arch }}/Release/smu2000_gui.exe"
         )
         foreach ($f in $art) {
           if (-not (Test-Path $f)) { throw "missing artifact: $f" }
@@ -152,22 +157,33 @@ jobs:
 
     - name: Package (${{ matrix.arch }})
       # One zip per arch: the VST2 .dll and the CLAP .clap share the base name
-      # SMU2000_VST2 (hosts want it) and differ only by extension.
+      # SMU2000_VST2 (hosts want it) and differ only by extension. The standalone
+      # tool exes (default-ON SMU2000_BUILD_TOOLS) ride along under tools/.
       run: |
         $ErrorActionPreference = 'Stop'
         $stage = "staging/${{ matrix.arch }}"
         New-Item -ItemType Directory -Force -Path $stage | Out-Null
+        New-Item -ItemType Directory -Force -Path "$stage/tools" | Out-Null
         Copy-Item "build-cmake/vst2/${{ matrix.arch }}/Release/SMU2000_VST2.dll" $stage
         Copy-Item "build-cmake/clap/${{ matrix.arch }}/Release/SMU2000_VST2.clap" $stage
         Copy-Item "build-cmake/vst2/${{ matrix.arch }}/Release/ROM-REQUIRED.txt" $stage
+        Copy-Item "build-cmake/tools/${{ matrix.arch }}/Release/smu2000_render.exe" "$stage/tools"
+        Copy-Item "build-cmake/tools/${{ matrix.arch }}/Release/smu2000_live.exe" "$stage/tools"
+        Copy-Item "build-cmake/tools/${{ matrix.arch }}/Release/smu2000_gui.exe" "$stage/tools"
         Set-Content -Path "$stage/README.txt" -Value @"
-        ${{ env.PROJECT_NAME }} nightly - Windows ${{ matrix.arch }} (VST2 + CLAP)
+        ${{ env.PROJECT_NAME }} nightly - Windows ${{ matrix.arch }} (VST2 + CLAP + tools)
 
         Install either/both into your DAW's plugin folder:
           SMU2000_VST2.dll   VST2 instrument (${{ matrix.arch }})
           SMU2000_VST2.clap  CLAP instrument
 
-        See ROM-REQUIRED.txt - the Yamaha MU2000 ROMs are NOT included.
+        Standalone tools (same engine, no DAW needed), in the tools\ subfolder:
+          smu2000_render.exe  MIDI -> WAV offline render
+          smu2000_live.exe    live MIDI-in + audio out
+          smu2000_gui.exe     front-panel + PC editor app
+
+        See ROM-REQUIRED.txt - the Yamaha MU2000 ROMs are NOT included. For the
+        tools, place the dumped roms\ folder next to the exes (tools\roms\).
         Built by GitHub Actions from commit ${{ github.sha }}.
         "@
         Compress-Archive -Path "$stage/*" -DestinationPath "${{ env.PROJECT_NAME }}-nightly-win-${{ matrix.arch }}.zip"

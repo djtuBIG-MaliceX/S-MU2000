@@ -54,12 +54,18 @@ jobs:
       run: cmake --build --preset ${{ matrix.preset }}-release
       shell: pwsh
 
-    - name: "Gate: VST2 + CLAP artifacts exist (${{ matrix.arch }})"
+    - name: "Gate: VST2 + CLAP + tool artifacts exist (${{ matrix.arch }})"
       # Replaces sw10's app-launch smoke: this project has no app target.
+      # The native tool exes are default-ON (SMU2000_BUILD_TOOLS) and built by
+      # this same --preset build; gate them so a silent configure flip can never
+      # drop them from the artifact set unnoticed.
       run: |
         $art = @(
           "build-cmake/vst2/${{ matrix.arch }}/Release/SMU2000_VST2.dll",
-          "build-cmake/clap/${{ matrix.arch }}/Release/SMU2000_VST2.clap"
+          "build-cmake/clap/${{ matrix.arch }}/Release/SMU2000_VST2.clap",
+          "build-cmake/tools/${{ matrix.arch }}/Release/smu2000_render.exe",
+          "build-cmake/tools/${{ matrix.arch }}/Release/smu2000_live.exe",
+          "build-cmake/tools/${{ matrix.arch }}/Release/smu2000_gui.exe"
         )
         foreach ($f in $art) {
           if (-not (Test-Path $f)) { throw "missing artifact: $f" }
@@ -82,12 +88,14 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: ${{ env.PROJECT_NAME }}-win-${{ matrix.arch }}
-        # VST2 .dll + CLAP .clap (+ ROM-REQUIRED.txt staged into each dir above);
-        # no app/vst3 targets exist here. Precise paths so no glob can ever sweep
-        # up roms/ or SDK files (hard rules #1/#3).
+        # VST2 .dll + CLAP .clap + native tool exes (smu2000_{render,live,gui};
+        # ROM-REQUIRED.txt is staged into every Release dir incl. tools by the
+        # step above). No app/vst3 targets exist here. Precise paths so no glob
+        # can ever sweep up roms/ or SDK files (hard rules #1/#3).
         path: |
           build-cmake/vst2/${{ matrix.arch }}/Release/
           build-cmake/clap/${{ matrix.arch }}/Release/
+          build-cmake/tools/${{ matrix.arch }}/Release/
         if-no-files-found: error
 
   build-mingw:
@@ -145,9 +153,9 @@ jobs:
       run: cmake --build --preset ${{ matrix.preset }}-release
       shell: msys2 {0}
 
-    - name: "Gate: VST2 + CLAP artifacts exist (${{ matrix.outarch }})"
+    - name: "Gate: VST2 + CLAP + tool artifacts exist (${{ matrix.outarch }})"
       run: |
-        for f in "build-cmake/vst2/${{ matrix.outarch }}/Release/SMU2000_VST2.dll" "build-cmake/clap/${{ matrix.outarch }}/Release/SMU2000_VST2.clap"; do
+        for f in "build-cmake/vst2/${{ matrix.outarch }}/Release/SMU2000_VST2.dll" "build-cmake/clap/${{ matrix.outarch }}/Release/SMU2000_VST2.clap" "build-cmake/tools/${{ matrix.outarch }}/Release/smu2000_render.exe" "build-cmake/tools/${{ matrix.outarch }}/Release/smu2000_live.exe" "build-cmake/tools/${{ matrix.outarch }}/Release/smu2000_gui.exe"; do
           test -f "$f" || { echo "missing artifact: $f" >&2; exit 1; }
           ls -la "$f"
         done
@@ -167,7 +175,10 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: ${{ env.PROJECT_NAME }}-win-${{ matrix.outarch }}
+        # Plugin binaries + native tool exes (smu2000_{render,live,gui}) —
+        # same precise-path policy as the MSVC leg (hard rules #1/#3).
         path: |
           build-cmake/vst2/${{ matrix.outarch }}/Release/
           build-cmake/clap/${{ matrix.outarch }}/Release/
+          build-cmake/tools/${{ matrix.outarch }}/Release/
         if-no-files-found: error
