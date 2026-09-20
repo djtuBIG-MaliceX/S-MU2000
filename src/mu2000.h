@@ -296,7 +296,11 @@ public:
 	// firmware は 2.5ms ごとにここを読み、**A が立っていれば 1 目盛り**、
 	// 向きは B（0 で増、1 で減）で決める。実測でそう決まっている。
 	// 走査 1 回につき 1 目盛りなので、最大 400 目盛り/秒
-	void turn_encoder(int detents) { m_enc_pending += detents; }
+	void turn_encoder(int detents)
+	{
+		m_enc_pending += detents;
+		panel_touched();
+	}
 	bool encoder_busy() const { return m_enc_pending != 0; }
 
 	// パネルの LED 10 個。MAME の mulcd_device::set_leds と同じ並び
@@ -325,6 +329,7 @@ public:
 	std::atomic<u64> m_ne_by_learn{0};   // 写し取り（その音色の 1 音目）
 	std::atomic<u64> m_ne_by_midi{0};    // 渡した MIDI を受け取らせている
 	std::atomic<u64> m_ne_by_keep{0};    // 止めきらないために細く回している
+	std::atomic<u64> m_ne_by_panel{0};   // パネル（ボタン・ダイヤル・液晶）を触っている
 	u8   m_fw_why = 0;                   // いまの hold の理由（1 SysEx / 2 そのほか）
 	// SysEx の頭を少し覚えて、長く回す必要があるかを見分ける
 	int  m_sx_pos = -1;
@@ -409,7 +414,11 @@ private:
 		return v;
 	}
 	// 1 バイト（1/64 サンプル単位）。`SMU2000_RX_BYTE` で振れる（0 にすると
-	// 和音の音が全部同じ時刻に出る。相対のずれを調べる用。doc の 6.78）
+	// 和音の音が全部同じ時刻に出る。相対のずれを調べる用。doc の 6.78）。
+	// **DIN は 31250 baud で 1 バイト 10 ビット ＝ 14.1 サンプル**、
+	// **USB は実機で測った 19500 byte/s ＝ 2.26 サンプル**（doc/dump/usb.md）。
+	// USB の口なのに DIN の速さで並べていたので、プラグイン（USB が既定）では
+	// 音が 1 つにつき 37 サンプル遅れていた（doc/native-engine.md の 6.120）
 	static u64 rx_byte_tick()
 	{
 		static const u64 v = std::getenv("SMU2000_RX_BYTE")
@@ -417,6 +426,9 @@ private:
 		return v;
 	}
 	u64  m_rx_at[MIDI_PORTS] = {};                   // その口が次のバイトを受け終える時刻
+	u64  m_rx_at_usb = 0;                            // USB の線（4 口で分け合う）
+	u8   m_tick_seen = 0xff;                         // 10ms の印の前の値（6.145）
+	int  m_rx_usb_port = -1;                         // USB で最後に選んだ口
 	// kind 0=離し 1=押し 2=CC 3=ベンド 4=音色の指定 5=XG のパートの設定（08 pp d0=d1）
 	struct nev { u64 at; u8 kind, part, d0, d1; };
 	std::deque<nev> m_nq;
@@ -469,13 +481,48 @@ private:
 	static constexpr int TRAJ_TRIES  = 4;
 	std::map<u64, int> m_traj_tries;
 	// そのバイトを受け終える時刻を進めて、鳴らすべき時刻（サンプル）を返す
+	// その口のバイトが USB を通るか（midi_in の振り分けと同じ見立て）
+	bool rx_usb(int port) const
+	{
+		return m_usb_host || m_cable[port] >= MIDI_DIN_PORTS;
+	}
+	static u64 usb_sub64()
+	{
+		static const u64 v = std::getenv("SMU2000_USB_SUB")
+		                   ? u64(std::atoi(std::getenv("SMU2000_USB_SUB"))) : 6 * 64;
+		return v;
+	}
+	static u64 rx_byte_tick_usb()
+	{
+		static const u64 v = std::getenv("SMU2000_RX_BYTE_USB")
+		                   ? u64(std::atoi(std::getenv("SMU2000_RX_BYTE_USB"))) : 145;
+		return v;
+	}
 	u64 rx_advance(int port)
 	{
 		const u64 now = m_ne_clock * 64;
-		if (m_rx_at[port] < now)
-			m_rx_at[port] = now;
-		m_rx_at[port] += rx_byte_tick();
-		return (m_rx_at[port] + native_proc64()) / 64;
+		// **USB は 4 つの口が 1 本の線を分け合う**（doc/native-engine.md の 6.126）。
+		// DIN は口ごとに別の線なので別々に数えるが、USB では口 A のバイトが
+		// 口 C のバイトを待たせる。口ごとに数えていたので、口 B・C・D の音が
+		// 実機より 80-94 サンプル早く出ていた
+		const bool usb = rx_usb(port);
+		u64 &at = usb ? m_rx_at_usb : m_rx_at[port];
+		if (at < now)
+			at = now;
+		// **口が変わると `F5 <口>` が 2 バイト挟まる**（usb_midi_in と同じ）。
+		// 数えていないと、口をまたぐ曲でこちらだけ早く鳴る
+		if (usb && port != m_rx_usb_port) {
+			m_rx_usb_port = port;
+			at += 2 * rx_byte_tick_usb();
+		}
+		at += usb ? rx_byte_tick_usb() : rx_byte_tick();
+		// **USB の口 B・C・D は実機のほうが 6 サンプル遅い**（6.129）。
+		// 口 A は合っている。DIN では 4 口とも同じなので、USB のときだけ。
+		// 1 口だけ使う曲を 4 通り作って測った（`SMU2000_USB_SUB` で振れる）。
+		// **`--bootcache` で測ってはいけない**。そちらだと 76 サンプルに
+		// 見えるが、ほんとうに起動させると 6 だった（6.121 と同じ罠）
+		const u64 extra = (usb && port > 0) ? usb_sub64() : 0;
+		return (at + extra + native_proc64()) / 64;
 	}
 	bool nown(int part, int note) const
 	{ return (m_nown[part][(note >> 5) & 3] & (u32(1) << (note & 31))) != 0; }
@@ -489,6 +536,26 @@ private:
 	// バンクとプログラムをパートごとに覚えて、xg::voice_rom::lookup に渡す
 	struct part_prog { u8 msb = 0, lsb = 0, prog = 0; };
 	part_prog m_prog_sel[64];
+	// **パートの種類**（XG の 08 pp 07。0 が旋律、2-5 がドラム 1-4）。
+	// -1 はまだ SysEx を見ていない（ワーク RAM を読む）。バンク 127/126 で
+	// なくてもここでドラムになるので、音色の引き方を変える必要がある
+	// （doc/native-engine.md の 6.137）
+	s8 m_part_mode[64] = {};
+	static u64 drum_lead()
+	{
+		static const u64 v = std::getenv("SMU2000_DRUM_LEAD")
+		                   ? u64(std::atoi(std::getenv("SMU2000_DRUM_LEAD"))) : 3;
+		return v;
+	}
+	bool part_is_drum(int part) const
+	{
+		if (part < 0 || part >= 64)
+			return false;
+		if (m_part_mode[part] >= 0)
+			return m_part_mode[part] != 0;
+		const u32 off = xg::ram::part_base(part) + 0x07;
+		return m_ram.size() > off && m_ram[off] != 0;
+	}
 	void native_select_voice(int part);
 	// 受け取り終えた XG の SysEx を、native の側にも効かせる
 	void native_sysex(u64 fire);
@@ -513,18 +580,53 @@ private:
 	u32  m_ne_learn_dirty = 0;
 	// 写し取りで、その音色のものでないスロットを掴んで捨てた回数
 	u32  m_ne_learn_wrong = 0;
+	// **写し取りの鍵**。firmware は XG のノートシフト（08 pp 08）を足して
+	// から鳴らすので、こちらの式もその鍵で見ないと合わない
+	// **写し取りの強さ**。firmware はベロシティ感度（08 pp 0C・0D）を掛けて
+	// から鳴らすので、こちらの式もその強さで見る
+	int  learn_vel_sensed() const
+	{ return m_ndrv.part_vel(m_learn_part, m_learn_vel); }
+	int  learn_note_shifted() const
+	{
+		const int n = m_learn_note + m_ndrv.part_shift(m_learn_part);
+		return n < 0 ? 0 : (n > 127 ? 127 : n);
+	}
+	// 実機のボイスの塊から読んだ音量の目盛りが、写し取った 0x09 と合わなかった数
+	u32  m_ne_lvl_miss = 0;
 	// firmware が、こちらが鳴らしているスロットに書いた回数
 	u32  m_ne_fw_stomp = 0;
 	void note_fw_swp(bool master, u32 reg, u16 value);
 	u64  m_fw_keymask = 0;     // firmware がつぎに鳴らすスロットのマスク
 	// firmware を細く回し続ける刻み（100ms ごとに 5ms）。止めきると液晶・
 	// ボタン・firmware 自身の後始末が全部止まる
+	// **パネルを触っている間は firmware を全速で回す**（doc/native-engine.md の 6.119）。
+	// native の口では firmware を 100ms につき 5ms しか回さないので、
+	// firmware の中の時間は 20 分の 1 でしか進まない。液晶もボタンも
+	// ダイヤルも firmware の仕事なので、そのままだと
+	//   * ダイヤルが毎秒 20 目盛りしか進まない（実機は 400）
+	//   * 画面が変わるまでひと呼吸かかる
+	// になる。触ってから この長さだけ全速で回すと、実機と同じ手触りになる。
+	// 触っていない間は今までどおり細く回すだけ（CPU は増えない）
+	// `SMU2000_PANEL_RUN` で振れる（サンプル数。0 で前の道に戻る）
+	static u32 panel_run()
+	{
+		static const u32 v = std::getenv("SMU2000_PANEL_RUN")
+		                   ? u32(std::atoi(std::getenv("SMU2000_PANEL_RUN")))
+		                   : u32(44100 / 2);      // 0.5 秒
+		return v;
+	}
+	void panel_touched() { m_panel_hold = panel_run(); }
+	// 液晶を書き換えている間の延長ぶん（短くてよい。止まればすぐ戻る）
+	static constexpr u32 LCD_RUN = 44100 / 10;     // 0.1 秒
+	u32 m_panel_hold = 0;
+
 	static constexpr u32 KEEPALIVE_EVERY = 4410;
 	static constexpr u32 KEEPALIVE_RUN = 220;
 public:
 	u32  native_slot_clash() const { return m_ne_slot_clash; }
 	u32  native_learn_dirty() const { return m_ne_learn_dirty; }
 	u32  native_learn_wrong() const { return m_ne_learn_wrong; }
+	u32  native_level_miss() const { return m_ne_lvl_miss; }
 	u32  native_fw_stomp() const { return m_ne_fw_stomp; }
 private:
 	native_stats m_ne_stats;

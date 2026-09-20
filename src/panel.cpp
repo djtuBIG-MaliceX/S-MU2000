@@ -191,6 +191,7 @@ int main(int argc, char **argv)
 	bool trace = false;
 	double settle = 1.0;
 	bool usb = false;
+	int native = 0;
 
 	for (int i = 1; i < argc; i++) {
 		if (!std::strcmp(argv[i], "--keys") && i + 1 < argc) keys = argv[++i];
@@ -202,6 +203,10 @@ int main(int argc, char **argv)
 		else if (!std::strcmp(argv[i], "--watch")) watch = true;
 		else if (!std::strcmp(argv[i], "--trace")) trace = true;
 		else if (!std::strcmp(argv[i], "--usb")) usb = true;
+		// **native の口**（firmware を細く回す）でパネルを触ってみる。
+		// 段の番号は set_native_engine と同じ（doc/native-engine.md）
+		else if (!std::strcmp(argv[i], "--native")) native = (i + 1 < argc && argv[i + 1][0] != '-')
+		                                                   ? std::atoi(argv[++i]) : 3;
 		else if (dir.empty()) dir = argv[i];
 	}
 
@@ -253,6 +258,12 @@ int main(int argc, char **argv)
 	}
 	// 起動直後は表示が動いている途中なので、少し落ち着かせる
 	idle(mu, settle);
+	// **native の口は起動しきってから入れる**。起動の途中で細く回すと
+	// firmware が立ち上がりきらない
+	if (native) {
+		mu.set_native_engine(native);
+		idle(mu, 0.5);
+	}
 
 	if (trace)
 		std::printf("  %-10s %s\n", "(起動)", lcd_line(mu).c_str());

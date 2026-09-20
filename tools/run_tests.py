@@ -24,6 +24,7 @@ ROM の置き場は --roms、環境変数 SMU2000_ROMS、roms/、../MU2000/roms 
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -254,11 +255,23 @@ def step_threading(rep, roms, first):
 
 # **波形の相関の下限**（試験ごと）。いま出ている値から少し余裕を引いたもの。
 # ここを下回ったら落ちる ＝ 形が崩れたら気づける。
-# porta と dense がまだ低いのは分かっている不具合（doc/native-engine.md の 6.82）
+# dense がまだ低いのは分かっている不具合（写し取りの音だけ、実機の側が
+# 混み具合で遅れる。doc/native-engine.md の 6.90）
 SHAPE_MIN = {
-    "piano":   0.98, "chord":  0.95, "drums": 0.85, "effects": 0.98,
-    "dense":   0.40, "port_b": 0.98, "bend":  0.98, "lofi":    0.98,
-    "egcc":    0.98, "porta":  0.38, "at":    0.95, "sxparam": 0.95,
+    "piano":   0.98, "chord":  0.95, "drums": 0.95, "effects": 0.98,
+    "dense":   0.55, "port_b": 0.98, "bend":  0.98, "lofi":    0.98,
+    "egcc":    0.98, "porta":  0.95, "at":    0.95, "sxparam": 0.95,
+    "pedals":  0.95, "partsx": 0.95, "rpn": 0.95, "mono": 0.95,
+    # 一晩で足した軸（6.125-6.139）。どれも中央 98-100% 出ている
+    "ctlreset": 0.95, "ports": 0.95, "scale": 0.95, "kits": 0.95,
+    "ins2": 0.95, "progchg": 0.98, "running": 0.95, "pat": 0.95,
+    "ccramp": 0.95, "midreset": 0.98, "partmode": 0.95,
+    "drumnrpn": 0.95, "retrig": 0.95, "pedretrig": 0.98, "edges": 0.95,
+    "fxchange": 0.95,
+    # keylevel は鍵と強さで音量が大きく動く音色ばかりなので、鍵を押す時刻の
+    # ばらつき（6.90）が相関に出やすい。**音量のほうは `native の口` が見る**。
+    # 音 1 つずつは tools/native/notelevel.py で見られる
+    "keylevel": 0.95,
 }
 
 
@@ -382,6 +395,151 @@ def step_sampling(rep, roms):
     rep.add("sampling", rc == 0, note)
 
 
+def step_warm(rep, roms, cases):
+    """**2 回目以降の音**（写し取りが済んだ状態）。
+    `dense` の相関が 57% で止まっているのは、60 声のうち半分が
+    **写し取りの音（実機が鳴らす音）**で、firmware の混み具合が
+    firmware の道と違うため（doc/native-engine.md の 6.117・6.121）。
+    写し取りが済めばその音も native が鳴らすので、実際に使うときの値は
+    こちらになる。1 回鳴らして写しを貯め、2 回目を比べる"""
+    import math
+    home = WORK / "warmhome"
+    shutil.rmtree(home / "S-MU2000" / "voicecal", ignore_errors=True)
+    home.mkdir(parents=True, exist_ok=True)
+    env = {"LOCALAPPDATA": str(home), "XDG_DATA_HOME": str(home),
+           "HOME": str(home)}
+    extra = ["--native-engine", "--voicecache"]
+    # dense … 写し取りの音がいちばん効く曲、porta … 10ms 格子の位相を使う曲
+    # （写し取りが無いと位相が学べず、滑りが前の道に落ちていた。6.145）
+    floor = {"dense": 0.70, "porta": 0.95}
+    notes, bad = [], []
+    for name in ("dense", "porta"):
+        if name not in cases:
+            continue
+        midi, seconds = cases[name]
+        if render(roms, "warm1", midi, seconds, extra=extra, env=env)[0] is None:
+            bad.append("%s: 1 回目が鳴らせなかった" % name)
+            continue
+        if render(roms, "warm2", midi, seconds, extra=extra, env=env)[0] is None:
+            bad.append("%s: 2 回目が鳴らせなかった" % name)
+            continue
+        base = WORK / ("%s.wav" % name)
+        if not base.exists():
+            continue
+        fa, ra, ca, _ = fpmod.load_wav(str(base))
+        fb, _, cb, _ = fpmod.load_wav(str(WORK / "warm2.wav"))
+        n = min(len(fa) // ca, len(fb) // cb)
+        skip = int(round(BOOT_AT * ra))
+        cs = []
+        for s0 in range(skip, n - ra, ra):
+            sa = fa[s0 * ca:(s0 + ra) * ca:ca]
+            sb = fb[s0 * cb:(s0 + ra) * cb:cb]
+            na = sum(float(x) * x for x in sa)
+            nb = sum(float(x) * x for x in sb)
+            if na < 1e4 or nb < 1e4:
+                continue
+            num = sum(float(x) * float(y) for x, y in zip(sa, sb))
+            cs.append(num / math.sqrt(na * nb))
+        if not cs:
+            bad.append("%s: 音が無い" % name)
+            continue
+        med = sorted(cs)[len(cs) // 2]
+        notes.append("%s %.0f%%" % (name, 100 * med))
+        if med < floor.get(name, 0.9):
+            bad.append("%s %.0f%%" % (name, 100 * med))
+    rep.add("2 回目", not bad,
+            "、".join(bad or notes) + ("（下限を割った）" if bad else ""))
+
+
+def step_usb(rep, roms, cases):
+    """**USB の口でも native が firmware と同じ時刻で鳴るか**
+    （doc/native-engine.md の 6.120）。プラグインは USB が既定なのに、
+    native の口は MIDI のバイトを DIN の速さ（31250 baud ＝ 14.1 サンプル）で
+    並べていて、実機（19500 byte/s ＝ 2.26 サンプル）より 1 音あたり
+    37 サンプル遅れていた。試験はふだん DIN で鳴らすので気づけなかった"""
+    import math
+    env = {"SMU2000_NO_VOICECACHE": "1"}
+    notes, bad = [], []
+    # chord … USB のバイトの速さ、ports … 4 つの口（C と D は USB だけ）
+    for name in ("chord", "ports"):
+        if name not in cases:
+            continue
+        midi, seconds = cases[name]
+        a, _ = render(roms, "usb_fw", midi, seconds, extra=["--usb"], env=env)
+        b, _ = render(roms, "usb_ne", midi, seconds,
+                      extra=["--usb", "--native-engine"], env=env)
+        if a is None or b is None:
+            bad.append("%s: 鳴らせなかった" % name)
+            continue
+        fa, ra, ca, _ = fpmod.load_wav(str(WORK / "usb_fw.wav"))
+        fb, rb, cb, _ = fpmod.load_wav(str(WORK / "usb_ne.wav"))
+        n = min(len(fa) // ca, len(fb) // cb)
+        skip = int(round(BOOT_AT * ra))
+        cs = []
+        for s0 in range(skip, n - ra, ra):
+            sa = fa[s0 * ca:(s0 + ra) * ca:ca]
+            sb = fb[s0 * cb:(s0 + ra) * cb:cb]
+            na = sum(float(x) * x for x in sa)
+            nb = sum(float(x) * x for x in sb)
+            if na < 1e4 or nb < 1e4:
+                continue
+            num = sum(float(x) * float(y) for x, y in zip(sa, sb))
+            cs.append(num / math.sqrt(na * nb))
+        if not cs:
+            bad.append("%s: 音が無い" % name)
+            continue
+        med = sorted(cs)[len(cs) // 2]
+        notes.append("%s %.0f%%" % (name, 100 * med))
+        # ports は USB のとき、実機の側が**口ごとに違う遅れ**で鳴らす
+        # （口 A +43 に対し B +117・C +151・D +104 サンプル。まだ真似できて
+        # いない。doc/native-engine.md の 6.126）。DIN では 100% 出る
+        if med < (0.80 if name == "ports" else 0.95):
+            bad.append("%s %.0f%%" % (name, 100 * med))
+    rep.add("USB の口", not bad, "、".join(bad or notes) + ("（下限を割った）" if bad else ""))
+
+
+# パネルの試験で押すボタン（品書きを一巡りする）
+PANEL_KEYS = ("play,util,enter,value+,value+,exit,edit,enter,value+,exit,exit,"
+              "part+,mute,play,drum,piano,organ,select,edit,enter,enter,exit,exit")
+
+
+def step_panel(rep, roms):
+    """**native の口でもパネルが効くか**（doc/native-engine.md の 6.119）。
+    ボタン・ダイヤル・液晶はぜんぶ firmware の仕事なので、firmware を細く
+    回したままだと一切効かない。同じボタンの並びを firmware の道と native の
+    口で押して、液晶が 1 行残らず同じになるかを見る"""
+    exe = BUILD / ("panel" + EXE)
+    if not exe.exists():
+        rep.add("パネル", False, "%s が無い" % exe)
+        return
+    outs = []
+    for tag, extra in (("fw", []), ("ne", ["--native"])):
+        log = WORK / ("panel_%s.log" % tag)
+        rc = run([exe, roms, "--keys", PANEL_KEYS, "--trace"] + extra,
+                 out=log, err=log)
+        if rc != 0:
+            rep.add("パネル", False, "%s で鳴らせなかった" % tag)
+            return
+        txt = log.read_text(encoding="utf-8", errors="replace").splitlines()
+        # `--trace` が出す「ボタン名 + 液晶 1 行」だけを取る
+        outs.append([l for l in txt if l.startswith("  ") and "|" in l])
+    if not outs[0]:
+        rep.add("パネル", False, "液晶が読めなかった")
+        return
+    bad = [i for i in range(min(len(outs[0]), len(outs[1])))
+           if outs[0][i] != outs[1][i]]
+    ok = not bad and len(outs[0]) == len(outs[1])
+    if ok:
+        note = "%d 行とも firmware と同じ" % len(outs[0])
+    elif bad:
+        note = "%d 行目から違う: %s / %s" % (bad[0] + 1,
+                                             outs[0][bad[0]].strip(),
+                                             outs[1][bad[0]].strip())
+    else:
+        note = "行数が違う（%d / %d）" % (len(outs[0]), len(outs[1]))
+    rep.add("パネル", ok, note)
+
+
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser()
@@ -445,6 +603,18 @@ def main():
         print()
         print("== 7. サンプリング（録音して試聴する）")
         step_sampling(rep, roms)
+
+        print()
+        print("== 8. パネル（native の口でもボタンと液晶が効くか）")
+        step_panel(rep, roms)
+
+        print()
+        print("== 9. USB の口（プラグインの既定）")
+        step_usb(rep, roms, cases)
+
+        print()
+        print("== 10. 2 回目の音（写し取りが済んだ状態）")
+        step_warm(rep, roms, cases)
 
     rep.show()
     return 1 if rep.bad else 0

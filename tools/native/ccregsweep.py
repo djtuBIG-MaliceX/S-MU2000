@@ -38,6 +38,8 @@ WORK = BUILD / "ccregsweep"
 LINE = re.compile(r'^(N |W )?00800000 ([0-9a-f]{4}) ([0-9a-f]{4}).*s=(\d+)')
 # 毎サンプル書き替わるので比べない（MEG の戻りのミキサ）
 SKIP = set([0x0e, 0x0f] + list(range(0x38, 0x40)))
+# 鍵を離すより前だけを見る（実機は鳴り終わると書かなくなる）
+T_MAX = int(3.7 * 44100)
 
 
 def vlq(n):
@@ -96,7 +98,10 @@ def trace(roms, mid, tag, native):
                 if got:
                     last = got[0]
             elif reg < 0x1000 and reg % 64 not in SKIP:
-                cur[reg // 64][reg % 64] = val
+                # **鍵を離す前までしか見ない**。実機は声が鳴り終わると
+                # 書くのをやめるので、最後まで取ると native と比べられない
+                if int(m.group(4)) <= T_MAX:
+                    cur[reg // 64][reg % 64] = val
     return last, dict(cur.get(last, {}))
 
 

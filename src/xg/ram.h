@@ -21,6 +21,38 @@ namespace ram {
 
 // ワーク RAM の先頭（0x400000）からの位置
 constexpr u32 SYSTEM   = 0x226c1;   // 00 00 00-06
+// 00 00 00-03（マスターチューン）。4 バイトの下 4bit をつないだ 12bit の値で、
+// 0x400 が 0 セント、1 きざみ 0.1 セント（doc/native-engine.md の 6.136）
+// **10ms 割り込みの印**（doc/native-engine.md の 6.145）。firmware は
+// 10ms ごとにここを 0/1 で裏返す（pc=0x12989A）。音を鳴らしていなくても
+// 動くので、写し取りが無いときでも 10ms 格子の位相をここから学べる。
+// 隣の +0x3E941 は 10ms ごとに 1 増える数、0x408008 は 16bit の数
+constexpr u32 TICK_MARK     = 0x3e948;
+constexpr u32 SYS_TUNE      = SYSTEM + 0;
+constexpr u32 SYS_VOLUME    = SYSTEM + 4;   // 00 00 04（マスター音量）
+// **パートの音量の目盛り**（0-128）。実機はここを音量の目盛りに掛ける
+// （`0x12A4AA`）。音量・エクスプレッション・マスター音量だけでなく、
+// **インサーションを通すと下がる**（LO-FI を掛けたパートで 101 -> 80）。
+// だから式で作らず、実機が持っている値を読む（doc/native-engine.md の 6.114）
+constexpr u32 PART_GAIN = 0x12f;
+constexpr u32 SYS_TRANSPOSE = SYSTEM + 6;   // 00 00 06（64 が 0 半音）
+// **ドラムセットアップ**（XG の `3n rr nn`）。SysEx を書いて、書かれた番地を
+// 見て並びを割り出した（`3n` が組 0-3、`rr` が鍵 13-91、`nn` がパラメータ 0-22）:
+//   0x30 24 00 -> 4228F2   0x30 24 02 -> 4228F4   0x30 25 02 -> 42290B（+23）
+//   0x30 26 02 -> 422922   0x31 24 02 -> 42300D（+1817 = 23*79）
+//   0x30 0D 02 -> 4226E3
+constexpr u32 DRUM_SETUP       = 0x226e1;   // 組 0・鍵 13・パラメータ 0
+constexpr u32 DRUM_SETUP_PARAM = 23;
+constexpr u32 DRUM_SETUP_NOTES = 79;
+constexpr int DRUM_SETUP_NOTE0 = 13;
+constexpr int DRUM_SETUP_SETS  = 4;
+
+inline u32 drum_setup(int set, int note, int param)
+{
+	return DRUM_SETUP + u32(set) * DRUM_SETUP_PARAM * DRUM_SETUP_NOTES
+	     + u32(note - DRUM_SETUP_NOTE0) * DRUM_SETUP_PARAM + u32(param);
+}
+
 constexpr u32 VOICE_MODE = 0x226bc; // 音色の引き方（1 が XG）。xg/voices.h の lookup に渡す
 constexpr u32 VOICE_SET  = 0x226de; // 音色の組の選び方（MU2000 の音色なら 1）
 constexpr u32 EFFECT   = 0x0cad8;   // 02 01 00 から。下の EFFECTS の並び
@@ -40,6 +72,12 @@ constexpr u32 part_base(int part)
 }
 constexpr u32 PART_XG_SIZE = 0x29;  // 08 pp 00-28
 // パートの EQ（08 pp 72-77）は塊の +0x6A から。XG の番地から 8 引いた所
+// **スケールチューニング**（XG の 08 pp 41-4C ＝ C から B まで 12 個。
+// 64 が 0 セント）。ワーク RAM では +0x3A から 12 バイト。
+// 実機が書くところを見て突き止めた（doc/native-engine.md の 6.127）
+constexpr u32 PART_SCALE_XG  = 0x41;
+constexpr u32 PART_SCALE_RAM = 0x3a;
+constexpr u32 PART_SCALE_SIZE = 12;
 constexpr u32 PART_EQ_XG   = 0x72;
 constexpr u32 PART_EQ_RAM  = 0x6a;
 constexpr u32 PART_EQ_SIZE = 6;
@@ -47,6 +85,10 @@ constexpr u32 PART_EQ_SIZE = 6;
 // パートの塊の中の、XG に番地の無い演奏中の値
 constexpr u32 PART_MOD  = 0x7d;     // CC1
 constexpr u32 PART_EXP  = 0x7e;     // CC11
+// **RPN の行き先**（doc/native-engine.md の 6.125）。XG の 08 pp のならびとは
+// 別の場所に入る。実機が書くところを見て突き止めた
+constexpr u32 PART_COARSE = 0xc9;   // RPN 2（粗調）。符号つきの半音（実機の式にある）
+constexpr u32 PART_FINE   = 0xcc;   // RPN 1（微調）。16bit 符号つき、8192 で 100 セント
 constexpr u32 PART_BEND = 0x80;     // ピッチベンドの MSB の半分（0x20 が真ん中）
 constexpr u32 PART_HOLD = 0xd9;     // CC64。0 か 1
 constexpr u32 PART_VOICE = 0xf8;    // 選んでいる音色の記録を指す値（ROM の中。xg/voices.h）
@@ -88,6 +130,11 @@ inline bool locate(u32 addr, u32 &off)
 	}
 	if (hi == 0x08 && mid < 32 && lo < PART_XG_SIZE) {
 		off = part_base(mid) + lo;
+		return true;
+	}
+	if (hi == 0x08 && mid < 32 && lo >= PART_SCALE_XG &&
+	    lo < PART_SCALE_XG + PART_SCALE_SIZE) {
+		off = part_base(mid) + PART_SCALE_RAM + (lo - PART_SCALE_XG);
 		return true;
 	}
 	if (hi == 0x08 && mid < 32 && lo >= PART_EQ_XG && lo < PART_EQ_XG + PART_EQ_SIZE) {
