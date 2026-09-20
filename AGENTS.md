@@ -28,9 +28,11 @@ starting a dependent wave.
   is deferred to the GUI phase. See ledger §Findings for the exact compile/exclude list.
 - `engine/` — new thin CMake target `smu2000_engine` (sources still live under `src/`).
 - `SMU2000_VST2/` — iPlug2 plugin (`config.h`, `SMU2000_VST2.{h,cpp}`, `CMakeLists.txt`). VST2 +
-  CLAP targets. `ui/` = the **native GDI editor** (P7): `SMU2000Editor.{h,cpp}` (port of
-  `src/vst3/view.cpp`) + its own `CMakeLists.txt` (`smu2000_gui` static lib). Built only when
+  CLAP targets. `ui/` = the **native GDI editor** (P7 + P8): `SMU2000Editor.{h,cpp}` (port of
+  `src/vst3/view.cpp` + `view_win.cpp`) + its own `CMakeLists.txt` (`smu2000_gui` static lib). Built only when
   `-DSMU2000_ENABLE_GUI=ON`; reuses `ui::panel` via `IEditorDelegate::OpenWindow` — **no** IGraphics.
+  P8 adds the PC windows there (Makefile PC_SRCS + vendored imgui/DX11; GUI-ON adds
+  gdi32/comdlg32/d3d11/dxgi/d3dcompiler/dwmapi/imm32/shell32).
 - `iPlug2/` — **git submodule** pinned `d54f69050` (same as sw10). Never edit its tree; put
   all build shims in `cmake/` (mirrors `../sw10_plug/cmake/mingw_compat.cmake`).
 - `cmake/` (`iplug2_paths.cmake`, `mingw_compat.cmake`), root `CMakeLists.txt`,
@@ -55,9 +57,12 @@ starting a dependent wave.
 5. Resolve SDKs via `SMU2000_*` cache vars / env, never hardcoded paths. This box: VST2 SDK at
    `D:/opt/vst/vstsdk2.4`. 32-bit MSVC needs the VS x86 toolset component installed.
 6. GUI is ON by default (native GDI editor; opt out `-DSMU2000_ENABLE_GUI=OFF`, alias
-   `-DENABLE_GUI=OFF`). **Both** GUI states must link no IGraphics/NanoVG/OpenGL/Skia — the
-   editor is the native Win32/GDI panel (`ui::panel` via `IEditorDelegate::OpenWindow`), so
-   GUI-ON adds only gdi32/comdlg32.
+   `-DENABLE_GUI=OFF`). **Both** GUI states must link no IGraphics/NanoVG/OpenGL/Skia. The
+   editor panel is the native Win32/GDI `ui::panel` (`IEditorDelegate::OpenWindow`). GUI-ON
+   additionally hosts the five ImGui/Direct3D11 **PC windows** (一覧/エディタ/fx_editor/
+   part_shapes/master_editor — P8 amendment, user-approved 2026-09-20; see ledger §Phase 8),
+   so GUI-ON links imgui sources + gdi32/comdlg32/d3d11/dxgi/d3dcompiler/dwmapi/imm32/
+   shell32; GUI-OFF excludes the GUI lib and stays fully graphics-free.
 
 ## Build commands (CMake plugin path — being stood up; keep synced with VST2_LEDGER.md)
 
@@ -65,11 +70,13 @@ starting a dependent wave.
 # configure + build VST2 (and CLAP) on MSVC
 cmake --preset vs-win32  ; cmake --build --preset vs-win32-release
 cmake --preset vs-x64    ; cmake --build --preset vs-x64-release
-# GUI toggle (ON by default since 2026-09-16; both states graphics-free, no NanoVG/GL/Skia)
+# GUI toggle (ON by default since 2026-09-16; neither state has NanoVG/GL/Skia/IGraphics;
+# since P8 GUI-ON additionally links imgui/D3D11 for the PC windows — GUI-OFF stays graphics-free)
 cmake --preset vs-win32 -DSMU2000_ENABLE_GUI=OFF     # opt out of the editor (alias -DENABLE_GUI=OFF)
 # Pre-existing build dirs keep their cached GUI value — reconfigure explicitly once after the default flip.
 # CI-equivalent (SDK dirs from env VST2_SDK_DIR, no ROM): ci-win32 / ci-win64
-# Native tool exes (render/live/gui; imgui/D3D allowed there, NEVER in plugin targets):
+# Native tool exes (render/live/gui; imgui/D3D allowed there AND — since P8, user-approved
+# 2026-09-20 — in GUI-ON plugin targets for the PC windows; NEVER IGraphics/NanoVG/GL/Skia):
 # ON by default in every preset; vs-x64-tools / vs-win32-tools presets keep own build dirs.
 # Opt out: -DSMU2000_BUILD_TOOLS=OFF
 ```
@@ -106,8 +113,10 @@ Legacy native exes (unchanged, MSYS2 g++): `make`, `make test`, `make vst3`.
 
 ## Status
 
-See `VST2_LEDGER.md` phase checklists. Current: **P0–P7 green.** Plugin builds VST2+CLAP on
-Win32+x64; both GUI states graphics-free, and the native GDI editor (the reused VST3 panel)
-is now **ON by default** (`-DSMU2000_ENABLE_GUI=OFF` opts out). GUI-ON editor host-probed on
-x64 VST2+CLAP and Win32. MSVC always builds with `/Ob2 /Ot /GT /GL` (+ `/LTCG` link) in every
-config (root CMakeLists).
+See `VST2_LEDGER.md` phase checklists. Current: **P0–P8 green.** Plugin builds VST2+CLAP on
+Win32+x64; neither GUI state links IGraphics/NanoVG/OpenGL/Skia, and the native GDI editor
+(the reused VST3 panel) is **ON by default** (`-DSMU2000_ENABLE_GUI=OFF` opts out). Since
+**P8 (2026-09-20)** the GUI-ON editor also hosts the five ImGui/D3D11 PC windows
+(menu parity with VST3: 一覧を開く / エディタを開く + double-click follow-ups). GUI-ON editor
+host-probed on x64 VST2+CLAP and Win32. MSVC always builds with `/Ob2 /Ot /GT /GL` (+ `/LTCG`
+link) in every config (root CMakeLists).

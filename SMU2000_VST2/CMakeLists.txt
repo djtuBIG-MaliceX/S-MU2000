@@ -1,5 +1,5 @@
 # SMU2000_VST2 API targets — mirrors ../sw10_plug/SW10_PLUG/CMakeLists.txt.
-# Both GUI-OFF (opt-out) and GUI-ON (default since 2026-09-16) use the SAME graphics-free manual recipe (NO
+# Both GUI-OFF (opt-out) and GUI-ON (default since 2026-09-16) use the SAME manual recipe (NO
 # iplug_configure_target, NO IGraphics): IPlugVST2/IPlugCLAP glue added by hand +
 # iPlug2::IPlug + NO_IGRAPHICS. GUI-ON (P7) just adds SMU2000_ENABLE_GUI (→ PLUG_HAS_UI 1)
 # and links smu2000_gui — the native Win32/GDI editor (ui::panel, port of src/vst3/view.cpp)
@@ -16,9 +16,10 @@ set(SMU2000_HAS_PLUGIN_SOURCES TRUE)
 # re-enable on the dev box with -DSMU2000_LINK_MAP=ON when symbolizing a crash.
 option(SMU2000_LINK_MAP "Add MSVC /MAP to the plugin link steps (debug aid)" OFF)
 
-# Phase 7 — native GDI editor lib (smu2000_gui): src/ui/{panel,editor,effects,layout,svg}
-# + src/xg/model.cpp + ui/SMU2000Editor.cpp. Built only when GUI is ON; it does NOT pull
-# IGraphics (raw GDI), so GUI-ON stays graphics-free just like the default GUI-OFF path.
+# Phase 7 + P8 — native editor lib (smu2000_gui): src/ui/{panel,editor,effects,layout,svg}
+# + src/xg/model.cpp + ui/SMU2000Editor.cpp + (P8) PC_SRCS + vendored imgui/DX11. Built only
+# when GUI is ON; it never pulls IGraphics/NanoVG/OpenGL/Skia (panel is raw GDI; PC windows
+# are imgui/D3D11 per the P8 amendment). GUI-OFF excludes this lib and stays graphics-free.
 if(SMU2000_ENABLE_GUI)
   add_subdirectory(ui)
 endif()
@@ -109,17 +110,18 @@ else()
       smu2000_stage_roms(smu2000_vst2)
     else()
       # ------------------------------------------------------------------
-      # GUI-ON VST2 — NATIVE editor (Phase 7), still GRAPHICS-FREE. Same manual recipe as
+      # GUI-ON VST2 — NATIVE editor (Phase 7 + P8 PC windows). Same manual recipe as
       # the GUI-OFF branch (IPlugVST2.cpp by hand + iPlug2::IPlug + NO_IGRAPHICS) plus:
       #   * SMU2000_ENABLE_GUI → config.h PLUG_HAS_UI 1 → HasUI() true → the host drives
       #     effEditOpen/effEditClose, which iPlug routes to IEditorDelegate::OpenWindow/
       #     CloseWindow (IPlugVST2.cpp:466/483). NO_IGRAPHICS selects the plain
       #     IEditorDelegate base (IPlugDelegate_select.h), so OpenWindow is OUR override,
       #     not IGEditorDelegate's — no mMakeGraphicsFunc, no NanoVG/OpenGL/Skia.
-      #   * smu2000_gui (ui::panel GDI port of src/vst3/view.cpp) + the Win32 libs it uses
-      #     (gdi32 fonts/blit, comdlg32 SmartMedia file dialog, user32 child window/menus).
-      # /DEPENDENTS therefore gains only gdi32/comdlg32 (no OPENGL32/nanovg/skia) — the
-      # GUI-ON toggle is proven by the editor appearing, not by a GL import.
+      #   * smu2000_gui (ui::panel GDI port of src/vst3/view.cpp + P8 imgui/D3D11 PC
+      #     windows of view_win.cpp) + its Win32 libs (gdi32, comdlg32, user32 +
+      #     d3d11/dxgi/d3dcompiler/dwmapi/imm32/shell32 for the PC windows).
+      # /DEPENDENTS gains those DX11 halves but NEVER OPENGL32/nanovg/skia (hard rule #6,
+      # P8-amended) — the GUI-ON toggle is proven by the editor appearing, not by a GL import.
       # ------------------------------------------------------------------
       add_library(smu2000_vst2 MODULE)
       target_sources(smu2000_vst2 PRIVATE
@@ -142,7 +144,13 @@ else()
         target_link_options(smu2000_vst2 PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/MAP>)
       endif()
       target_link_libraries(smu2000_vst2 PRIVATE
-        smu2000_engine smu2000_gui iPlug2::IPlug)   # smu2000_gui brings gdi32/comdlg32/user32 PUBLIC
+        # P8 ORDER MATTERS: smu2000_gui FIRST so the linker pulls the editor closure
+        # (SMU2000Editor.obj → xg_ui.obj defining ui::xgui::set_voice_rom) before
+        # smu2000_engine.lib is scanned; engine.cpp's reference then resolves there and the
+        # engine's GUI-OFF no-op stub member (engine/xgui_plugin_stub.cpp) is never pulled —
+        # otherwise LNK2005. (Same mechanism as native/smu2000_gui_app, whose own xg_ui.obj
+        # beats the stub because command-line objects are processed before libraries.)
+        smu2000_gui smu2000_engine iPlug2::IPlug)   # smu2000_gui brings gdi32/.../shell32 PUBLIC
       set_target_properties(smu2000_vst2 PROPERTIES
         OUTPUT_NAME "SMU2000_VST2" PREFIX "" SUFFIX ".dll")
       smu2000_set_out_dirs(smu2000_vst2 vst2 LIBRARY)
@@ -195,7 +203,7 @@ else()
       smu2000_stage_roms(smu2000_clap)
     else()
       # ------------------------------------------------------------------
-      # GUI-ON CLAP — NATIVE editor (Phase 7), still GRAPHICS-FREE. Mirrors the VST2
+      # GUI-ON CLAP — NATIVE editor (Phase 7 + P8 PC windows). Mirrors the VST2
       # GUI-ON branch above: manual IPlugCLAP.cpp glue + iPlug2::IPlug + NO_IGRAPHICS,
       # SMU2000_ENABLE_GUI (PLUG_HAS_UI 1) and smu2000_gui + Win32 libs. CLAP drives
       # OpenWindow/CloseWindow via guiSetParent/guiDestroy/guiShow (IPlugCLAP.cpp); the
@@ -224,7 +232,9 @@ else()
         target_link_options(smu2000_clap PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/MAP>)
       endif()
       target_link_libraries(smu2000_clap PRIVATE
-        smu2000_engine smu2000_gui iPlug2::IPlug)   # smu2000_gui brings gdi32/comdlg32/user32 PUBLIC
+        # P8: see the VST2 branch — smu2000_gui MUST precede smu2000_engine (real xg_ui
+        # set_voice_rom before the GUI-OFF stub, else LNK2005).
+        smu2000_gui smu2000_engine iPlug2::IPlug)   # smu2000_gui brings gdi32/.../shell32 PUBLIC
       set_target_properties(smu2000_clap PROPERTIES
         OUTPUT_NAME "SMU2000_VST2" PREFIX "" SUFFIX ".clap")
       smu2000_set_out_dirs(smu2000_clap clap LIBRARY)

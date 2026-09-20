@@ -170,6 +170,10 @@ Verified against the pinned iPlug2 CMake (`Scripts/cmake/`):
   overrides to host `ui::panel` in a child `HWND`. `/DEPENDENTS` gains only GDI32+COMDLG32 (the
   VST3 view's GDI + SmartMedia file dialog), never OpenGL/NanoVG/Skia. Toggle = which two recipes
   the target CMakeLists takes (both graphics-free; ON just adds the editor lib + the UI define).
+  > **P8 AMENDMENT (2026-09-20):** GUI-ON is no longer *fully* graphics-free — `smu2000_gui` also
+  > builds the imgui/D3D11 PC windows (PC_SRCS + vendored imgui backends) and the link gains
+  > d3d11/dxgi/d3dcompiler/dwmapi/imm32/shell32; `/DEPENDENTS` gains those, still NEVER
+  > OpenGL32/NanoVG/Skia/IGraphics, and the GUI-OFF half is byte-for-byte unchanged. See §Phase 8.
 
 ---
 
@@ -407,6 +411,52 @@ MinGW appends `-mingw`/`-mingw-clang`). Static `/MT` CRT everywhere.
 
 ---
 
+### Phase 8 — PC windows in VST2 editor (`P8-pc-windows`) — **DONE 2026-09-20** — imgui/D3D11 ALLOWED in GUI-ON
+
+- **Rule amendment (user-approved 2026-09-20):** hard rule #6 / P7's "graphics-free GUI-ON" is
+  amended. GUI-ON plugin targets may now link **Dear ImGui + Direct3D11** (the five PC windows
+  一覧/pc_editor/fx_editor/part_shapes/master_editor, exactly what the VST3 Win32 window hosts).
+  **IGraphics / NanoVG / OpenGL / Skia stay FORBIDDEN everywhere**; `NO_IGRAPHICS` build config
+  unchanged; GUI-OFF excludes the GUI lib entirely and stays byte-for-byte graphics-free.
+- **Scope = menu parity with VST3** (`src/vst3/view_win.cpp` is the spec): card menu gains
+  `MF_SEPARATOR` + 「一覧を開く」(ID_PC_LIST=120) + 「エディタを開く」(ID_PC_EDITOR=121) after the
+  eject item (view_win.cpp:171-172,232-234); the overview's double-click follow-ups
+  (fx/part/master requests) route through the same `pc_frame_all` open-callback. Mouse/key routing
+  and left-click card behavior untouched.
+- **What moved.** `SMU2000_VST2/ui/CMakeLists.txt`: `smu2000_gui` += Makefile `PC_SRCS` verbatim
+  (pc_editor/pc_window/xg_ui/overview/fx_editor/fx_help/part_shapes/master_editor/fx_icons) +
+  vendored imgui core+win32+dx11 backends (native/`smu2000_gui_app` recipe), PUBLIC
+  `third_party/imgui` include (fx_editor.h includes imgui.h; the plugin TU sees it via
+  SMU2000Editor.h), PRIVATE `IMGUI_IMPL_WIN32_DISABLE_GAMEPAD` (no xinput), link +=
+  `d3d11 dxgi d3dcompiler dwmapi imm32 shell32` (Makefile gui/VST3 LDLIBS; shell32 = pc_window's
+  DragAcceptFiles/DragQueryFileW drop). `png.cpp` NOT added (nothing in the set references it).
+- **Host bridge** (`SMU2000Editor.{h,cpp}`): five `ui::pc_window` members constructed like
+  view_win.cpp:118-122; `open_pc()` = `show(this_module())` + MessageBox alert (view_win:260-265);
+  `WM_TIMER` pumps `ui::pc_frame_all(..., m_panel.xg(), m_panel.ram(), br, open)` after
+  `m_panel.tick` (view.cpp:254-257). Close/detach semantics match Windows VST3 exactly:
+  `win_window::detach()` never touches the PC windows (they're DLL-owned top-level windows, and
+  `pc_window`'s own `WM_CLOSE` only `SW_HIDE`s — 閉じても消さずに隠すだけ), so `editor::close()`
+  leaves them alive for reopen-with-state. `pc_shutdown_all` is called by gui.exe/gui_mac ONLY —
+  never by the Windows VST3 host — so the plugin dtor doesn't call it either (view_mac's
+  `hide()` calls are macOS-only; Win32 `pc_window` has no hide API).
+- **Link-order gotcha (found the hard way).** `engine/xgui_plugin_stub.cpp` (GUI-OFF no-op sink
+  for `ui::xgui::set_voice_rom`, added in the MIDI-queue wave) now collides with the REAL
+  `xg_ui.obj` inside `smu2000_gui` → LNK2005/LNK1169 on both MODULE links. Fix stays inside
+  `SMU2000_VST2/CMakeLists.txt`: GUI-ON links `smu2000_gui` **before** `smu2000_engine` — the
+  editor closure pulls `xg_ui.obj` (real definition) during the first lib scan, so the stub
+  member is never pulled (same reason native `smu2000_gui_app` never broke: its own obj beats
+  the lib member). Engine keeps serving GUI-OFF with the stub; no `engine/` edit. The real
+  `set_voice_rom` now runs in GUI-ON (voice names/pictures in the windows work as upstream).
+- **Docs.** AGENTS.md hard rule #6 + repo-map + toolchain note amended (imgui/D3D "NEVER in
+  plugin targets" superseded for GUI-ON only). `SMU2000_VST2/ui/CMakeLists.txt` header states the
+  amendment.
+- **Accept — builds green + ABI gate (see Status entry for commands).** GUI-ON `/DEPENDENTS`
+  gains D3D11/DXGI/D3DCOMPILER-47/DWMAPI/IMM32/SHELL32/GDI32 — **no OPENGL32/NanoVG/Skia**.
+  GUI-OFF reconfigure+rebuild still clean (lib excluded, dependents unchanged). Host probe /
+  manual DAW test: see checklist in the P8 status entry.
+
+---
+
 ## Clean-room VST2 ABI layer + nightly release CI (2026-09-19) — **DONE**
 
 Enables **nightly VST2 CI** without ever touching the proprietary SDK (supersedes
@@ -588,8 +638,21 @@ this harness. No plugin/GUI/editor regression observed on any arch.
       `smu2000_gui` + gdi32/comdlg32/user32; **no** `iplug_configure_target`/`${IGRAPHICS_LIB}`).
       Host-probed (native C++ hosts in `tools/`): x64 VST2 + CLAP + Win32 VST2 all attach/paint/
       detach the 1250×500 panel through the real message loop; GUI-OFF default stays editor-free/
-      graphics-free. See §Phase 7 for the full write-up + ABI/opcode gotchas. Tree left configured
-       GUI-OFF (x64 rebuilt last). Nothing committed.
+      graphics-free (P8 amended the graphics stance for the PC windows — see entry below; the
+      GDI panel half stands). See §Phase 7 for the full write-up + ABI/opcode gotchas.
+- [x] P8 pc windows — **DONE 2026-09-20 (user-approved rule amendment; full write-up: §Phase 8).**
+      GUI-ON VST2/CLAP editors reach **VST3 menu parity**: card menu += separator + 「一覧を開く」
+      + 「エディタを開く」(ID 120/121, view_win.cpp strings/ids verbatim); five `ui::pc_window`s
+      (overview/pc_editor/fx_editor/part_shapes/master_editor) hosted like `view_win.cpp:118-122`,
+      pumped from `WM_TIMER` via `pc_frame_all` (overview double-click → fx/part/master windows
+      too). GUI-ON now links imgui+D3D11 (PC windows only; panel stays GDI) — IGraphics/NanoVG/
+      OpenGL/Skia stay banned everywhere; GUI-OFF excludes the lib and stays fully graphics-free.
+      Fix baked in: GUI-ON MODULE links `smu2000_gui` BEFORE `smu2000_engine` so the real
+      `ui::xgui::set_voice_rom` (xg_ui.obj) wins over the engine's GUI-OFF stub member (was
+      LNK2005/LNK1169). Builds green: vs-win32 + vs-x64 GUI-ON (`SMU2000_VST2.dll`+`.clap`),
+      vs-x64 reconfigured GUI-OFF + rebuilt clean; GUI-ON `/DEPENDENTS` = GDI32/COMDLG32/USER32/
+      D3D11/D3DCOMPILER_47/IMM32/SHELL32/KERNEL32/api-ms — NO OPENGL32/NanoVG/Skia; GUI-OFF =
+      KERNEL32/USER32/api-ms. Tree left configured GUI-ON (x64 rebuilt last). Nothing committed.
  - [x] CPU32 x86-32 JIT port — **DONE 2026-09-16** (full record: `CPU32_LEDGER.md` Phases 1–8).
        Dual-mode `x64asm.h` + SH-2 + MEG JITs ported to x86-32; guards widened so **MSVC-x64 also
        gets the JIT**; Win32 JIT default-ON, bit-exact (35/35 render matrix + soak + traces). Host
@@ -629,7 +692,7 @@ this harness. No plugin/GUI/editor regression observed on any arch.
         `vs-win32` also green same day** (VST2 `.dll` + CLAP `.clap`; only the pre-existing
         sh_adc/sh_sci C4805 warnings).
 
-### Wave schedule — COMPLETE (P0–P7 green)
+### Wave schedule — COMPLETE (P0–P8 green)
 
 - [x] Clean-room VST2 ABI + nightly release CI — **DONE 2026-09-19** (section
       "Clean-room VST2 ABI layer" above). Opcode gate 377/377, struct gate 55

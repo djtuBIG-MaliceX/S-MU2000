@@ -2,10 +2,15 @@
 //
 // iPlug2 (VST2 / CLAP) 用ネイティブ・エディタ。
 //
-// VST3 版（src/vst3/view.cpp）と「同じもの」を出す。中身は src/ui/panel の
+// VST3 版（src/vst3/view.cpp + view_win.cpp）と「同じもの」を出す。中身は src/ui/panel の
 // GDI 描画で、ホストがくれた親 HWND の中に子ウィンドウを 1 枚作って、そこへ
-// 実機のフロントパネルを描く。IGraphics / NanoVG / OpenGL / Skia は使わない
-// （だから GUI-ON でもグラフレスはそのまま = 台帳 hard rule #6 を満たす）。
+// 実機のフロントパネルを描く。IGraphics / NanoVG / OpenGL / Skia は使わない（台帳
+// hard rule #6 はそのまま）。
+//
+// P8（2026-09-20 承認）: カードの品書きから出す PC で触る窓（一覧・エディタ・FX・
+// パーツ・マスター）は VST3 版と同じ ImGui + Direct3D11 の ui::pc_window を使う。
+// パネル本体は従来どおり GDI のままで、グラフレス禁じ手（IGraphics/NanoVG/OpenGL/
+// Skia）はどの状態でも引き続か禁止。GUI-OFF はこの lib ごと外れるので無変更。
 //
 // iPlug2 のエディタ経路は、IGraphics を使わない場合のために
 // IEditorDelegate::OpenWindow(void* pParent) / CloseWindow() を空実装で用意して
@@ -25,6 +30,15 @@
 #endif
 
 #include "../../src/ui/panel.h"   // ui::panel, ui::snapshot（GDI 依存）
+// P8: PC で触る窓（ImGui/D3D11）。view_win.cpp が呼ぶ集合と同じ ——
+// pc_window.h（窓）+ 五つの view ヘッダ（m_list 以下の make_unique に要る）。
+// pc_host.h（pc_frame_all）は WM_TIMER から呼ぶだけなので .cpp 側で include する。
+#include "../../src/ui/pc_window.h"
+#include "../../src/ui/overview.h"
+#include "../../src/ui/pc_editor.h"
+#include "../../src/ui/fx_editor.h"
+#include "../../src/ui/part_shapes.h"
+#include "../../src/ui/master_editor.h"
 
 #include <windows.h>
 
@@ -61,11 +75,23 @@ private:
 	void paint(HWND h);
 	void card_menu(HWND h, int x, int y);
 	void card_command(HWND h, UINT id);
+	void open_pc(ui::pc_window &w);
 
 	vst3::engine &m_engine;
 
 	HWND       m_hwnd   = nullptr;
 	ui::panel  m_panel;
+
+	// PC で触る窓。VST3 の view_win.cpp:115-122 と同じ（gui.exe と同じ中身を
+	// 同じ ui::pc_window に載せる）。**プラグインなので自分の窓を持つ**:
+	// ホストがくれた親の中にはパネルしか入らない。閉じても消さずに隠すだけ
+	// （ui::pc_window の WM_CLOSE が SW_HIDE）なので、開き直すと同じ姿で出る。
+	// エディタを閉じてもこのオブジェクトは生きたまま = 品書きから復旧できる。
+	ui::pc_window m_list{ std::make_unique<ui::overview>() };
+	ui::pc_window m_editor{ std::make_unique<ui::pc_editor>() };
+	ui::pc_window m_fx{ std::make_unique<ui::fx_editor>() };
+	ui::pc_window m_shapes{ std::make_unique<ui::part_shapes>() };
+	ui::pc_window m_master{ std::make_unique<ui::master_editor>() };
 
 	HDC        m_mem_dc = nullptr;
 	HBITMAP    m_mem_bmp = nullptr;

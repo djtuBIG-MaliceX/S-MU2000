@@ -10,6 +10,7 @@
 #include "../../src/vst3/engine.h"
 #include "../../src/ui/bridge.h"
 #include "../../src/ui/layout.h"
+#include "../../src/ui/pc_host.h"       // P8: ui::pc_frame_all（一覧・エディタの窓のタイマー）
 #include "../../src/ui/text.h"
 #include "../../src/smartmedia.h"
 
@@ -83,7 +84,8 @@ mu2000::button key_to_button(WPARAM vk, bool &ok)
 
 // ---- SmartMedia（カードの差し込み口）。gui.exe / VST3 の品書きと同じ
 
-enum : UINT { ID_CARD_NEW16 = 100, ID_CARD_NEW32, ID_CARD_NEW64, ID_CARD_NEW128, ID_CARD_OPEN = 110, ID_CARD_EJECT = 111 };
+enum : UINT { ID_CARD_NEW16 = 100, ID_CARD_NEW32, ID_CARD_NEW64, ID_CARD_NEW128, ID_CARD_OPEN = 110, ID_CARD_EJECT = 111,
+              ID_PC_LIST = 120, ID_PC_EDITOR = 121 };
 
 void add_item(HMENU m, UINT flags, UINT_PTR id, const char *utf8)
 {
@@ -162,6 +164,12 @@ void *editor::open(void *parent)
 
 void editor::close()
 {
+	// PC で触る窓は触らない。VST3 の win_window::detach と同じ意味 ——
+	// あちらも top-level のまま子 HWND の方だけ壊すし、ui::pc_window の
+	// WM_CLOSE は消さずに隠すだけ（pc_window.cpp:232-233）。ホストが
+	// エディタを閉じても窓は生きたままなので、品書きから同じ姿で開き直せる。
+	// （pc_shutdown_all は Windows の VST3 側が呼ばない —— gui.exe 専用 —— ので
+	// ここでも呼ばない。窓自体は ~editor のメンバ破棄で片付く。）
 	if (m_hwnd) {
 		KillTimer(m_hwnd, 1);
 		SetWindowLongPtrA(m_hwnd, GWLP_USERDATA, 0);
@@ -229,6 +237,11 @@ LRESULT editor::handle(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 	case WM_TIMER:
 		// パラメータの層: 音源の返事を読み、見えている面の読み返しを頼む
 		m_panel.tick(br);
+		// PC で触る窓（一覧・エディタ）。見えていなければ何もしない
+		// （VST3 の view.cpp:257 → view_win.cpp::pc_frame と同じ呼び出し）
+		ui::pc_frame_all(m_list, m_editor, m_fx, m_shapes, m_master,
+		                 m_panel.xg(), m_panel.ram(), br,
+		                 [this](ui::pc_window &w) { open_pc(w); });
 		InvalidateRect(h, nullptr, FALSE);
 		// SmartMedia に書いたものを 2 秒ごとにファイルへ書き戻す
 		if (GetTickCount() - m_last_flush > 2000) {
@@ -339,6 +352,9 @@ void editor::card_menu(HWND h, int x, int y)
 	if (!path.empty())
 		eject += "（" + path.substr(path.find_last_of("\\/") + 1) + "）";
 	add_item(m, MF_STRING | (path.empty() ? MF_GRAYED : 0), ID_CARD_EJECT, eject.c_str());
+	AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+	add_item(m, MF_STRING, ID_PC_LIST, "一覧を開く");
+	add_item(m, MF_STRING, ID_PC_EDITOR, "エディタを開く");
 	POINT pt{ x, y };
 	ClientToScreen(h, &pt);
 	TrackPopupMenu(m, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON, pt.x, pt.y, 0, h, nullptr);
@@ -367,10 +383,26 @@ void editor::card_command(HWND h, UINT id)
 	} else if (id == ID_CARD_EJECT) {
 		m_engine.card_eject();
 		return;
+	} else if (id == ID_PC_LIST) {
+		open_pc(m_list);
+		return;
+	} else if (id == ID_PC_EDITOR) {
+		open_pc(m_editor);
+		return;
 	} else {
 		return;
 	}
 	MessageBoxW(h, ui::to_wide(err).c_str(), L"S-MU2000", MB_OK | MB_ICONWARNING);
+}
+
+// 品書きと一覧のダブルクリックが同じ通る道（view_win.cpp::open_pc と同じ）。
+// 窓はエンジンと同じ DLL の直属（ホストの親にはパネルしか入れない）。
+void editor::open_pc(ui::pc_window &w)
+{
+	std::string err;
+	if (!w.show(this_module(), err))
+		MessageBoxW(m_hwnd, ui::to_wide(err.empty() ? std::string("窓を出せない") : err).c_str(),
+		            L"S-MU2000", MB_OK | MB_ICONWARNING);
 }
 
 } // namespace smu2000
