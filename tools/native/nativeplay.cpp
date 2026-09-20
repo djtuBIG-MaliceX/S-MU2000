@@ -197,6 +197,10 @@ int main(int argc, char **argv)
 	bool levelcheck = false;
 	bool keycut = false;
 	bool nocal = false;
+	// **つまみを動かしてから鳴らす**（`--cc 7=40,10=20,91=100`）。
+	// 写し取りを捨てる（段 3）ために要る。既定のつまみのままなら
+	// `defaults` の実測値で合ってしまうので、動かした所でしか差が見えない
+	const char *ccs = nullptr;
 	const char *ramdump = nullptr;
 	for (int i = 3; i < argc; i++) {
 		if (!std::strcmp(argv[i], "-b") && i + 1 < argc)
@@ -230,6 +234,7 @@ int main(int argc, char **argv)
 		else if (!std::strcmp(argv[i], "--levelcheck")) levelcheck = true;
 		else if (!std::strcmp(argv[i], "--keycut")) keycut = true;
 		else if (!std::strcmp(argv[i], "--nocal")) nocal = true;
+		else if (!std::strcmp(argv[i], "--cc") && i + 1 < argc) ccs = argv[++i];
 		else if (!std::strcmp(argv[i], "--ramdump") && i + 1 < argc) ramdump = argv[++i];
 		else if (!std::strcmp(argv[i], "--catoff") && i + 1 < argc) catoff = int(std::strtol(argv[++i], nullptr, 0));
 		else if (!std::strcmp(argv[i], "--sweep") && i + 1 < argc) sweep = std::atoi(argv[++i]);
@@ -259,6 +264,23 @@ int main(int argc, char **argv)
 		mu.midi_in(b, 0);
 	for (u32 i = 0; i < RATE / 2; i++)
 		mu.run_sample(l, r);
+
+	// **つまみを動かしてから鳴らす**（`--cc 7=40,10=20`）。firmware に渡して
+	// 落ち着かせる。native 側は下で同じ値をワーク RAM から拾う
+	if (ccs) {
+		for (const char *p = ccs; *p; ) {
+			char *e = nullptr;
+			const long cc = std::strtol(p, &e, 10);
+			if (e == p) break;
+			long v = 0;
+			if (*e == '=') { p = e + 1; v = std::strtol(p, &e, 10); }
+			for (u8 b : { u8(0xb0), u8(cc & 0x7f), u8(v & 0x7f) })
+				mu.midi_in(b, 0);
+			p = (*e == ',') ? e + 1 : e;
+		}
+		for (u32 i = 0; i < RATE / 2; i++)
+			mu.run_sample(l, r);
+	}
 
 	const u8 *ram = mu.nvram().data();
 	const u32 part0 = xg::ram::part_base(0);

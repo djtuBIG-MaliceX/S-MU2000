@@ -86,6 +86,21 @@ void show_ctl(mu2000 &mu, const char *tag)
 	std::printf("\n");
 }
 
+// 液晶の中身を 16 進で返す（2 行 × 24 桁）。**字形を起こすときに
+// 「どのコードが実際に使われるか」を数える**のに使う（--lcd-hex）
+std::string lcd_hex(mu2000 &mu)
+{
+	const u8 *dd = mu.lcd().ddram();
+	std::string out;
+	char buf[8];
+	for (int line = 0; line < 2; line++)
+		for (int pos = 0; pos < 24; pos++) {
+			std::snprintf(buf, sizeof buf, "%02x ", dd[line * 0x40 + pos]);
+			out += buf;
+		}
+	return out;
+}
+
 // LCD の 2 行を 1 行にして返す（窓に出ている 24 桁ぶん）。--trace 用
 std::string lcd_line(mu2000 &mu)
 {
@@ -193,6 +208,7 @@ int main(int argc, char **argv)
 	double play = 0.0;
 	bool watch = false;
 	bool trace = false;
+	bool lcd_hex_on = false;
 	double settle = 1.0;
 	bool usb = false;
 	int native = 0;
@@ -213,6 +229,8 @@ int main(int argc, char **argv)
 		else if (!std::strcmp(argv[i], "--mid") && i + 2 < argc) { midfile = argv[++i]; play = std::atof(argv[++i]); }
 		else if (!std::strcmp(argv[i], "--watch")) watch = true;
 		else if (!std::strcmp(argv[i], "--trace")) trace = true;
+		// **液晶の中身を 16 進でも出す**（字形を起こすときのコードの棚卸し）
+		else if (!std::strcmp(argv[i], "--lcd-hex")) { trace = true; lcd_hex_on = true; }
 		else if (!std::strcmp(argv[i], "--usb")) usb = true;
 		// **native の口**（firmware を細く回す）でパネルを触ってみる。
 		// 段の番号は set_native_engine と同じ（doc/native-engine.md）
@@ -277,7 +295,8 @@ int main(int argc, char **argv)
 	}
 
 	if (trace)
-		std::printf("  %-10s %s\n", "(起動)", lcd_line(mu).c_str());
+		std::printf("  %-10s %s\n", "(起動)",
+		            (lcd_hex_on ? lcd_hex(mu) : lcd_line(mu)).c_str());
 
 	if (!keys.empty()) {
 		size_t at = 0;
@@ -297,7 +316,8 @@ int main(int argc, char **argv)
 					tap(mu, a.b);
 					idle(mu, 0.3);
 					if (trace)
-						std::printf("  %-10s %s\n", a.key, lcd_line(mu).c_str());
+						std::printf("  %-10s %s\n", a.key,
+					            (lcd_hex_on ? lcd_hex(mu) : lcd_line(mu)).c_str());
 					else
 						show_ctl(mu, mu2000::button_name(a.b));
 					found = true;

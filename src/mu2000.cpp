@@ -3,6 +3,7 @@
 // MU2000 一台ぶんの組み立て。配置は MAME の ymmu2000.cpp と同じ。
 
 #include "mu2000.h"
+#include "lcdfont.h"
 
 #if defined(__SSE2__) || defined(_M_X64) || defined(__x86_64__)
 #include <xmmintrin.h>
@@ -408,6 +409,43 @@ void mu2000::fill_missing_glyphs(std::vector<u8> &rom)
 				continue;              // 0x7f は普通の字
 			bar(0x7f + a * 9 + b, a, b);
 		}
+
+	// **バンク No.・プログラム No. の前に出る右向きの三角**（利用者が実機を
+	// 撮ってくれた写真で分かった）。演奏画面の下の行は
+	//
+	//     11 30 30 30  10 30 30 31      ＝  ▶000 ▷001
+	//
+	// で、`0x11` がバンクの前、`0x10` がプログラムの前。**黒塗りが「ダイヤル
+	// で動く側」、白抜きが「固定されている側」**で、SELECT のボタンで入れ替わる。
+	// この画面は `0x11` が白抜き（バンクは固定）、`0x10` が黒塗り
+	// （プログラムが動く）＝ 利用者に GUI で見てもらって向きを確かめた。
+	//
+	// `mulcd.zip` の字形 ROM は MU2000 自身のものではないので、ここは
+	// **`0x10` が黒塗りの右向き・`0x11` が黒塗りの左向き**になっていた。
+	// 実機はどちらも右向きで、片方が白抜き
+	// 字形は利用者が実機を見て書き起こしたもの（**左に 1 列空く**）:
+	//
+	//     黒塗り        白抜き
+	//     .#...         .#...
+	//     .##..         .##..
+	//     .###.         .#.#.
+	//     .####         .#..#
+	//     .###.         .#.#.
+	//     .##..         .##..
+	//     .#...         .#...
+	//
+	// ここは**下敷き**で、`art/lcdfont.txt` があればそちらが上から被さる
+	// （手描きの字はぜんぶあちらに集める。src/lcdfont.h）
+	static const u8 TRI_FILLED[8] = { 0x08, 0x0c, 0x0e, 0x0f, 0x0e, 0x0c, 0x08, 0x00 };
+	static const u8 TRI_HOLLOW[8] = { 0x08, 0x0c, 0x0a, 0x09, 0x0a, 0x0c, 0x08, 0x00 };
+	for (int y = 0; y < 8; y++) {
+		rom[0x10 * 16 + y] = TRI_FILLED[y];
+		rom[0x11 * 16 + y] = TRI_HOLLOW[y];
+	}
+
+	// **手描きの字を上から被せる**（art/lcdfont.txt）。実機を見て描き起こした
+	// ものだけを入れる場所で、ROM から起こした字は入れない（src/lcdfont.h）
+	smu2000::lcdfont::overlay_default(rom);
 }
 
 void mu2000::set_lcd_font(u8rom p)
@@ -1234,6 +1272,7 @@ void mu2000::set_native_engine(int mode)
 	// **チップの「音程の包絡線が着いた」印**を native の口にも見せる。
 	// 実機の firmware も内部レジスタ 4 の bit14 で同じものを見ている（0x12B81C）
 	m_ndrv.set_peg_peek([this](int chan) { return m_swpm.peg_reached(chan); });
+	m_ndrv.set_slot_peek([this](int chan) { return m_swpm.slot_active(chan); });
 }
 
 // 音色の 1 音目を firmware に鳴らさせて、スロットに書かれた値を写し取る
@@ -2099,7 +2138,17 @@ bool mu2000::native_midi(u8 byte, int port)
 	const u8 kind = n.status & 0xf0;
 	// 音色の指定（1 バイト）。自分で記録を引いて、firmware にも渡す
 	if (kind == 0xc0) {
-		const int part2 = (n.status & 0x0f) + port * 16;
+		const int part2 = m_ndrv.rcv_part(port, n.status & 0x0f);
+		if (part2 < 0) {          // 聞いているパートが無い／2 つ以上（6.150）
+			m_ne_stats.other++;
+			m_fw_hold = std::max(m_fw_hold, u32(44100 / 50));
+			const int save3 = m_native_engine;
+			m_native_engine = 0;
+			midi_in(n.status, port);
+			midi_in(byte, port);
+			m_native_engine = save3;
+			return true;
+		}
 		m_nq.push_back({ fire, 4, u8(part2), 2, u8(byte & 0x7f) });
 		m_ne_stats.other++;
 		// 記録はこちらで引けたが、firmware も自分の下ごしらえに時間が要る
@@ -2122,7 +2171,17 @@ bool mu2000::native_midi(u8 byte, int port)
 		return true;
 	}
 	n.have = 0;
-	const int part = (n.status & 0x0f) + port * 16;
+	// **受信チャンネル**（08 pp 04。6.150）。既定はパート = チャンネル + 口 x 16
+	// だが、曲が付け替えることがある。聞いているパートが無いときは実機も
+	// 黙るので何もせず、2 つ以上のときは重ねて鳴るので firmware に任せる
+	const int part = m_ndrv.rcv_part(port, n.status & 0x0f);
+	if (part < 0) {
+		m_ne_stats.other++;
+		if (part == -2)
+			m_fw_hold = std::max(m_fw_hold, u32(44100 / 50));
+		replay_note(n.status, n.d0, byte, port);
+		return true;
+	}
 
 	// ピッチベンドは、音程のレジスタを自分で作れるので firmware には渡さない。
 	// ただし、そのパートで firmware が鳴らしている音がある間は渡す
@@ -2162,9 +2221,12 @@ bool mu2000::native_midi(u8 byte, int port)
 	}
 	const int note = n.d0 & 0x7f, vel = byte & 0x7f;
 	if (kind == 0x80 || vel == 0) {
+		// **離しは押しと処理時間が違う**（SMU2000_OFF_PROC）。実機は
+		// ドラムの離しを最後のバイトの次のサンプルで書いていた
+		const u64 fire_off = fire - native_proc64() / 64 + off_proc64() / 64;
 		if (nown(part, note)) {
 			nown_set(part, note, false);
-			m_nq.push_back({ fire, 0, u8(part), u8(note), u8(vel) });
+			m_nq.push_back({ fire_off, 0, u8(part), u8(note), u8(vel) });
 			return true;
 		}
 		// native で鳴っていない音は firmware に任せる
@@ -2174,6 +2236,15 @@ bool mu2000::native_midi(u8 byte, int port)
 				m_fw_note_total--;
 		}
 		m_fw_hold = std::max(m_fw_hold, u32(44100 / 50));    // 離しの下ごしらえまで
+		replay_note(n.status, u8(note), u8(vel), port);
+		return true;
+	}
+	// **鍵の範囲の外は鳴らさない**（08 pp 0F/10）。実機も鳴らさないので、
+	// firmware には渡すだけにして、こちらでは 1 音も出さない。
+	// **押しを受けないドラム**（3n rr 0A = 0）も同じ（6.151）
+	if (!m_ndrv.note_in_range(part, note)
+	    || (m_ndrv.is_drum(part) && !m_ndrv.drum_rcv_note_on(part, note))) {
+		m_ne_stats.other++;
 		replay_note(n.status, u8(note), u8(vel), port);
 		return true;
 	}
@@ -2484,7 +2555,10 @@ void mu2000::run_sample(s32 &left, s32 &right)
 				m_ndrv.sync_cc();
 				m_fw_why = 0;
 			}
-		} else {
+		// `SMU2000_FW_ALWAYS=1` で **native の口でも SH-2 を止めない**。
+		// 止めると firmware の打鍵が 1 サンプル後ろへずれるのを見つけた
+		// ときの道具（doc/native-engine.md の 6.153）。ふだんは使わない
+		} else if (!std::getenv("SMU2000_FW_ALWAYS")) {
 			run_cpu = false;
 		}
 		if (run_cpu) {

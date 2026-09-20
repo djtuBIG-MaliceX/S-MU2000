@@ -49,11 +49,26 @@ def vlq(n):
     return bytes(reversed(out))
 
 
-def make_mid(path, msb, lsb, prog, note, vel):
+def parse_cc(spec):
+    """"7=40,10=20" を [(7, 40), (10, 20)] にする"""
+    out = []
+    for part in (spec or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        cc, _, val = part.partition("=")
+        out.append((int(cc), int(val)))
+    return out
+
+
+def make_mid(path, msb, lsb, prog, note, vel, ccs=()):
     ev = [(0, bytes([0xff, 0x51, 0x03]) + (500000).to_bytes(3, 'big')),
           (240, bytes([0xb0, 0x00, msb])), (240, bytes([0xb0, 0x20, lsb])),
-          (240, bytes([0xc0, prog])),
-          (960, bytes([0x90, note, vel])), (1920, bytes([0x80, note, 0]))]
+          (240, bytes([0xc0, prog]))]
+    # **つまみを動かしてから鳴らす**。既定のつまみのままだと `defaults` の
+    # 実測値で合ってしまい、写し取りを捨てられるかが見えない
+    ev += [(480, bytes([0xb0, cc & 0x7f, v & 0x7f])) for cc, v in ccs]
+    ev += [(960, bytes([0x90, note, vel])), (1920, bytes([0x80, note, 0]))]
     body = bytearray()
     prev = 0
     for t, b in ev:
@@ -64,11 +79,11 @@ def make_mid(path, msb, lsb, prog, note, vel):
                      b'MTrk' + struct.pack('>I', len(body)) + bytes(body))
 
 
-def fw_regs(roms, msb, lsb, prog, note, vel):
+def fw_regs(roms, msb, lsb, prog, note, vel, ccs=()):
     """firmware が鍵を押した瞬間にスロットへ書いた値"""
     mid = WORK / "rs.mid"
     trc = WORK / "rs.txt"
-    make_mid(mid, msb, lsb, prog, note, vel)
+    make_mid(mid, msb, lsb, prog, note, vel, ccs)
     subprocess.run([str(BUILD / "render"), roms, str(mid), str(WORK / "rs.wav"),
                     "4", "--bootcache", "--trace-swp", str(trc)],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -93,11 +108,14 @@ def fw_regs(roms, msb, lsb, prog, note, vel):
     return []
 
 
-def nv_regs(roms, msb, lsb, prog, note, vel):
+def nv_regs(roms, msb, lsb, prog, note, vel, ccspec=None):
     """式だけで組んだ値（nativeplay --nocal）"""
-    out = subprocess.run([str(BUILD / "nativeplay"), roms, str(WORK / "rs2.wav"),
-                          "-b", "%d,%d,%d" % (msb, lsb, prog),
-                          "-n", str(note), "-v", str(vel), "--nocal"],
+    cmd = [str(BUILD / "nativeplay"), roms, str(WORK / "rs2.wav"),
+           "-b", "%d,%d,%d" % (msb, lsb, prog),
+           "-n", str(note), "-v", str(vel), "--nocal"]
+    if ccspec:
+        cmd += ["--cc", ccspec]
+    out = subprocess.run(cmd,
                          capture_output=True, text=True,
                          encoding="utf-8", errors="replace").stdout
     d = {}
@@ -118,6 +136,14 @@ def main():
     if len(sys.argv) < 2:
         print(__doc__)
         return 2
+    argv = list(sys.argv)
+    ccspec = None
+    if "--cc" in argv:
+        i = argv.index("--cc")
+        ccspec = argv[i + 1]
+        del argv[i:i + 2]
+    ccs = parse_cc(ccspec)
+    sys.argv = argv
     roms = sys.argv[1]
     WORK.mkdir(parents=True, exist_ok=True)
     if len(sys.argv) > 2 and sys.argv[2] not in ("", "-"):
@@ -132,8 +158,8 @@ def main():
     for msb, lsb, prog in cases:
         for note in notes:
             for vel in vels:
-                slots = fw_regs(roms, msb, lsb, prog, note, vel)
-                n = nv_regs(roms, msb, lsb, prog, note, vel)
+                slots = fw_regs(roms, msb, lsb, prog, note, vel, ccs)
+                n = nv_regs(roms, msb, lsb, prog, note, vel, ccspec)
                 if not slots or not n:
                     print("%d,%d,%-3d 鍵%-3d 強さ%-4d 測れず" % (msb, lsb, prog, note, vel))
                     continue

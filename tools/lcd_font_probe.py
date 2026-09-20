@@ -72,6 +72,40 @@ PAIRS = [(1, 2), (3, 4), (5, 6), (7, 8), (2, 1), (4, 3), (6, 5), (8, 7)]
 VEL_FOR_DOTS = { 1: 2, 2: 10, 3: 18, 4: 34, 5: 42, 6: 50, 7: 58, 8: 66 }
 
 
+def sysex(data):
+    return b'\xf0' + vlq(len(data)) + bytes(data)
+
+
+def display_letter(text):
+    """**XG の「画面に文字を出す」一括ダンプ**（番地 06 00 00）。
+
+    `F0 43 0n 4C <長さ 2 バイト> 06 00 00 <文字> <チェックサム> F7`
+    チェックサムは長さ・番地・文字を全部足して、下 7bit が 0 になる値。
+    間違えると実機が液晶に `Check Sum ERROR!` と出すので、すぐ分かる。
+
+    SysEx なので **0x01-0x7F しか送れない**（0x80 以上は状態バイト）。
+    幸い、実機が使う字のうち 0x80 以上はメーターの棒だけなので、
+    これで足りる"""
+    body = [0x00, len(text), 0x06, 0x00, 0x00] + list(text)
+    return sysex([0x43, 0x00, 0x4c] + body + [(0x80 - (sum(body) & 0x7f)) & 0x7f, 0xf7])
+
+
+def write_symbols(out):
+    """**記号の字（0x10-0x1F）を画面に出す曲**。
+
+    68 画面ぶん数えたところ、実機が使う字は ASCII と、CGRAM の外字
+    （0x00-0x07。firmware が自分で登録するので再現済み）と、メーターの棒と、
+    **0x10-0x15 の記号**だけだった。記号はこちらの字形ファイルでは手描き
+    なので、実機に出して見比べる"""
+    ev = [(0.0, b'\xff\x51\x03' + struct.pack('>I', BPM120)[1:])]
+    for ch in range(16):
+        ev += [(0.0, bytes([0xb0 | ch, 120, 0])), (0.0, bytes([0xb0 | ch, 123, 0]))]
+    ev.append((1.0, display_letter(range(0x10, 0x20))))
+    path = out / 'lcdsym.mid'
+    path.write_bytes(b'MThd' + struct.pack('>IHHH', 6, 0, 1, PPQN) + track(seq(ev)))
+    print('%s  1 秒で 0x10-0x1F の 16 字を画面に出す' % path)
+
+
 def main():
     out = Path(sys.argv[1] if len(sys.argv) > 1 else 'build/tests')
     out.mkdir(parents=True, exist_ok=True)
@@ -99,6 +133,7 @@ def main():
     path = out / 'lcdfont.mid'
     head = b'MThd' + struct.pack('>IHHH', 6, 0, 1, PPQN)
     path.write_bytes(head + track(seq(ev)))
+    write_symbols(out)
     print('%s  12 秒（1.0 秒から 10 秒鳴る）' % path)
     print()
     print('出るはずの棒（左の点 / 右の点）:')

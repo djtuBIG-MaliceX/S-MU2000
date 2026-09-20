@@ -407,6 +407,19 @@ private:
 	// 実機の遅れは 72 と 73 を行き来する ＝ 端数がある。整数で足していた
 	// ころは必ず 73 になり、1 サンプルずれる音が出ていた（doc の 6.92）。
 	// `SMU2000_NATIVE_PROC` で振れる（1/64 サンプル単位）
+	// **離しの処理にかかる時間**（1/64 サンプル）。押しとは別に持つ。
+	//
+	// 押しは 32 サンプル（音色を引いて要素を組み立てる）かかるが、
+	// **離しは 2 サンプル**だった。実機は最後のバイトを受けてすぐ 0x09 を
+	// 書いている。押しと同じ 32 にしていたので、**すべての離しが
+	// 30 サンプル遅れていた**（旋律もドラムも同じだけ遅れる。
+	// doc/native-engine.md の 6.152）。`SMU2000_OFF_PROC` で振れる
+	static u32 off_proc64()
+	{
+		static const u32 v = std::getenv("SMU2000_OFF_PROC")
+		                   ? u32(std::atoi(std::getenv("SMU2000_OFF_PROC"))) : 2 * 64;
+		return v;
+	}
 	static u32 native_proc64()
 	{
 		static const u32 v = std::getenv("SMU2000_NATIVE_PROC")
@@ -425,6 +438,29 @@ private:
 		                   ? u64(std::atoi(std::getenv("SMU2000_RX_BYTE"))) : 903;
 		return v;
 	}
+	// **線の刻みは 1/8000 サンプルで数える**（doc/native-engine.md の 6.156）。
+	// DIN の 1 バイトは 10 ビット / 31250 baud ＝ 28MHz で 8960 サイクル ＝
+	// **ちょうど 14.112 サンプル**。1/64 では割り切れず（903.168）、
+	// 切り捨てていたぶんが溜まって和音の 2 音目から 1 サンプル遅れていた。
+	// 1/8000 なら 112896 でぴったり合う（USB の 2.265625 サンプルも 18125）
+	static constexpr u64 RX_UNIT = 8000;
+	static constexpr u64 RX_SCALE = RX_UNIT / 64;      // 1/64 → 1/8000
+	static u64 rx_byte_tick8()
+	{
+		static const u64 v = std::getenv("SMU2000_RX_BYTE")
+		                   ? rx_byte_tick() * RX_SCALE : 112896;
+		return v;
+	}
+	static u64 rx_byte_tick_usb8() { return rx_byte_tick_usb() * RX_SCALE; }
+	static u64 usb_sub8() { return usb_sub64() * RX_SCALE; }
+	// 押しの処理時間。`SMU2000_NATIVE_PROC8` なら 1/8000 サンプルで振れる
+	static u64 native_proc8()
+	{
+		static const u64 v = std::getenv("SMU2000_NATIVE_PROC8")
+		                   ? u64(std::atoi(std::getenv("SMU2000_NATIVE_PROC8")))
+		                   : u64(native_proc64()) * RX_SCALE;
+		return v;
+	}
 	u64  m_rx_at[MIDI_PORTS] = {};                   // その口が次のバイトを受け終える時刻
 	u64  m_rx_at_usb = 0;                            // USB の線（4 口で分け合う）
 	u8   m_tick_seen = 0xff;                         // 10ms の印の前の値（6.145）
@@ -433,7 +469,10 @@ private:
 	struct nev { u64 at; u8 kind, part, d0, d1; };
 	std::deque<nev> m_nq;
 	u64  m_ne_clock = 0;
-	u32  m_nown[64][4] = {};       // native で鳴らしている鍵（パートごとに 128 ビット）
+	// **native で鳴らしている鍵の数**（パート x 鍵）。ビット 1 つだと、
+	// 同じ鍵を重ねて押されたとき（キーアサインがマルチの曲）2 回目以降の
+	// 離しを取りこぼし、その音だけ鳴り残る（doc/native-engine.md の 6.149）
+	u8   m_nown[64][128] = {};
 
 	void native_pump();
 	// 写し取った音の、フィルタの動きを録る（doc/native-engine.md の 6.17）
@@ -500,7 +539,7 @@ private:
 	}
 	u64 rx_advance(int port)
 	{
-		const u64 now = m_ne_clock * 64;
+		const u64 now = m_ne_clock * RX_UNIT;
 		// **USB は 4 つの口が 1 本の線を分け合う**（doc/native-engine.md の 6.126）。
 		// DIN は口ごとに別の線なので別々に数えるが、USB では口 A のバイトが
 		// 口 C のバイトを待たせる。口ごとに数えていたので、口 B・C・D の音が
@@ -513,23 +552,24 @@ private:
 		// 数えていないと、口をまたぐ曲でこちらだけ早く鳴る
 		if (usb && port != m_rx_usb_port) {
 			m_rx_usb_port = port;
-			at += 2 * rx_byte_tick_usb();
+			at += 2 * rx_byte_tick_usb8();
 		}
-		at += usb ? rx_byte_tick_usb() : rx_byte_tick();
+		at += usb ? rx_byte_tick_usb8() : rx_byte_tick8();
 		// **USB の口 B・C・D は実機のほうが 6 サンプル遅い**（6.129）。
 		// 口 A は合っている。DIN では 4 口とも同じなので、USB のときだけ。
 		// 1 口だけ使う曲を 4 通り作って測った（`SMU2000_USB_SUB` で振れる）。
 		// **`--bootcache` で測ってはいけない**。そちらだと 76 サンプルに
 		// 見えるが、ほんとうに起動させると 6 だった（6.121 と同じ罠）
-		const u64 extra = (usb && port > 0) ? usb_sub64() : 0;
-		return (at + extra + native_proc64()) / 64;
+		const u64 extra = (usb && port > 0) ? usb_sub8() : 0;
+		return (at + extra + native_proc8()) / RX_UNIT;
 	}
-	bool nown(int part, int note) const
-	{ return (m_nown[part][(note >> 5) & 3] & (u32(1) << (note & 31))) != 0; }
+
+	bool nown(int part, int note) const { return m_nown[part][note & 0x7f] != 0; }
 	void nown_set(int part, int note, bool on)
 	{
-		if (on) m_nown[part][(note >> 5) & 3] |= u32(1) << (note & 31);
-		else    m_nown[part][(note >> 5) & 3] &= ~(u32(1) << (note & 31));
+		u8 &n = m_nown[part][note & 0x7f];
+		if (on) { if (n < 255) n++; }
+		else    { if (n) n--; }
 	}
 
 	// **音色を自分で引く**（firmware の RAM を待たずに済む）。

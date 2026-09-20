@@ -133,6 +133,13 @@ constexpr block EFFECTS[] = {
 
 // インサーション n（0-3）の塊の先頭と、そこからパラメータ 1-10 の 16bit の数（上位バイトが先）の位置
 constexpr u32 INS_BLOCK[4] = { 0x0cb7e, 0x0cbaa, 0x0cbd6, 0x0cc02 };
+// **その塊の中の「掛かり先のパート」**（XG の 03 0n 0C。0x7f なら掛けない）
+constexpr u32 INS_PART = 0x0c;
+// バリエーションの塊（02 01 40-5B）。+0x1a が繋ぎ方（0 ＝ インサーション）、
+// +0x1b が掛かり先のパート（doc/native-engine.md の 6.161）
+constexpr u32 VAR_BLOCK = 0x0cb02;
+constexpr u32 VAR_CONNECT = 0x1a;
+constexpr u32 VAR_PART    = 0x1b;
 constexpr u32 INS_WIDE = 0x18;
 
 // XG の番地から、ワーク RAM での位置。無ければ false

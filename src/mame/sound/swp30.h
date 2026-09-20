@@ -445,6 +445,11 @@ public:
 	// **ピッチ EG が目標に着いたか**。firmware は内部レジスタ 4 の bit14 で
 	// これを見て次の段へ進む（0x12B81C）。native の口も同じものを見る
 	bool peg_reached(int chan) const { return m_peg_reached[chan] != 0; }
+	// **そのスロットがまだ鳴っているか**。native の口が、オルタネート
+	// グループで切る相手を選ぶのに使う（doc/native-engine.md の 6.151）。
+	// 実機の firmware も、鳴り終わった声は切らない
+	bool slot_active(int chan) const
+	{ return chan >= 0 && chan < 0x40 && m_envelope[chan].active(); }
 private:
 	void peg_step(int chan);
 	std::array<filter_block,    0x40> m_filter = {};
