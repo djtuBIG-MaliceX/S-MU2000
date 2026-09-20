@@ -77,6 +77,11 @@ public:
 		u64  rel_at = 0;                // 離した時刻
 		u32  rpos = 0;                  // 離してからの段の、つぎに書く位置
 		int  rel_att = 0;               // 離しのときに書いた減衰（戻さないための下限）
+		// **Rnd のパンで当たった位置**（0-127。-1 は Rnd ではない）。
+		// 鳴らし始めに 1 度引いて、そのあとは動かさない（6.147）
+		int  rnd_pan = -1;
+		int  rnd_drop = 0;              // Rnd のときの送りの目減り
+		int  vel = 0;                   // 押した強さ（液晶のメーター用）
 		int part = -1, note = -1, att = 0;
 		// **MIDI で押された鍵**。note のほうは XG のノートシフト（08 pp 08）を
 		// 足した「鳴らす鍵」なので、離すときの照合はこちらで見る
@@ -123,7 +128,7 @@ public:
 	void set_peg_peek(peek_fn f) { m_peg_peek = std::move(f); }
 	void set_rom(const u8 *rom) { m_rom = rom; }
 	// ワーク RAM（firmware が音色を選んだ結果を読む）
-	void set_ram(const u8 *ram) { m_ram = ram; }
+	void set_ram(u8 *ram) { m_ram = ram; m_ramw = ram; }
 
 	void reset()
 	{
@@ -1104,15 +1109,17 @@ private:
 			}
 			m_poke(u32(i) * 64 + 9, u16(note_att(s, part)));
 			if (s.cal->has(0x32))
-				m_poke(u32(i) * 64 + 0x32, pan_reg(*s.cal, part));
+				m_poke(u32(i) * 64 + 0x32, pan_reg(*s.cal, part, s.rnd_pan));
 			if (s.lfo)
 				m_poke(u32(i) * 64 + 0x0a, lfo_reg(s.lfo, *s.cal, part));
 			if (s.cal->has(0x33))
 				m_poke(u32(i) * 64 + 0x33,
-				       send_reg(*s.cal, 0x33, false, m_cc[part].rev, s.cal->cal_rev));
+				       send_reg(*s.cal, 0x33, false, m_cc[part].rev, s.cal->cal_rev,
+				                s.rnd_drop));
 			if (s.cal->has(0x34))
 				m_poke(u32(i) * 64 + 0x34,
-				       send_reg(*s.cal, 0x34, true, m_cc[part].cho, s.cal->cal_cho));
+				       send_reg(*s.cal, 0x34, true, m_cc[part].cho, s.cal->cal_cho,
+				                s.rnd_drop));
 			if (s.cut)
 				m_poke(u32(i) * 64 + 0x00,
 				       cutoff_reg(s.cut, *s.cal, part, s.elem, s.note));
@@ -1397,17 +1404,22 @@ private:
 	// **もう一方の送りから下駄を借りる**（どちらもパートの同じ下駄に乗っている）
 	// 0x32-0x37 は 1 つで 2 本ぶんの送りを持つ。リバーブは 0x33 の**下位**、
 	// コーラスは 0x34 の**上位**（nativeplay --ccwatch で確かめた）
-	u16 send_reg(const nv::voice_cal &c, int which, bool hi, int now, int was) const
+	// `drop` は**パンの Rnd で目減りするぶん**（6.147）。Rnd のときは送りの
+	// 表を位置 0 で引くので、写し取ったとき（音色の持つパンの位置）のぶんだけ減る
+	u16 send_reg(const nv::voice_cal &c, int which, bool hi, int now, int was,
+	             int drop = 0) const
 	{
 		const u16 base = c.reg[which];
-		if (now < 0 || now == was)
+		if (drop == 0 && (now < 0 || now == was))
 			return base;
 		const int cur = hi ? (base >> 8) : (base & 0xff);
 		// 写し取ったときに切れていた（0xff）送りは差が取れない。
 		// 下駄は 16（CC91=127・CC93=127 のどちらも 16 になる）
-		const int v = (cur >= 0xff && was <= 0)
-		            ? 16 + nv::send_att(m_rom, now)
-		            : cur + nv::send_att(m_rom, now) - nv::send_att(m_rom, was);
+		const int v = (now < 0 || now == was)
+		            ? cur - drop
+		            : ((cur >= 0xff && was <= 0)
+		               ? 16 + nv::send_att(m_rom, now) - drop
+		               : cur + nv::send_att(m_rom, now) - nv::send_att(m_rom, was) - drop);
 		const int w = nv::clamp_att(v);
 		return u16(hi ? ((w << 8) | (base & 0xff)) : ((base & 0xff00) | w));
 	}
@@ -1422,9 +1434,71 @@ private:
 		return u16((base & 0xff00) | nv::clamp_att(int(base & 0xff) + d));
 	}
 
-	// パンのレジスタ（写し取った値からの差ぶんで動かす）
-	u16 pan_reg(const nv::voice_cal &c, int part) const
+public:
+	// **液晶のメーター**（doc/native-engine.md の 6.148）。実機はパートごとに
+	// 「いちばん大きい音の目盛り」を持っていて、演奏画面がそれを棒にして描く。
+	// native の口では firmware が音を持たないので、そこがずっと 0 になり
+	// **メーターが動かない**（利用者からの報告）。鳴らしている音から作り直す。
+	//
+	// 離したあとも少しの間は残す（打楽器のような短い音でも、25ms おきの
+	// 見回りで拾えるように）
+	static constexpr u64 METER_TAIL = 44100 / 4;
+
+	void fill_meter(u8 *dst, int n) const
 	{
+		for (int i = 0; i < n; i++)
+			dst[i] = 0;
+		if (!m_rom)
+			return;
+		for (const slot_use &s : m_slot) {
+			if (s.part < 0 || s.part >= n || s.vel <= 0)
+				continue;
+			if (!s.on && !(s.rel && m_clock - s.rel_at < METER_TAIL))
+				continue;
+			const int v = meter_of(s.part, s.vel);
+			if (v > int(dst[s.part]))
+				dst[s.part] = u8(v);
+		}
+	}
+
+private:
+	// 目盛り = 強さ x パートの目盛り / 128。
+	// **パートの目盛りはワーク RAM から取る**（PART_GAIN。音量・
+	// エクスプレッション・マスター音量・インサーションの損まで畳んである。
+	// 6.114）。実機との差は 1 以内（実測 15 通り）
+	int meter_of(int part, int vel) const
+	{
+		if (!m_ram)
+			return 0;
+		const int g = int(m_ram[ram::part_base(part) + ram::PART_GAIN]) - 1;
+		if (g <= 0)
+			return 0;
+		const int v = (vel * g) >> 7;
+		return v > 127 ? 127 : v;
+	}
+
+	// **Rnd（パン 0）かどうか**。パートのパンの値がそのまま 0 のとき
+	bool pan_is_rnd(int part) const { return m_cc[part].pan == 0; }
+
+	// **Rnd の乱数を 1 つ進める**（6.147）。種はワーク RAM にあって、
+	// 実機の firmware と同じ場所・同じ式なので、実機モードと行き来しても
+	// 列が途切れない。要素 1 つにつき 1 回進む
+	int pan_rnd_draw()
+	{
+		if (!m_ramw || !m_ram)
+			return 64;
+		u8 &x = m_ramw[ram::PAN_RND];
+		x = u8(0xb3 * x + 0x11);
+		return int(x >> 1);
+	}
+
+	// パンのレジスタ（写し取った値からの差ぶんで動かす）
+	u16 pan_reg(const nv::voice_cal &c, int part, int rnd = -1) const
+	{
+		// Rnd のときは**音色のパンの寄りを無視して**、当たった位置そのもの
+		// （実機もそうしている。6.147）
+		if (rnd >= 0)
+			return nv::pan_rnd_reg(m_rom, rnd);
 		const int now = m_cc[part].pan, was = c.cal_pan;
 		if (now < 0 || now == was)
 			return c.reg[0x32];
@@ -1577,6 +1651,7 @@ public:
 			}
 			// **段 0 から始める**。実機は 10ms ごとに「着いたか」を見て次の段へ
 			su.pvel = pvel;
+			su.vel = vel;                    // 液晶のメーター用（6.148）
 			su.pstage = 0;
 			// **刻みはフィルタの包絡線と同じ**（実機はどちらも同じ 10ms の
 			// タイマで動いている）。録画から取った格子に乗せる
@@ -1588,7 +1663,14 @@ public:
 			         ? eg_after(u64(s64(m_clock) + EG_LAG))
 			         : (su.fnext > FENV_TICK ? su.fnext - FENV_TICK
 			                                 : (m_clock / FENV_TICK + 1) * FENV_TICK);
-			if (c && c->has(0x32))
+			su.rnd_pan = pan_is_rnd(part) ? pan_rnd_draw() : -1;
+			// Rnd のときの送りの目減り（音色の持つパンの位置ぶん）
+			su.rnd_drop = su.rnd_pan < 0 ? 0
+			            : nv::pan_send_drop(m_rom, nv::voice_pan_pos(
+			                  m_rom, el, pnote, c ? c->cal_pan : 64));
+			if (su.rnd_pan >= 0)
+				sr.set(0x32, nv::pan_rnd_reg(m_rom, su.rnd_pan));
+			else if (c && c->has(0x32))
 				sr.set(0x32, pan_reg(*c, part));
 			su.lfo = sr.v[0x0a];
 			su.cut = sr.v[0x00];
@@ -1603,9 +1685,9 @@ public:
 				// 値ではない。強さで変わるので写し取りは使えない。6.69）
 				sr.set(0x04, reso_reg(sr.v[0x04], *c, part));
 				if (c->has(0x33))
-					sr.set(0x33, send_reg(*c, 0x33, false, pc.rev, c->cal_rev));
+					sr.set(0x33, send_reg(*c, 0x33, false, pc.rev, c->cal_rev, su.rnd_drop));
 				if (c->has(0x34))
-					sr.set(0x34, send_reg(*c, 0x34, true, pc.cho, c->cal_cho));
+					sr.set(0x34, send_reg(*c, 0x34, true, pc.cho, c->cal_cho, su.rnd_drop));
 			}
 			write_slot(slot, sr);
 			if (debug_on())
@@ -1780,6 +1862,9 @@ public:
 			su.cal = &c;
 			su.tpos = 0;
 			su.tstart = m_clock;
+			su.rnd_pan = pan_is_rnd(part) ? pan_rnd_draw() : -1;
+			su.rnd_drop = 0;
+			su.vel = vel;
 			m_traj = true;
 			m_traj_next = 0;
 			su.att = att0 + 2 * (nv::velocity_att(m_rom, vel) - nv::velocity_att(m_rom, c.cal_vel));
@@ -1803,10 +1888,12 @@ public:
 				else if (c.has(i))
 					m_poke(u32(slot) * 64 + u32(i),
 					       i == 9 ? u16(att)
-					              : (i == 0x32 ? pan_reg(c, part)
+					              : (i == 0x32 ? pan_reg(c, part, su.rnd_pan)
 					              : (i == 0x0a ? lfo_reg(c.reg[0x0a], c, part)
-					              : (i == 0x33 ? send_reg(c, 0x33, false, m_cc[part].rev, c.cal_rev)
-					              : (i == 0x34 ? send_reg(c, 0x34, true, m_cc[part].cho, c.cal_cho)
+					              : (i == 0x33 ? send_reg(c, 0x33, false, m_cc[part].rev, c.cal_rev,
+					                                      su.rnd_drop)
+					              : (i == 0x34 ? send_reg(c, 0x34, true, m_cc[part].cho, c.cal_cho,
+					                                      su.rnd_drop)
 					                           : c.reg[i])))));
 
 			su.drum_rel = c.has(9) ? u16(c.reg[9]) : 0;
@@ -2003,6 +2090,7 @@ private:
 	peek_fn m_peg_peek;
 	const u8 *m_rom = nullptr;
 	const u8 *m_ram = nullptr;
+	u8 *m_ramw = nullptr;           // 同じワーク RAM（Rnd の種を書き戻す用）
 	std::unordered_map<u64, std::vector<nv::voice_cal>> m_cal;
 	std::unordered_map<u64, std::vector<nv::voice_cal>> m_drum;
 	std::array<slot_use, SLOTS> m_slot;

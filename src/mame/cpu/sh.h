@@ -162,6 +162,8 @@ public:
 
 	// MAME では device_state_interface が持っていた。周辺がログに出すのに使う
 	u32 pc() const { return m_sh2_state->pc; }
+	// 呼び出し元を辿るため（調べもの用）
+	u32 pr() const { return m_sh2_state->pr; }
 
 	// 移植の突き合わせ用。レジスタの状態を 1 つの値に畳む（安い方）
 	u64 regs_hash() const

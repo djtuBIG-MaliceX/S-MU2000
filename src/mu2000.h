@@ -536,6 +536,18 @@ private:
 	// バンクとプログラムをパートごとに覚えて、xg::voice_rom::lookup に渡す
 	struct part_prog { u8 msb = 0, lsb = 0, prog = 0; };
 	part_prog m_prog_sel[64];
+	// **前に見たワーク RAM のバンクと音色**（パートの塊 +1/+2/+3）。
+	// パネルのダイヤルや PART+/- で音色を替えると MIDI を通らないので、
+	// ここを見張って拾い直す（doc/native-engine.md の 6.146）。
+	// 0xff は「まだ見ていない」
+	u8 m_prog_seen[64][3];
+	void sync_prog();
+	// **液晶のメーターを埋める**（doc/native-engine.md の 6.148）
+	void draw_meter();
+	u8 m_meter_lv[16] = {};         // native が鳴らしている音の目盛り
+	u8 m_meter_smooth[16] = {};     // なまし（実機と同じ半分ずつ寄せる）
+	u8 m_meter_cell[16] = {};       // 前に液晶へ置いた棒の字（下 8 + 上 8）
+	u64 m_meter_next = 0;           // つぎになます時刻
 	// **パートの種類**（XG の 08 pp 07。0 が旋律、2-5 がドラム 1-4）。
 	// -1 はまだ SysEx を見ていない（ワーク RAM を読む）。バンク 127/126 で
 	// なくてもここでドラムになるので、音色の引き方を変える必要がある
@@ -607,12 +619,16 @@ private:
 	//   * 画面が変わるまでひと呼吸かかる
 	// になる。触ってから この長さだけ全速で回すと、実機と同じ手触りになる。
 	// 触っていない間は今までどおり細く回すだけ（CPU は増えない）
+	// **0.5 秒では足りなかった**（6.146）。ダイヤルを 4 目盛り回すと、
+	// 実機モードは 4 つとも効くのに native は 1 つしか効かない。firmware は
+	// 目盛りを受け取ってから画面と音色を作り直すのに、firmware の中の時間で
+	// 1 秒近く掛かる。
 	// `SMU2000_PANEL_RUN` で振れる（サンプル数。0 で前の道に戻る）
 	static u32 panel_run()
 	{
 		static const u32 v = std::getenv("SMU2000_PANEL_RUN")
 		                   ? u32(std::atoi(std::getenv("SMU2000_PANEL_RUN")))
-		                   : u32(44100 / 2);      // 0.5 秒
+		                   : u32(44100);          // 1 秒
 		return v;
 	}
 	void panel_touched() { m_panel_hold = panel_run(); }

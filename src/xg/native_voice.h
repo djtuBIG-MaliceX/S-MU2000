@@ -1091,6 +1091,29 @@ inline int pan_send_adj(const u8 *rom, int pan_pos)
 	     - int(rom[PAN_SEND_TAB + 64]);
 }
 
+// **Rnd（パンの値が 0）のときのレジスタ**（doc/native-engine.md の 6.147）。
+// 実機は要素を 1 つ鳴らすたびに 8bit の乱数を進めて、その上位 7bit を
+// パンの位置にする。**音色が持っているパンの寄りは無視される**（実測）。
+// 位置 r に対して 左 = 下駄[r]、右 = 下駄[128-r] そのもの
+// Rnd のときに送りが目減りするぶん（表を位置 0 で引くので、写し取った
+// ときの位置ぶんがそのまま減る）
+inline int pan_send_drop(const u8 *rom, int pan_pos)
+{
+	return rom ? int(rom[PAN_SEND_TAB + u32(pan_pos & 0x7f)]) : 0;
+}
+
+inline u16 pan_rnd_reg(const u8 *rom, int r)
+{
+	if (!rom)
+		return 0x0808;
+	const int q = r < 0 ? 0 : (r > 127 ? 127 : r);
+	int l = int(rom[PAN_BASE_TAB + u32(q)]);
+	int rr = int(rom[PAN_BASE_TAB + u32(0x80 - q)]);
+	if (l > 255) l = 255;
+	if (rr > 255) rr = 255;
+	return u16((l << 8) | rr);
+}
+
 inline u16 voice_pan_reg(const u8 *rom, const u8 *elem, int note,
                          int cc10 = 64, int part_pan = 64)
 {

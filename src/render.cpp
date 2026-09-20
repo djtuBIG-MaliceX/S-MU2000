@@ -26,6 +26,13 @@
 
 namespace {
 
+// 環境変数を読む（無ければ既定値）
+const char *getenv_or(const char *name, const char *def)
+{
+	const char *v = std::getenv(name);
+	return v && *v ? v : def;
+}
+
 void write_wav(const std::string &path, const std::vector<s16> &pcm, u32 rate)
 {
 	std::FILE *f = std::fopen(path.c_str(), "wb");
@@ -171,6 +178,7 @@ int main(int argc, char **argv)
 	const char *swptrace = nullptr;
 	bool single = false;   // スレーブを別スレッドにしない
 	double boot = -1.0;     // 負なら firmware が受信を有効にするまで待つ
+	double lcd_at = -1.0;   // --lcd-at 秒: その時刻の液晶の中身を 16 進で出す
 	const char *mu_dac_path = nullptr;
 	u32 mu_dac_from = 0, mu_dac_count = 0;
 	const char *meg_path = nullptr;    // MEG の中身を書き出す先
@@ -198,6 +206,9 @@ int main(int argc, char **argv)
 			replay = argv[++i];
 		else if (!std::strcmp(argv[i], "--boot") && i + 1 < argc)
 			boot = std::atof(argv[++i]);
+		// **その時刻の液晶の中身**を 16 進で出す（メーターの棒を突き合わせる）
+		else if (!std::strcmp(argv[i], "--lcd-at") && i + 1 < argc)
+			lcd_at = std::atof(argv[++i]);
 		else if (!std::strcmp(argv[i], "--dump-dac") && i + 3 < argc) {
 			mu_dac_path = argv[++i];
 			mu_dac_from = u32(std::strtoul(argv[++i], nullptr, 0));
@@ -414,6 +425,33 @@ int main(int argc, char **argv)
 			if (i >= tail_start + size_t(3.0 * rate))
 				break;
 		}
+		// SMU2000_RAMSNAP=<dir>: ワーク RAM を丸ごと何度も書き出す（調べもの用）。
+		// SMU2000_RAMSNAP_T0 秒から SMU2000_RAMSNAP_DT 秒おきに
+		// SMU2000_RAMSNAP_N 回。firmware の中で**打鍵ごとに動く場所**を
+		// 差分で探すのに使う
+		if (const char *snapdir = std::getenv("SMU2000_RAMSNAP")) {
+			static const double st0 = std::atof(getenv_or("SMU2000_RAMSNAP_T0", "0"));
+			static const double sdt = std::atof(getenv_or("SMU2000_RAMSNAP_DT", "0.1"));
+			static const int    sn  = std::atoi(getenv_or("SMU2000_RAMSNAP_N", "32"));
+			static int sdone = 0;
+			const long long rel = (long long)i - (long long)(boot * rate);
+			if (sdone < sn && rel >= (long long)((st0 + sdt * sdone) * rate)) {
+				char path[512];
+				std::snprintf(path, sizeof path, "%s/ram%03d.bin", snapdir, sdone);
+				if (std::FILE *sf = std::fopen(path, "wb")) {
+					const std::vector<u8> &rr = mu.nvram();
+					std::fwrite(rr.data(), 1, rr.size(), sf);
+					std::fclose(sf);
+				}
+				// 液晶の中身（DDRAM 128 バイト）も一緒に
+				std::snprintf(path, sizeof path, "%s/lcd%03d.bin", snapdir, sdone);
+				if (std::FILE *sf = std::fopen(path, "wb")) {
+					std::fwrite(mu.lcd().ddram(), 1, 0x80, sf);
+					std::fclose(sf);
+				}
+				sdone++;
+			}
+		}
 		// SMU2000_RAMWATCH=1: パートのつまみが**いつ**変わるかを 0.5 秒ごとに見る。
 		// firmware は native の口では細切れにしか回らないので、曲が送った値を
 		// 処理し終える時刻がずれる。その遅れを目で見るための窓
@@ -428,6 +466,15 @@ int main(int argc, char **argv)
 					             rr[b + 0x0b], rr[b + 0x13], rr[b + 0x12], rr[b + 0x18]);
 			}
 			std::fprintf(stderr, "\n");
+		}
+		if (lcd_at >= 0.0 && i >= size_t((boot + lcd_at) * rate)) {
+			lcd_at = -1.0;
+			const u8 *dd = mu.lcd().ddram();
+			std::printf("LCDHEX");
+			for (int line = 0; line < 2; line++)
+				for (int pos = 0; pos < 24; pos++)
+					std::printf(" %02x", dd[line * 0x40 + pos]);
+			std::printf("\n");
 		}
 		if (state_at && i == size_t(boot * rate) + state_sample) {
 			const std::vector<u8> st = mu.save_state();

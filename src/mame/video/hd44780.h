@@ -50,6 +50,11 @@ public:
 	// 利用者が作った字（0x00-0x07）の絵。1 文字 8 バイト
 	const u8 *cgram() const { return m_cgram; }
 
+	// **外から 1 マス書き替える**。native の口で液晶のメーターを自前で
+	// 描くのに使う（doc/native-engine.md の 6.148）。firmware の手順を
+	// 通らないので、表示の状態（カーソルなど）は何も変えない
+	void poke_ddram(u32 i, u8 v) { if (i < 0x80) m_ddram[i] = v; }
+
 	// 文字の絵。HD44780U B04 の CGROM 4KB（1 文字 16 バイト、下位 5bit が絵）
 	void set_cgrom(const u8 *rom, size_t size)
 	{ m_cgrom = (rom && size >= 0x1000) ? rom : nullptr; }

@@ -267,7 +267,10 @@ SHAPE_MIN = {
     "ins2": 0.95, "progchg": 0.98, "running": 0.95, "pat": 0.95,
     "ccramp": 0.95, "midreset": 0.98, "partmode": 0.95,
     "drumnrpn": 0.95, "retrig": 0.95, "pedretrig": 0.98, "edges": 0.95,
-    "fxchange": 0.95,
+    "fxchange": 0.95, "dialloop": 0.95, "panrnd": 0.95,
+    # meter は 15 パートを同時に鳴らすので dense と同じ事情で形が落ちる
+    # （狙いは液晶のほうなので、音は緩めに見る）
+    "meter": 0.90,
     # keylevel は鍵と強さで音量が大きく動く音色ばかりなので、鍵を押す時刻の
     # ばらつき（6.90）が相関に出やすい。**音量のほうは `native の口` が見る**。
     # 音 1 つずつは tools/native/notelevel.py で見られる
@@ -498,6 +501,96 @@ def step_usb(rep, roms, cases):
     rep.add("USB の口", not bad, "、".join(bad or notes) + ("（下限を割った）" if bad else ""))
 
 
+def step_meter(rep, roms):
+    """**液晶のメーター**（doc/native-engine.md の 6.148）。firmware の道と
+    native の口で同じ曲を鳴らして、**棒の字が並ぶ 16 マス**を突き合わせる。
+    メーターの目盛りは「強さ x パートの目盛り / 128」で、実機との差は 1 以内。
+    点の境目をまたぐと 1 マスだけずれることがあるので、2 マスまで許す"""
+    exe = tool("render")
+    mid = WORK / "meter.mid"
+    if not exe.exists() or not mid.exists():
+        rep.add("メーター", True, "この回では見ない")
+        return
+    got = {}
+    for tag, extra in (("fw", []), ("ne", ["--native-engine"])):
+        log = WORK / ("meter_%s.log" % tag)
+        rc = run([exe, roms, mid, WORK / ("meter_%s.wav" % tag), "5",
+                  "--boot", "%.3f" % BOOT_AT, "--lcd-at", "3.4"] + extra,
+                 out=log, err=log, env={"SMU2000_NO_VOICECACHE": "1"})
+        if rc != 0:
+            rep.add("メーター", False, "%s で鳴らせなかった" % tag)
+            return
+        hit = [l for l in log.read_text(encoding="utf-8", errors="replace").splitlines()
+               if l.startswith("LCDHEX")]
+        if not hit:
+            rep.add("メーター", False, "%s の液晶が読めなかった" % tag)
+            return
+        v = hit[0].split()[1:]
+        # 上の行の 1-8 桁目と下の行の 1-8 桁目
+        got[tag] = [v[1 + i] for i in range(8)] + [v[24 + 1 + i] for i in range(8)]
+    if all(x == "89" for x in got["fw"][8:]):
+        rep.add("メーター", False, "firmware の道で棒が動いていない")
+        return
+    if all(x == "89" for x in got["ne"][8:]):
+        rep.add("メーター", False, "native の口で棒が動かない")
+        return
+    bad = [i for i in range(16) if got["fw"][i] != got["ne"][i]]
+    ok = len(bad) <= 2
+    note = "16 マス中 %d マスが同じ" % (16 - len(bad))
+    if bad:
+        note += "（%s / %s）" % (" ".join(got["fw"]), " ".join(got["ne"]))
+    rep.add("メーター", ok, note)
+
+
+def step_dial(rep, roms, cases):
+    """**パネルのダイヤルで音色を替える**（doc/native-engine.md の 6.146）。
+    ジョグダイヤルの音色替えは MIDI を通らないので、native が拾えないと
+    「画面は変わるのに音が変わらない」。鳴らしている最中に 4 目盛り回して、
+    液晶と波形を firmware の道と突き合わせる"""
+    import math
+    exe = BUILD / ("panel" + EXE)
+    mid = WORK / "dialloop.mid"
+    if not exe.exists() or not mid.exists():
+        rep.add("ダイヤル", True, "この回では見ない")
+        return
+    lcd, wav = {}, {}
+    for tag, extra in (("fw", []), ("ne", ["--native"])):
+        out = WORK / ("dial_%s.wav" % tag)
+        log = WORK / ("dial_%s.log" % tag)
+        rc = run([exe, roms, "--keys", "play", "--mid", mid, "10",
+                  "--turn-at", "3.0", "4", "--wav", out] + extra, out=log, err=log)
+        if rc != 0 or not out.exists():
+            rep.add("ダイヤル", False, "%s で鳴らせなかった" % tag)
+            return
+        txt = log.read_text(encoding="utf-8", errors="replace").splitlines()
+        hit = [l for l in txt if l.startswith("  0 |")]
+        lcd[tag] = hit[0] if hit else ""
+        wav[tag] = out
+    if lcd["fw"] != lcd["ne"]:
+        rep.add("ダイヤル", False,
+                "液晶が違う: %s / %s" % (lcd["fw"].strip(), lcd["ne"].strip()))
+        return
+    fa, ra, ca, _ = fpmod.load_wav(str(wav["fw"]))
+    fb, _, cb, _ = fpmod.load_wav(str(wav["ne"]))
+    n = min(len(fa) // ca, len(fb) // cb)
+    cs = []
+    for s0 in range(0, n - ra, ra):
+        sa = fa[s0 * ca:(s0 + ra) * ca:ca]
+        sb = fb[s0 * cb:(s0 + ra) * cb:cb]
+        na = sum(float(x) * x for x in sa)
+        nb = sum(float(x) * x for x in sb)
+        if na < 1e3 or nb < 1e3:
+            continue
+        num = sum(float(x) * float(y) for x, y in zip(sa, sb))
+        cs.append(num / math.sqrt(na * nb))
+    if not cs:
+        rep.add("ダイヤル", False, "音が無い")
+        return
+    med = sorted(cs)[len(cs) // 2]
+    ok = med >= 0.95
+    rep.add("ダイヤル", ok, "音色が替わって波形の相関 %.0f%%" % (100 * med))
+
+
 # パネルの試験で押すボタン（品書きを一巡りする）
 PANEL_KEYS = ("play,util,enter,value+,value+,exit,edit,enter,value+,exit,exit,"
               "part+,mute,play,drum,piano,organ,select,edit,enter,enter,exit,exit")
@@ -607,6 +700,8 @@ def main():
         print()
         print("== 8. パネル（native の口でもボタンと液晶が効くか）")
         step_panel(rep, roms)
+        step_meter(rep, roms)
+        step_dial(rep, roms, cases)
 
         print()
         print("== 9. USB の口（プラグインの既定）")
