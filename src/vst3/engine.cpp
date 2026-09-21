@@ -8,6 +8,7 @@
 #include "nvram.h"
 #include "smartmedia.h"
 #include "ui/xg_state.h"
+#include "xg/native_driver.h"
 #include "ui/xg_ui.h"
 
 #include "compat/paths.h"
@@ -566,6 +567,9 @@ void engine::boot()
 	// **firmware を走らせない口**（doc/native-engine.md）。鍵・つまみを自分でさばき、
 	// SH-2 は必要なときだけ回す。2.3〜2.9 倍軽い。plugin.ini に native_engine=1 で入る
 	int native_engine = 0;
+	// **写し取りを 1 音もしない道**（段 4）。式だけでレジスタを組む。
+	// 試験はこの道で回していて、押鍵のレジスタは 48/49 で一致する
+	int nocal = 0;
 	// 写し取りをファイルに残す（voicecache.h）。経路の印が付いているので
 	// 別の曲の写しが混ざっても安全。plugin.ini の voicecache=0 で切る
 	int voicecache = 0;
@@ -581,6 +585,8 @@ void engine::boot()
 					native_fx = std::atoi(line + 10);
 				if (!std::strncmp(line, "native_engine=", 14))
 					native_engine = std::atoi(line + 14);
+				if (!std::strncmp(line, "nocal=", 6))
+					nocal = std::atoi(line + 6);
 				if (!std::strncmp(line, "voicecache=", 11))
 					voicecache = std::atoi(line + 11);
 				m_voicecache = voicecache != 0;
@@ -618,11 +624,16 @@ void engine::boot()
 		logf("起動: 前の写しから（%s）", bootcache::path(boot_key).c_str());
 		if (native_engine) {
 			mu->set_native_engine(native_engine);
+			m_native_engine.store(native_engine);
 			logf("plugin.ini: native_engine=1（SH-2 は要るときだけ回す）");
 			if (voicecache && smu2000::voicecache::load(*mu, smu2000::voicecache::key(*mu)))
 				logf("写し取り: %d 音色を前の写しから", int(mu->native_cal_count()));
 		}
-		m_mu = mu;
+		if (nocal) {
+		xg::native_driver::set_nocal(true);
+		logf("plugin.ini: nocal=1（写し取りを 1 音もしない）");
+	}
+	m_mu = mu;
 		m_message = warn.empty() ? std::string("ROM: ") + dir
 		                         : std::string("ROM: ") + dir + "\n警告: " + warn;
 		m_state.store(status::ready, std::memory_order_release);
@@ -880,6 +891,12 @@ void engine::fill(float *left, float *right, int n, const float *in_l, const flo
 	}
 	push_input(in_l, in_r, n);
 	apply_deferred_state();
+	// **口の入切はここで**（gui.exe の ui/engine.h と同じ場所）
+	if (const int want = m_want_native.exchange(-1); want >= 0) {
+		m_mu->set_native_engine(want);
+		m_native_engine.store(want);
+	}
+	const auto cpu_t0 = std::chrono::steady_clock::now();
 
 	m_drv.apply_buttons(*m_mu, m_bridge);
 	m_drv.pump_midi(*m_mu, m_bridge);
@@ -897,6 +914,7 @@ void engine::fill(float *left, float *right, int n, const float *in_l, const flo
 			one_sample(left[i], right[i]);
 		m_drv.pump_out(*m_mu, m_bridge, [this](u8 v) { tx_push(v); });
 		m_drv.publish(*m_mu, m_bridge, u32(n), u32(NATIVE_RATE), true, nullptr);
+		publish_load(cpu_t0, n, double(NATIVE_RATE));
 		return;
 	}
 
@@ -934,6 +952,7 @@ void engine::fill(float *left, float *right, int n, const float *in_l, const flo
 	// firmware が MIDI OUT から送り出したもの（画面の問い合わせの返事）
 	m_drv.pump_out(*m_mu, m_bridge, [this](u8 v) { tx_push(v); });
 	m_drv.publish(*m_mu, m_bridge, u32(n), u32(NATIVE_RATE), true, nullptr);
+	publish_load(cpu_t0, n, m_step > 0.0 ? double(NATIVE_RATE) / m_step : double(NATIVE_RATE));
 
 	// 桁が落ちる前に原点を戻す。RING の倍数だけずらせば環の並びは変わらない
 	if (m_pos > double(1 << 28)) {
@@ -948,6 +967,20 @@ void engine::fill(float *left, float *right, int n, const float *in_l, const flo
 // ---- 状態の保存と復元
 //
 // どれも m_machine を取ってその場でやる。音声スレッドは取れない区間を無音にして待たない
+
+// **重さと口を一覧に出す**。gui.exe は自分で音声を回しているので
+// 出していたが、プラグインでもfill() にかかった時間で同じものが出せる
+void engine::publish_load(std::chrono::steady_clock::time_point t0, int n, double rate)
+{
+	if (n <= 0 || rate <= 0.0)
+		return;
+	const double spent = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+	const double pct = spent * rate / double(n) * 100.0;
+	// 大きい側はそのまま、小さい側はゆっくり（読める動きにする）
+	m_load = pct > m_load ? pct : m_load * 0.9 + pct * 0.1;
+	m_bridge.set_cpu(float(m_load));
+	m_bridge.set_engine(m_native_engine.load(std::memory_order_relaxed) ? 1 : 0);
+}
 
 void engine::apply_deferred_state()
 {

@@ -179,6 +179,9 @@ int main(int argc, char **argv)
 	bool single = false;   // スレーブを別スレッドにしない
 	double boot = -1.0;     // 負なら firmware が受信を有効にするまで待つ
 	double lcd_at = -1.0;   // --lcd-at 秒: その時刻の液晶の中身を 16 進で出す
+	// --lcd-every 秒: その間隔でずっと出す（画面のちらつきを見るため）
+	double lcd_every = 0.0;
+	double lcd_next = 0.0;
 	const char *mu_dac_path = nullptr;
 	u32 mu_dac_from = 0, mu_dac_count = 0;
 	const char *meg_path = nullptr;    // MEG の中身を書き出す先
@@ -209,6 +212,8 @@ int main(int argc, char **argv)
 		// **その時刻の液晶の中身**を 16 進で出す（メーターの棒を突き合わせる）
 		else if (!std::strcmp(argv[i], "--lcd-at") && i + 1 < argc)
 			lcd_at = std::atof(argv[++i]);
+		else if (!std::strcmp(argv[i], "--lcd-every") && i + 1 < argc)
+			lcd_every = std::atof(argv[++i]);
 		else if (!std::strcmp(argv[i], "--dump-dac") && i + 3 < argc) {
 			mu_dac_path = argv[++i];
 			mu_dac_from = u32(std::strtoul(argv[++i], nullptr, 0));
@@ -474,6 +479,22 @@ int main(int argc, char **argv)
 			for (int line = 0; line < 2; line++)
 				for (int pos = 0; pos < 24; pos++)
 					std::printf(" %02x", dd[line * 0x40 + pos]);
+			std::printf("\n");
+		}
+		if (lcd_every > 0.0 && i >= size_t((boot + lcd_next) * rate)) {
+			const double now = lcd_next;
+			lcd_next += lcd_every;
+			const u8 *dd = mu.lcd().ddram();
+			std::printf("LCD %.3f", now);
+			for (int line = 0; line < 2; line++)
+				for (int pos = 0; pos < 24; pos++)
+					std::printf(" %02x", dd[line * 0x40 + pos]);
+			std::printf("\n");
+			// 外字（音色の絵）も出す。1 文字 8 バイト × 8 文字
+			const u8 *cg = mu.lcd().cgram();
+			std::printf("CG %.3f", now);
+			for (int k = 0; k < 64; k++)
+				std::printf(" %02x", cg[k]);
 			std::printf("\n");
 		}
 		if (state_at && i == size_t(boot * rate) + state_sample) {

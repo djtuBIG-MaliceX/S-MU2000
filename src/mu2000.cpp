@@ -1204,12 +1204,19 @@ void mu2000::set_native_engine(int mode)
 	// そのスロットを知らないので、離さないと鳴りっぱなしになる
 	if (!mode && m_native_engine)
 		m_ndrv.silence();
+	// **液晶のマスを firmware に返す**（6.188・6.190）
+	m_lcd.clear_owned();
+	m_lcd.clear_cg_owned();
 	m_native_engine = mode;
 	m_fw_hold = 0;
 	m_learning = false;
 	m_learn_left = 0;
 	for (u8 &c : m_fw_notes)
 		c = 0;
+	for (u8 &v : m_fw_meter)
+		v = 0;
+	for (u64 &v : m_fw_meter_at)
+		v = 0;
 	for (part_prog &p : m_prog_sel)
 		p = part_prog();
 	for (s8 &m : m_part_mode)
@@ -1273,6 +1280,7 @@ void mu2000::set_native_engine(int mode)
 	// 実機の firmware も内部レジスタ 4 の bit14 で同じものを見ている（0x12B81C）
 	m_ndrv.set_peg_peek([this](int chan) { return m_swpm.peg_reached(chan); });
 	m_ndrv.set_slot_peek([this](int chan) { return m_swpm.slot_active(chan); });
+	m_ndrv.set_slot_held([this](int chan) { return !m_swpm.slot_freed(chan); });
 }
 
 // 音色の 1 音目を firmware に鳴らさせて、スロットに書かれた値を写し取る
@@ -1840,16 +1848,25 @@ void mu2000::traj_finish_one(int i)
 //   * 上の行の同じ桁は、棒が 8 点を越えたぶん。両方 0 なら空白
 //   * 字のコードは 0x7f + 9a + b（a・b は 0-8 点。mu2000::fill_missing_glyphs）
 //   * 点の数は **目盛り / 8 + 1**（鳴っていないパートも 1 点出る）
+// **いま選んでいるパート**（ワーク RAM 0x42158F。0 から数える。6.190）。
+// 演奏画面の係（0x0D136C）がここを読んで口と番号を作る
+static constexpr u32 SEL_PART = 0x2158f;
+
 void mu2000::draw_meter()
 {
-	const u8 *cur = m_lcd.ddram();
+	// **firmware が思っている画面を見る**（6.188）。ここの 16 マスは
+	// native の持ち物にしてあるので、表示そのものを見ても
+	// こちらが前に置いた字しか無く、画面が替わったのに気づけない
+	const u8 *cur = m_lcd.fw_ddram();
 	// **触ってよいのは次の 2 つだけ**:
 	//   * こちらが前に書いた値がそのまま残っているマス
 	//   * firmware が置いた「鳴っていない」形（下 0x89 / 上 空白）
 	// どれか 1 つでも当てはまらなければ、**1 マスも触らない**。
 	// 別の画面では同じ桁に文字が出ていて、消すと表示が壊れる
-	if (cur[0x40] != 0x89)
+	if (cur[0x40] != 0x89) {
+		m_lcd.clear_owned();
 		return;
+	}
 	// **上と下は別々に見る**。演奏画面には「上の行が棒の続きではなく数字」の
 	// 形もあって（パネルで `play` を押したあとの画面）、まとめて見ると
 	// 下の棒まで描けなくなる
@@ -1861,11 +1878,30 @@ void mu2000::draw_meter()
 		// あって、`0x89`（鳴っていない形）だけを待っていると二度と描けない
 		if (lo != m_meter_cell[c - 1] && (lo < 0x7f || lo > 0xd0))
 			lo_ok = false;
-		if (hi != m_meter_cell[8 + c - 1] && hi != 0x20)
+		// 上の行は**下が満杯のときだけ棒の続き**（6.188）。
+		// 写し取りのあいだは firmware も同じマスへ自分の
+		// 続きを書くので、「空白かこちらの字」だけを待って
+		// いると手放してしまう。といって棒の字なら何でも、と
+		// すると**MUTE の画面**を壊す：あそこは上の行 16 マスを
+		// 別の意味で使っていて、上が `89`（左右 1 点）なのに
+		// 下も `89`（1 点）だった。
+		//
+		// 棒としては**下が 8 点になって初めて上が 1 点以上**に
+		// なるので、その辻つまが合わなければ別の画面だと分かる
+		bool hi_mine = hi == m_meter_cell[8 + c - 1] || hi == 0x20;
+		if (!hi_mine && hi >= 0x7f && hi <= 0xd0
+		    && lo >= 0x7f && lo <= 0xd0) {
+			const int la = (lo - 0x7f) / 9, lb = (lo - 0x7f) % 9;
+			const int ta = (hi - 0x7f) / 9, tb = (hi - 0x7f) % 9;
+			hi_mine = (ta == 0 || la == 8) && (tb == 0 || lb == 8);
+		}
+		if (!hi_mine)
 			hi_ok = false;
 	}
-	if (!lo_ok)
+	if (!lo_ok) {
+		m_lcd.clear_owned();
 		return;
+	}
 	for (int c = 1; c <= 8; c++) {
 		const int l = int(m_meter_smooth[(c - 1) * 2]) / 8 + 1;
 		const int r = int(m_meter_smooth[(c - 1) * 2 + 1]) / 8 + 1;
@@ -1874,11 +1910,163 @@ void mu2000::draw_meter()
 		const int rt = r > 8 ? (r - 8 > 8 ? 8 : r - 8) : 0;
 		const u8 lo = u8(0x7f + lb * 9 + rb);
 		const u8 hi = (lt || rt) ? u8(0x7f + lt * 9 + rt) : u8(0x20);
+		// **そのマスをこちらの持ち物にする**（6.188）。
+		// 写し取りのあいだなど firmware も音を持っているときは、
+		// 向こうも演奏画面の係を回して同じ 16 マスへ自分の棒を
+		// 書く。二人で交互に書くので、画面が 25ms ごとにちらついていた
+		m_lcd.set_owned(u32(0x40 + c), true);
 		m_lcd.poke_ddram(u32(0x40 + c), lo);
 		m_meter_cell[c - 1] = lo;
 		if (hi_ok) {
+			m_lcd.set_owned(u32(c), true);
 			m_lcd.poke_ddram(u32(c), hi);
 			m_meter_cell[8 + c - 1] = hi;
+		} else
+			m_lcd.set_owned(u32(c), false);
+	}
+}
+
+// **演奏画面の音色まわりを native が描く**（doc/native-engine.md の 6.190）。
+//
+// native の口では firmware を 100ms につき 5ms しか回さないので、
+// 音色を替えてから画面が追いつくまで**最大 100ms 遅れる**。
+// ここで描くのは、記録から直に出せる 3 つだけ:
+//
+//   行 0 の 9-16   音色名の頭 8 文字
+//   行 1 の 14-16  プログラム番号 + 1 の 3 桁
+//   外字 0-2・4-6  楽器の絵（16 行 × 16 ビットを 5 ビットずつ）
+//
+// バンクの 3 桁とパート番号はまだ firmware に任せる（MSB が 0 でない
+// ときの出方がまだ測れていない。6.190 の「まだ埋まっていないもの」）。
+//
+// **演奏画面だと分かるときだけ**書く。見分けは firmware が思っている
+// 画面（6.188 の `fw_ddram`）の、こちらが持っていないマスでする。
+void mu2000::release_voice_fields()
+{
+	if (!m_vf_owned)
+		return;
+	m_vf_owned = false;
+	m_vf_part = -1;
+	for (u32 c = 9; c <= 16; c++)
+		m_lcd.set_owned(c, false);
+	for (u32 c = 10; c <= 16; c++)
+		m_lcd.set_owned(0x40 + c, false);
+	m_lcd.clear_cg_owned();
+}
+
+void mu2000::draw_voice_fields()
+{
+	const u8 *fw = m_lcd.fw_ddram();
+
+	// **演奏画面の印**。帯の字と口の字がそろっていること。
+	// 1 つでも違えば別の画面なので、手を出さない
+	if (fw[19] != 0xc6 || fw[0x40 + 9] != 0x11
+	    || (fw[0x40 + 13] != 0x10 && fw[0x40 + 13] != 0x15)
+	    || fw[0x40 + 17] < 'A' || fw[0x40 + 17] > 'D') {
+		release_voice_fields();
+		return;
+	}
+	if (m_ram.size() <= SEL_PART) {
+		release_voice_fields();
+		return;
+	}
+	const int part = int(m_ram[SEL_PART]);
+	if (part < 0 || part >= 64) {
+		release_voice_fields();
+		return;
+	}
+	const xg::voice_rom vr(m_prog);
+	if (!vr.ok()) {
+		release_voice_fields();
+		return;
+	}
+	const part_prog &p = m_prog_sel[part];
+	const int mode = m_ram.size() > xg::ram::VOICE_MODE ? m_ram[xg::ram::VOICE_MODE] : 1;
+	const int set  = m_ram.size() > xg::ram::VOICE_SET  ? m_ram[xg::ram::VOICE_SET]  : 1;
+	const bool drum = (p.msb == 127 || p.msb == 126);
+	const u32 rec = drum ? 0 : vr.lookup(mode, set, p.msb, p.lsb, p.prog);
+	const std::string nm = vr.screen_name(rec, p.msb, p.prog);
+	u16 ico[16];
+	if (nm.size() != 8 || !vr.icon_of(rec, p.msb, p.prog, ico)) {
+		release_voice_fields();
+		return;
+	}
+	// 番号は 1 から数える 3 桁
+	const int pn = (int(p.prog) & 0x7f) + 1;
+	const u8 dg[3] = { u8('0' + pn / 100), u8('0' + (pn / 10) % 10),
+	                   u8('0' + pn % 10) };
+
+	// **バンクの 3 桁**（6.202）。MSB 64 は「SFX」、ドラム（126・127）は
+	// MSB、それ以外は **LSB** の 3 桁（MSB 1-32 でも LSB のまま）
+	u8 bk[3];
+	if (p.msb == 64) {
+		bk[0] = 'S'; bk[1] = 'F'; bk[2] = 'X';
+	} else {
+		const int bn = p.msb >= 126 ? int(p.msb) : int(p.lsb);
+		bk[0] = u8('0' + bn / 100);
+		bk[1] = u8('0' + (bn / 10) % 10);
+		bk[2] = u8('0' + bn % 10);
+	}
+
+	if (!m_vf_owned || m_vf_part != part) {
+		m_vf_owned = true;
+		m_vf_part = part;
+		for (int i = 0; i < 8; i++)
+			m_vf_name[i] = 0;
+		for (int i = 0; i < 3; i++)
+			m_vf_prog[i] = 0;
+		for (int i = 0; i < 3; i++)
+			m_vf_bank[i] = 0;
+		for (int y = 0; y < 16; y++)
+			m_vf_icon[y] = 0xffff;
+	}
+	// **調べ用**（`SMU2000_VF_DBG=1`）。音色が替わった時刻を出す。
+	// firmware に任せていたときの遅れと見比べるため
+	if (std::getenv("SMU2000_VF_DBG")) {
+		static int last = -1;
+		if (last != int(p.prog)) {
+			last = int(p.prog);
+			std::fprintf(stderr, "VF %.3f part=%d prog=%d %.8s\n",
+			             double(m_ne_clock) / 44100.0, part,
+			             int(p.prog), nm.c_str());
+		}
+	}
+	for (int i = 0; i < 8; i++) {
+		const u8 v = u8(nm[size_t(i)]);
+		m_lcd.set_owned(u32(9 + i), true);
+		if (m_vf_name[i] != v) {
+			m_vf_name[i] = v;
+			m_lcd.poke_ddram(u32(9 + i), v);
+		}
+	}
+	for (int i = 0; i < 3; i++) {
+		m_lcd.set_owned(u32(0x40 + 14 + i), true);
+		if (m_vf_prog[i] != dg[i]) {
+			m_vf_prog[i] = dg[i];
+			m_lcd.poke_ddram(u32(0x40 + 14 + i), dg[i]);
+		}
+	}
+	for (int i = 0; i < 3; i++) {
+		m_lcd.set_owned(u32(0x40 + 10 + i), true);
+		if (m_vf_bank[i] != bk[i]) {
+			m_vf_bank[i] = bk[i];
+			m_lcd.poke_ddram(u32(0x40 + 10 + i), bk[i]);
+		}
+	}
+	// **絵は 16 行 × 16 ビットを左から 5 ビットずつ**（6.190）。
+	// 外字 0・1・2 が上半分（行 0-7）、4・5・6 が下半分（行 8-15）。
+	// いちばん右の 1 列（bit0）は出さない
+	for (int y = 0; y < 16; y++) {
+		if (m_vf_icon[y] == ico[y]) {
+			for (int c = 0; c < 3; c++)
+				m_lcd.set_cg_owned(u32((y < 8 ? c : 4 + c) * 8 + (y & 7)), true);
+			continue;
+		}
+		m_vf_icon[y] = ico[y];
+		for (int c = 0; c < 3; c++) {
+			const u32 at = u32((y < 8 ? c : 4 + c) * 8 + (y & 7));
+			m_lcd.set_cg_owned(at, true);
+			m_lcd.poke_cgram(at, u8((ico[y] >> (11 - c * 5)) & 0x1f));
 		}
 	}
 }
@@ -1909,6 +2097,16 @@ void mu2000::sync_prog()
 		sel.msb = msb; sel.lsb = lsb; sel.prog = prog;
 		native_select_voice(p);
 	}
+}
+
+bool mu2000::voice_lsb_ok(int msb, int lsb) const
+{
+	if (!m_prog)
+		return true;
+	const xg::voice_rom vr(m_prog);
+	const int mode = m_ram.size() > xg::ram::VOICE_MODE ? m_ram[xg::ram::VOICE_MODE] : 1;
+	const int set  = m_ram.size() > xg::ram::VOICE_SET  ? m_ram[xg::ram::VOICE_SET]  : 1;
+	return vr.lsb_ok(mode, set, msb, lsb);
 }
 
 void mu2000::native_select_voice(int part)
@@ -1960,6 +2158,9 @@ void mu2000::native_sysex(u64 fire)
 		m_nq.push_back({ fire, 6, 0, 0, 0 });
 		return;
 	}
+	// **ドラムのセットアップは SysEx（3n rr pp）では渡さない**（6.180）。
+	// 実機は SysEx で書いても立ち上がりを計算し直さない。
+	// NRPN 16 で書いたときだけ変わる（native_driver の control で見ている）
 	if (hh != 0x08 || mm >= 32)
 		return;
 	// **1 回の SysEx で続けて何バイトも書ける**（ll から順に並ぶ）
@@ -1970,7 +2171,10 @@ void mu2000::native_sysex(u64 fire)
 			// バンクと音色。音色の指定と同じ行列に乗せる
 			m_nq.push_back({ fire, 4, u8(mm),
 			                 u8(addr == 0x01 ? 0 : addr == 0x02 ? 1 : 2), dd });
-		} else if (addr <= 0x28) {
+		// **つまみの割り当て（0x4D-0x66）も渡す**（6.195）。
+		// これまでは 0x28 までしか渡していなくて、native はワーク RAM から
+		// 読むしか無かったので、**割り当てを戻しても 100ms 気づかなかった**
+		} else if (addr <= 0x28 || (addr >= 0x4d && addr <= 0x66)) {
 			m_nq.push_back({ fire, 5, u8(mm), addr, dd });
 		}
 	}
@@ -1998,9 +2202,17 @@ void mu2000::native_pump()
 		// 送りの値が 7 音ぶん違っていた（doc/native-engine.md の 6.53）
 		case 4:
 			if (e.part >= 0 && e.part < 64) {
-				if (e.d0 == 0) m_prog_sel[e.part].msb = e.d1;
-				else if (e.d0 == 1) m_prog_sel[e.part].lsb = e.d1;
-				else m_prog_sel[e.part].prog = e.d1;
+				if (e.d0 == 0) {
+					m_prog_sel[e.part].msb = e.d1;
+				} else if (e.d0 == 1) {
+					// **受け付けない LSB は無視**（6.202）。実機は前の
+					// バンクのまま鳴らすのに、こちらは LSB 0 の音色へ
+					// 落ちていた（`banklsb` の 7 打目）
+					if (voice_lsb_ok(m_prog_sel[e.part].msb, e.d1))
+						m_prog_sel[e.part].lsb = e.d1;
+				} else {
+					m_prog_sel[e.part].prog = e.d1;
+				}
 				native_select_voice(e.part);
 			}
 			break;
@@ -2125,8 +2337,12 @@ bool mu2000::native_midi(u8 byte, int port)
 					heavy = true;               // インサーションの種類
 			}
 			if (heavy) {
-				// 実測の 212ms に余裕を見て 300ms（前は 500ms だった）
-				m_fw_hold = std::max(m_fw_hold, u32(44100 * 3 / 10));
+				// 実測の 212ms に余裕を見て 300ms（前は 500ms だった）。
+				// **ここを弄ると全体の時間がずれる**（6.211）。
+				// 400ms にすると fxchange と drums は良くなるが、
+				// bend・pegcc・meter が悪くなる。当たり外れなので動かさない。
+				// `SMU2000_FX_HOLD`（ミリ秒）で振れる
+				m_fw_hold = std::max(m_fw_hold, fx_hold());
 				m_fw_why = 1;
 			}
 			// ここでは**止めない**。F7 まで受け取って、パートの設定なら
@@ -2162,6 +2378,24 @@ bool mu2000::native_midi(u8 byte, int port)
 		midi_in(byte, port);
 		m_native_engine = save2;
 		return true;
+	}
+	// **アフタータッチの値もこちらで覚える**（6.191）。
+	// フィルタ側 LFO の深さに乗るので、**鳴っている音に効かせる**
+	// 必要がある。バイトは今までどおり firmware へも流す
+	if (kind == 0xa0 || kind == 0xd0) {
+		const int part4 = m_ndrv.rcv_part(port, n.status & 0x0f);
+		if (kind == 0xd0) {
+			if (part4 >= 0)
+				m_ndrv.chan_press(part4, byte & 0x7f);
+		} else if (n.have == 0) {
+			n.d0 = byte;
+			n.have = 1;
+		} else {
+			n.have = 0;
+			if (part4 >= 0)
+				m_ndrv.poly_at(part4, n.d0 & 0x7f, byte & 0x7f);
+		}
+		return false;
 	}
 	if (kind != 0x80 && kind != 0x90 && kind != 0xb0 && kind != 0xe0)
 		return false;
@@ -2290,6 +2524,11 @@ bool mu2000::native_midi(u8 byte, int port)
 		m_fw_note_total++;
 	}
 	m_fw_note_until = m_ne_clock + FW_NOTE_RUN;
+	// **液晶のメーター用の目盛り**（6.188）
+	if (part < 16) {
+		m_fw_meter[part] = u8(m_ndrv.part_meter(part, vel));
+		m_fw_meter_at[part] = m_ne_clock;
+	}
 	replay_note(n.status, u8(note), u8(vel), port);
 	return true;
 }
@@ -2540,12 +2779,43 @@ void mu2000::run_sample(s32 &left, s32 &right)
 		if (m_ne_clock >= m_meter_next) {
 			m_meter_next = m_ne_clock + 44100 / 40;
 			m_ndrv.fill_meter(m_meter_lv, 16);
+			// **firmware が鳴らしている音も混ぜる**（6.188）。写し取りの
+			// 1 音目は firmware が持つので native のスロットには無く、
+			// 混ぜないと**音が鳴っているのにメーターだけ落ちる**。
+			//
+			// 実機の演奏画面が読む 0x402DD8 は使えない。native の口では
+			// その係が回らないため、**読み出して消す人がいなくて値が張り付く**
+			//（実測: 音が終わっても 90 b2 8b ce のままだった）。
+			// 消すのはこわい（ここへ書くと音そのものが壊れる。6.148）ので、
+			// **渡した打鍵からこちらで作る**
+			for (int p = 0; p < 16; p++)
+				if (m_fw_notes[p] && m_fw_meter[p] > m_meter_lv[p]
+				    && m_ne_clock - m_fw_meter_at[p] < FW_METER_HOLD)
+					m_meter_lv[p] = m_fw_meter[p];
 			for (int p = 0; p < 16; p++) {
 				const int now = int(m_meter_smooth[p]);
 				const int tgt = int(m_meter_lv[p]);
 				m_meter_smooth[p] = u8(now + (tgt - now) / 2);
 			}
+			// **調べ用**（`SMU2000_METER_DBG=1`）。draw_meter の前の
+			// 液晶の中身と、目盛り（生 / なまし）を出す
+			if (std::getenv("SMU2000_METER_DBG")) {
+				const u8 *dd = m_lcd.ddram();
+				std::fprintf(stderr, "MTR %.3f",
+				             double(m_ne_clock) / 44100.0);
+				for (int c = 0; c <= 8; c++)
+					std::fprintf(stderr, " %02x", dd[0x40 + c]);
+				std::fprintf(stderr, " |");
+				for (int c = 0; c <= 8; c++)
+					std::fprintf(stderr, " %02x", dd[c]);
+				std::fprintf(stderr, " |");
+				for (int p = 0; p < 16; p++)
+					std::fprintf(stderr, " %d/%d", int(m_meter_lv[p]),
+					             int(m_meter_smooth[p]));
+				std::fprintf(stderr, "\n");
+			}
 			draw_meter();
+			draw_voice_fields();
 		}
 		if (m_fw_hold) {
 			if (--m_fw_hold == 0) {
@@ -2670,7 +2940,7 @@ namespace {
 
 // 保存の形。中身の並びを変えたら上げる
 constexpr u32 STATE_MAGIC   = 0x554d3253;   // "S2MU"
-constexpr u32 STATE_VERSION = 10;  // 2: MIDI の入口が A/B の 2 口になった / 3: SWP30 のピッチ EG / 4: サンプリングの録音の位置 / 5: SmartMedia の命令の途中 / 6: MEG の印と 2 つ目の idx / 7: USB の口（C・D）の受け取り途中 / 8: 2 つ目の A/D 変換器（AN4 = HOST SELECT） / 9: SWP30 の書き込みの待ち / 10: USB のコマンド（M37640 からの知らせ）
+constexpr u32 STATE_VERSION = 12;  // 2: MIDI の入口が A/B の 2 口になった / 3: SWP30 のピッチ EG / 4: サンプリングの録音の位置 / 5: SmartMedia の命令の途中 / 6: MEG の印と 2 つ目の idx / 7: USB の口（C・D）の受け取り途中 / 8: 2 つ目の A/D 変換器（AN4 = HOST SELECT） / 9: SWP30 の書き込みの待ち / 10: USB のコマンド（M37640 からの知らせ） / 11: 液晶の「native の持ち物」（6.188） / 12: 外字の「native の持ち物」（6.190）
 constexpr u32 STATE_VERSION_OLDEST = 2;
 
 } // namespace

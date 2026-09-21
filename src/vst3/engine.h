@@ -18,6 +18,7 @@
 #include "ui/resampler.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstddef>
 #include <functional>
@@ -106,6 +107,19 @@ public:
 
 	// パネルの画面と触れ合う口。ボタンは画面から、LCD の写しはこちらから
 	ui::bridge &panel() { return m_bridge; }
+
+	// **firmware を走らせない口**（doc/native-engine.md）の入切。
+	// gui.exe の F4 と同じで、**切り替えは音声の糸が fill() の頭で行う**。
+	// 入れ直すと写し取りは白紙に戻るので、その音色の 1 音目はまた firmware が鳴らす
+	void request_native_engine(int on)
+	{ m_want_native.store(on, std::memory_order_relaxed); }
+	int native_engine() const
+	{ return m_native_engine.load(std::memory_order_relaxed); }
+
+	// **重さを一覧に出す**。fill() 1 回にかかった時間の、
+	// その区間の長さに対する割合（100% を越えると音が途切れる）。
+	// 毎回振れるので、大きい側へはすぐ、小さい側へはゆっくり寄せる
+	void publish_load(std::chrono::steady_clock::time_point t0, int n, double rate);
 
 	// 記録（%LOCALAPPDATA%\S-MU2000\log.txt）へ 1 行書く
 	void log_line(const char *text);
@@ -218,6 +232,10 @@ private:
 	void push_input(const float *in_l, const float *in_r, int n);
 
 	ui::bridge m_bridge;
+	// 口の入切（-1 は「頑みが無い」）と、いまの口
+	std::atomic<int> m_want_native{-1};
+	std::atomic<int> m_native_engine{0};
+	double m_load = 0.0;           // 一覧に出す重さ（%）
 	ui::driver m_drv;
 
 	// MIDI OUT mirror. pump_out() inside fill() drains the machine queue

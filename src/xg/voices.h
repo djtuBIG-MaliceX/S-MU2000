@@ -65,6 +65,29 @@ public:
 	// バンクとプログラムから音色の記録を引く。firmware の 0x134AA8 と同じ手順。
 	// mode は RAM の 0x4226BC、set は 0x4226DE（xg::ram::VOICE_MODE / VOICE_SET）。
 	// 引けなければ 0（ドラム、MSB 16 の特別な組など）
+	// **その LSB を実機が受け付けるか**（6.202）。組の表で
+	// **LSB 0 と同じ組**になる LSB（0 以外）は丸ごと無視され、
+	// 前のバンクのままになる（番号はそのまま効く）
+	bool lsb_ok(int mode, int set, int msb, int lsb) const
+	{
+		if (!m_ok || mode != 1)
+			return true;
+		msb &= 0x7f; lsb &= 0x7f;
+		if (lsb == 0)
+			return true;
+		const u8 kind = byte(GROUP_XG + u32(msb));
+		u32 tab;
+		if (kind == 0)
+			tab = set == 0 ? GROUP_LSB0 : GROUP_LSB1;
+		else if (kind == 77)
+			tab = GROUP_LSB77;
+		else if (kind == 0xc9)
+			tab = set == 0 ? GROUP_LSBC9_0 : GROUP_LSBC9_1;
+		else
+			return true;              // LSB を見ない組
+		return byte(tab + u32(lsb)) != byte(tab);
+	}
+
 	u32 lookup(int mode, int set, int msb, int lsb, int prog) const
 	{
 		if (!m_ok)
@@ -137,6 +160,54 @@ public:
 	}
 
 	// 楽器の絵。16 行、各行 16 ビット（上の桁が左）。無ければ false
+	// **演奏画面に出る 8 文字**（6.190）。記録の名前（10 文字）の
+	// 頭 8 をそのまま。ドラム（MSB 126・127）はキットの名前 8 文字。
+	// 引けなければ空（呼ぶ側が firmware に任せる）
+	std::string screen_name(u32 rec, int msb, int prog) const
+	{
+		if (!m_ok)
+			return {};
+		if (msb == 127 || msb == 126) {
+			const u32 map = msb == 127 ? KIT_MAP : SFX_MAP;
+			const u32 names = msb == 127 ? KIT_NAMES : SFX_NAMES;
+			const u8 idx = (*m_rom)[map + u32(prog & 0x7f)];
+			return std::string(
+			    reinterpret_cast<const char *>(at(names + u32(idx) * 12)), 8);
+		}
+		if (rec < VOICES || rec + 16 > VOICES_END)
+			return {};
+		return std::string(reinterpret_cast<const char *>(at(rec + 2)), 8);
+	}
+
+	// **楽器の絵**を記録から直に引く（6.190）。
+	// `icon` はパートの塊から記録を読み直すが、native の口では
+	// その塊を firmware が書くまで遅れるので、こちらの記録を使う
+	bool icon_of(u32 rec, int msb, int prog, u16 rows[16]) const
+	{
+		if (!m_ok)
+			return false;
+		if (msb == 127 || msb == 126) {
+			if (word(DRUM_ICON) != 0x000e)
+				return false;
+			for (int y = 0; y < 16; y++)
+				rows[y] = word(DRUM_ICON + u32(y) * 2) & 0xfffe;
+			return true;
+		}
+		if (rec < VOICES || rec + 16 > VOICES_END)
+			return false;
+		int index;
+		if (!std::memcmp(at(rec + 2), "Silence", 7))
+			index = 56;
+		else if (msb == 64)
+			index = 57;
+		else
+			index = (*m_rom)[ICON_OF_PROGRAM + u32(prog & 0x7f)];
+		const u32 p = ICONS + u32(index) * 32;
+		for (int y = 0; y < 16; y++)
+			rows[y] = word(p + u32(y) * 2);
+		return true;
+	}
+
 	bool icon(const u8 *part_ram, int msb, int prog, u16 rows[16]) const
 	{
 		if (!m_ok)

@@ -55,6 +55,30 @@ public:
 	// 通らないので、表示の状態（カーソルなど）は何も変えない
 	void poke_ddram(u32 i, u8 v) { if (i < 0x80) m_ddram[i] = v; }
 
+	// **そのマスを native の持ち物にする**（doc/native-engine.md の 6.188）。
+	// 持ち物のあいだ、firmware が書いても**表示は変わらない**。書いた値は
+	// 「firmware の思っている画面」(`fw_ddram`) にだけ入る。
+	//
+	// 手放すときに、その控えを表示へ写し戻す。firmware は自分の持っている
+	// 画面の控えと**違うマスしか送らない**ので、写し戻さないと、こちらが
+	// 置いた字が二度と消えない
+	void set_owned(u32 i, bool on);
+	void clear_owned();
+	bool owned(u32 i) const
+	{ return i < 0x80 && ((m_owned[i >> 6] >> (i & 63)) & 1); }
+
+	// firmware が「いま画面にはこれが出ている」と思っている中身。
+	// 持ち物にしていないマスでは DDRAM と同じ
+	const u8 *fw_ddram() const { return m_fw; }
+
+	// **外字（CGRAM）も同じように取る**（6.190）。音色の絵は
+	// native が先に書くので、取らないと firmware の古い絵と交互になる
+	void poke_cgram(u32 i, u8 v) { if (i < 0x40) m_cgram[i] = v; }
+	void set_cg_owned(u32 i, bool on);
+	void clear_cg_owned();
+	bool cg_owned(u32 i) const
+	{ return i < 0x40 && ((m_cg_owned >> i) & 1); }
+
 	// 文字の絵。HD44780U B04 の CGROM 4KB（1 文字 16 バイト、下位 5bit が絵）
 	void set_cgrom(const u8 *rom, size_t size)
 	{ m_cgrom = (rom && size >= 0x1000) ? rom : nullptr; }
@@ -87,6 +111,10 @@ private:
 	const u8 *m_cgrom = nullptr;
 	u8  m_render_buf[RENDER_SIZE] = {};
 	u8  m_ddram[0x80] = {};
+	u8  m_fw[0x80] = {};        // firmware の思っている画面（6.188）
+	u64 m_owned[2] = {};        // native の持ち物のマス
+	u8  m_cg_fw[0x40] = {};     // firmware の思っている外字（6.190）
+	u64 m_cg_owned = 0;
 	u8  m_cgram[0x40] = {};
 	int m_ac = 0;
 	int m_active_ram = DDRAM;

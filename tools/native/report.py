@@ -44,6 +44,9 @@ def rms(v):
     return math.sqrt(sum(float(x) * x for x in v) / max(1, len(v)))
 
 
+CAL = False      # True なら写し取りをする既定の道で測る（--cal）
+
+
 def render(roms, midi, seconds, tag, native):
     wav = WORK / ("%s.wav" % tag)
     trc = WORK / ("%s.txt" % tag)
@@ -53,12 +56,22 @@ def render(roms, midi, seconds, tag, native):
     env["SMU2000_NO_VOICECACHE"] = "1"
     if native:
         cmd.append("--native-engine")
-        env["SMU2000_NOCAL"] = "1"
+        # **写し取りをする道でも測れるようにする**（6.209）。既定の
+        # `SMU2000_NOCAL=1` は式だけでレジスタを組むので、写し取りの
+        # 最中にしか出ない差（10ms 格子のずれなど）が見えない
+        if CAL:
+            env.pop("SMU2000_NOCAL", None)
+        else:
+            env["SMU2000_NOCAL"] = "1"
     else:
         env.pop("SMU2000_NOCAL", None)
     r = subprocess.run(cmd, env=env, stdout=subprocess.DEVNULL,
                        stderr=subprocess.DEVNULL)
     return (wav, trc) if r.returncode == 0 and wav.exists() else (None, None)
+
+
+LAG = 3          # 窓ごとに合わせる幅（サンプル）
+WHERE = 0        # 0 でなければ、悪い窓をこの数だけ出す
 
 
 def resid(wa, wb):
@@ -77,13 +90,14 @@ def resid(wa, wb):
     # そこまで真似るのは筋が悪い
     step = int(0.2 * sr) * ch
     num = den = 0.0
-    for s0 in range(0, len(x) - step - 3 * ch, step):
+    worst = []
+    for s0 in range(LAG * ch, len(x) - step - LAG * ch, step):
         xa = x[s0:s0 + step]
         r1 = rms(xa)
         if r1 < 5.0:
             continue
         bv = None
-        for lag in range(-3, 4):
+        for lag in range(-LAG, LAG + 1):
             ya = y[s0 + lag * ch: s0 + lag * ch + step]
             if len(ya) != len(xa):
                 continue
@@ -93,7 +107,13 @@ def resid(wa, wb):
         if bv is not None:
             num += bv * bv * len(xa)
             den += r1 * r1 * len(xa)
+            worst.append((bv * bv * len(xa), s0 / float(ch) / sr + BOOT,
+                          100.0 * bv / r1))
     aligned = math.sqrt(num / den) if den > 0 else 0.0
+    if WHERE:
+        worst.sort(reverse=True)
+        print("   悪い窓: " + "  ".join(
+            "%.1f秒 %.0f%%" % (t, pc) for _, t, pc in worst[:WHERE]))
     return 100.0 * d / r0, 100.0 * aligned
 
 
@@ -102,9 +122,25 @@ def regs(tf, tn):
     bad = collections.Counter()
     ncmp = 0
     lags = collections.Counter()
-    for i in range(min(len(fw), len(nv))):
-        at_f, af = fw[i]
-        at_n, an = nv[i]
+    # **時刻で結び付ける**（6.206）。番号順だと、片方だけ
+    # レジスタを 1 本も書かない押鍵があるとそこから先が
+    # 全部ずれる（regdiff.py と同じ）
+    TOL = 300                      # これ以上離れたものは別の打と見る
+    pairs = []
+    fi = ni = 0
+    while fi < len(fw) and ni < len(nv):
+        d = nv[ni][0] - fw[fi][0]
+        if abs(d) <= TOL:
+            pairs.append((fi, ni))
+            fi += 1
+            ni += 1
+        elif d < 0:
+            ni += 1                # native の方が早い
+        else:
+            fi += 1                # 実機の方が早い
+    for fi, ni in pairs:
+        at_f, af = fw[fi]
+        at_n, an = nv[ni]
         lags[at_n - at_f] += 1
         fs, ns = sorted(af), sorted(an)
 
@@ -129,14 +165,22 @@ def regs(tf, tn):
                 if r in e and d[r] != e[r]:
                     bad[r] += 1
             ncmp += 1
-    return bad, ncmp, lags, len(fw), len(nv)
+    return bad, ncmp, lags, len(fw), len(pairs)
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("names", nargs="*")
     ap.add_argument("--roms")
+    ap.add_argument("--lag", type=int, default=3,
+                    help="窓ごとに合わせる幅（サンプル）")
+    ap.add_argument("--where", type=int, default=0,
+                    help="悪い窓を N つ出す")
+    ap.add_argument("--cal", action="store_true",
+                    help="写し取りをする既定の道で測る（6.209）")
     a = ap.parse_args()
+    global LAG, WHERE, CAL
+    LAG, WHERE, CAL = a.lag, a.where, a.cal
 
     roms = regdiff.find_roms(a.roms)
     if not roms:

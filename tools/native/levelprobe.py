@@ -56,12 +56,14 @@ def vlq(n):
     return bytes(reversed(out))
 
 
-def make_mid(path, progs, note, vel, step):
+def make_mid(path, progs, note, vel, step, msb=0, lsb=0):
     tick = 480
     ev = [(0, bytes([0xff, 0x51, 0x03]) + (500000).to_bytes(3, 'big'))]
     t = tick
     for p in progs:
         ev.append((t, bytes([0xb0, 0x78, 0x00])))          # 声を空ける
+        ev.append((t + 4, bytes([0xb0, 0x00, msb & 0x7f])))
+        ev.append((t + 6, bytes([0xb0, 0x20, lsb & 0x7f])))
         ev.append((t + 8, bytes([0xc0, p & 0x7f])))
         ev.append((t + step // 4, bytes([0x90, note, vel])))
         ev.append((t + step - step // 5, bytes([0x80, note, 0])))
@@ -84,6 +86,8 @@ def main():
     ap.add_argument("--vel", type=int, default=100)
     ap.add_argument("--lo", type=int, default=0)
     ap.add_argument("--hi", type=int, default=127)
+    ap.add_argument("--msb", type=int, default=0)
+    ap.add_argument("--lsb", type=int, default=0)
     a = ap.parse_args()
 
     roms = find_roms(a.roms)
@@ -96,7 +100,7 @@ def main():
     progs = list(range(a.lo, a.hi + 1))
     step = 240                            # 0.25 秒
     mid = WORK / "lv.mid"
-    tick0, tend = make_mid(mid, progs, a.note, a.vel, step)
+    tick0, tend = make_mid(mid, progs, a.note, a.vel, step, a.msb, a.lsb)
     sec = lambda ticks: ticks / float(480) * 0.5
     env = dict(os.environ)
     env["SMU2000_NO_VOICECACHE"] = "1"

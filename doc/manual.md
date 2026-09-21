@@ -148,7 +148,7 @@ MU2000 の設定（ユーティリティ、マスターボリュームなど）�
 | `,` `.` | SELECT ◀ ▶ |
 | `Enter` `BackSpace` | ENTER・EXIT |
 | `Z` `X` | AUDITION・SELECT |
-| `F2` `F3` | エディタの窓・一覧の窓 |
+| `F2` `F3` | エディタの窓・一覧の窓（窓の最上段のボタンでも開ける） |
 
 SmartMedia のカードは PC のファイル（`.img`）で、`tools/smcard.py` で WAV などを出し入れできる。
 **録った音を MIDI の音色として鳴らすまでの手順は [sampling.md](sampling.md)**。

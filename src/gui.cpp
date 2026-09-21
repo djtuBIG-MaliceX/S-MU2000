@@ -39,6 +39,7 @@
 #include "ui/overview.h"
 #include "ui/master_editor.h"
 #include "ui/part_shapes.h"
+#include "ui/toolbar.h"
 #include "ui/pc_editor.h"
 #include "ui/pc_host.h"
 #include "ui/pc_window.h"
@@ -83,6 +84,9 @@ struct window_state {
 	ui::pc_window fx{ std::make_unique<ui::fx_editor>() };    // インサーションの設定（一覧でダブルクリック）
 	ui::pc_window shapes{ std::make_unique<ui::part_shapes>() };   // パートの音色（一覧の絵をダブルクリック）
 	ui::pc_window master{ std::make_unique<ui::master_editor>() }; // マスター（一覧のマスターの行をダブルクリック）
+	// **窓を開くボタンの帯**（窓の最上段。ui/toolbar.h）。
+	// F2・F3 でも開けるが、押せる入口も出しておく
+	ui::toolbar bar;
 	ui::bridge *br = nullptr;
 	engine     *eng = nullptr;
 	ui::audio_out *out = nullptr;
@@ -817,6 +821,8 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 			std::snprintf(status, sizeof(status), "起動中...");
 		g_win.panel.set_volume(g_win.br->gain());
 		g_win.panel.paint(g_win.mem_dc, s, pressed, status);
+		// 帯はパネルの**あと**に描く（パネルは全面を塗る）
+		g_win.bar.paint(g_win.mem_dc, w);
 
 		BitBlt(dc, 0, 0, w, h, g_win.mem_dc, 0, 0, SRCCOPY);
 		EndPaint(hwnd, &ps);
@@ -827,6 +833,20 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 		if (g_win.lcd_only)
 			return 0;
 		const int mx = GET_X_LPARAM(lp), my = GET_Y_LPARAM(lp);
+		// **帯が先**。ここはパネルでは無いので、機器には何も伝えない
+		{
+			const int id = g_win.bar.hit(mx, my);
+			if (id >= 0) {
+				g_win.bar.set_down(id);
+				ui::pc_window *w[5] = { &g_win.list, &g_win.pc, &g_win.shapes,
+				                        &g_win.fx, &g_win.master };
+				open_window(hwnd, *w[id]);
+				InvalidateRect(hwnd, nullptr, FALSE);
+				return 0;
+			}
+			if (my < ui::toolbar::HEIGHT)
+				return 0;            // 帯の隙間
+		}
 		// パネルの MIDI IN A のジャックを押したら、口を選ぶ品書きを出す
 		if (g_win.panel.on_midi_jack(mx, my)) {
 			POINT pt{ mx, my };
@@ -955,6 +975,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 	case WM_LBUTTONUP:
 		if (g_win.lcd_only)
 			return 0;
+		g_win.bar.set_down(-1);
 		g_win.panel.release(*g_win.br);
 		ReleaseCapture();
 		InvalidateRect(hwnd, nullptr, FALSE);
@@ -1030,6 +1051,14 @@ int shot(const std::string &path, int w, int h, ui::bridge &br, bool grid,
 	if (!lerr.empty())
 		std::fprintf(stderr, "%s", lerr.c_str());
 	p.set_lcd_only(lcd_only);
+	// 窓と同じ見た目にする（帯のぶん上を空ける）
+	ui::toolbar bar;
+	if (!lcd_only) {
+		bar.set_items({ { "一覧", 0 }, { "エディタ", 1 },
+		                { "音色", 2 }, { "エフェクト", 3 },
+		                { "マスター", 4 } });
+		p.set_top_inset(ui::toolbar::HEIGHT);
+	}
 	p.resize(w, h);
 	p.set_grid(grid);
 
@@ -1051,6 +1080,7 @@ int shot(const std::string &path, int w, int h, ui::bridge &br, bool grid,
 	br.read(s);
 	p.set_volume(0.8);
 	p.paint(dc, s, 0, "");
+	bar.paint(dc, w);
 	GdiFlush();
 
 	const bool ok = ui::write_png(path, static_cast<const u8 *>(bits), w, h, w * 4);
@@ -1317,6 +1347,13 @@ int main(int argc, char **argv)
 	g_win.eng  = &eng;
 	g_win.lcd_only = lcd_only;
 	g_win.panel.set_lcd_only(lcd_only);
+	// 帯は普通の窓だけ。LCD だけの窓には出さない
+	if (!lcd_only) {
+		g_win.bar.set_items({ { "一覧", 0 }, { "エディタ", 1 },
+		                      { "音色", 2 }, { "エフェクト", 3 },
+		                      { "マスター", 4 } });
+		g_win.panel.set_top_inset(ui::toolbar::HEIGHT);
+	}
 	// 窓を出すときだけ、覚えている設定で起動する（--shot は毎回同じ絵にしたい）
 	eng.use_nvram = !factory;
 	if (factory)

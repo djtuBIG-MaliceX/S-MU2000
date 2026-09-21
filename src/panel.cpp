@@ -209,6 +209,7 @@ int main(int argc, char **argv)
 	bool watch = false;
 	bool trace = false;
 	bool lcd_hex_on = false;
+	std::string ramfile;           // 終わったときのワーク RAM（調べ用）
 	double settle = 1.0;
 	bool usb = false;
 	int native = 0;
@@ -231,6 +232,9 @@ int main(int argc, char **argv)
 		else if (!std::strcmp(argv[i], "--trace")) trace = true;
 		// **液晶の中身を 16 進でも出す**（字形を起こすときのコードの棚卸し）
 		else if (!std::strcmp(argv[i], "--lcd-hex")) { trace = true; lcd_hex_on = true; }
+		// **終わったときのワーク RAM を書き出す**。ボタンを押す前と
+		// 後で取って差を見ると、firmware がどこに状態を持っているかが分かる
+		else if (!std::strcmp(argv[i], "--ram") && i + 1 < argc) ramfile = argv[++i];
 		else if (!std::strcmp(argv[i], "--usb")) usb = true;
 		// **native の口**（firmware を細く回す）でパネルを触ってみる。
 		// 段の番号は set_native_engine と同じ（doc/native-engine.md）
@@ -440,5 +444,13 @@ int main(int argc, char **argv)
 
 	std::printf("\n");
 	show_lcd(mu);
+	if (!ramfile.empty()) {
+		const std::vector<u8> &r = mu.nvram();
+		if (std::FILE *f = std::fopen(ramfile.c_str(), "wb")) {
+			std::fwrite(r.data(), 1, r.size(), f);
+			std::fclose(f);
+		}
+	}
+
 	return 0;
 }

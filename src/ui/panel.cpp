@@ -187,18 +187,22 @@ void panel::resize(int w, int h)
 {
 	m_w = std::max(w, 200);
 	m_h = std::max(h, 60);
+	// **帯のぶんを差し引いてから合わせる**。当たりも描きも
+	// `scale()` / `at()` を通るので、ここだけ直せば全部ついてくる
+	const int body_h = std::max(m_h - m_top_inset, 60);
 
 	if (m_lcd_only) {
 		const double margin = 5.0;
 		const double view_w = m_lay.lcd[2] + margin * 2;
 		const double view_h = m_lay.lcd[3] + margin * 2;
-		m_scale = std::min(double(m_w) / view_w, double(m_h) / view_h);
+		m_scale = std::min(double(m_w) / view_w, double(body_h) / view_h);
 		m_ox = int((m_w - view_w * m_scale) / 2 - (m_lay.lcd[0] - margin) * m_scale);
-		m_oy = int((m_h - view_h * m_scale) / 2 - (m_lay.lcd[1] - margin) * m_scale);
+		m_oy = m_top_inset
+		     + int((body_h - view_h * m_scale) / 2 - (m_lay.lcd[1] - margin) * m_scale);
 	} else {
-		m_scale = std::min(double(m_w) / LOGICAL_W, double(m_h) / LOGICAL_H);
+		m_scale = std::min(double(m_w) / LOGICAL_W, double(body_h) / LOGICAL_H);
 		m_ox = int((m_w - LOGICAL_W * m_scale) / 2);
-		m_oy = int((m_h - LOGICAL_H * m_scale) / 2);
+		m_oy = m_top_inset + int((body_h - LOGICAL_H * m_scale) / 2);
 	}
 
 	m_lcd    = scale(m_lay.lcd[0], m_lay.lcd[1], m_lay.lcd[2], m_lay.lcd[3]);

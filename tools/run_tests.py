@@ -257,10 +257,53 @@ def step_threading(rep, roms, first):
 # ここを下回ったら落ちる ＝ 形が崩れたら気づける。
 # dense がまだ低いのは分かっている不具合（写し取りの音だけ、実機の側が
 # 混み具合で遅れる。doc/native-engine.md の 6.90）
+# **1 秒窓の相関の最小の下限**（6.193）。上の SHAPE_MIN は中央なので、
+# 一部の窓だけ壊れていても通ってしまう。書いていない試験は 0.80。
+#
+# `assign` が低いのは**分かっている穴**。つまみの割り当て（6 つ組）の
+# うち、**LFO のフィルタ変調の深さだけ**しか native は鳴らせない。
+# 残り（音程・切る高さ・音量・LFO の音程/音量）は firmware に任せるので、
+# **割り当てを外したあとにツマミを動かすと、鳴っている音に掛からない**
+#（doc/native-engine.md の 6.193）
+SHAPE_LOW = {
+    # 分かっている穴。つまみの割り当て（6 つ組）のうち、音程・音量・
+    # **LFO のフィルタ変調の深さだけ**しか native は鳴らせないので、
+    # 割り当てを外したあとにつまみを動かすと、**すでに鳴っている音に
+    # 掛からない**（測値 50%。doc/native-engine.md の 6.193）
+    "assign":  0.65,
+    "bendasn": 0.65,
+    "progrel": 0.65,
+    "banklsb": 0.65,
+    "velsens": 0.65,
+    "fenvcc": 0.65,
+    # **離した音の尾**が残っている（6.206）。音程（`0x11`）は
+    # サンプル＆ホールドも含めて**18 本とも実機と同じ値・同じ時刻**
+    # になったが、実機がスロットを空けたあともこちらが
+    # 切る高さを動かし続けるので、尾の音色がずれる（測値 24%）
+    "pegcc": 0.20,
+    # 写し取りの音（実機が鳴らす 1 音目）だけ、実機の側が混み具合で
+    # 遅れる（6.90・6.122）。測値 62%
+    "dense":   0.55,
+    # クラッシュの 1 打目も写し取りなので同じ（測値 -12%）。
+    # 音が雑音に近いので、数サンプルずれるだけで相関が負になる。
+    # 2 サンプルずらすと残差は 6% まで落ちる
+    "althh":  -0.30,
+    # 同じくドラムの雑音。**1 サンプルずらすだけで残差 0.1%**なのに
+    # 相関は 42% まで落ちる（打鍵の ±1 は利用者が妥協してよいと決めた範囲）
+    "drumrcv": 0.35,
+}
+
 SHAPE_MIN = {
     "piano":   0.98, "chord":  0.95, "drums": 0.95, "effects": 0.98,
     "dense":   0.55, "port_b": 0.98, "bend":  0.98, "lofi":    0.98,
     "egcc":    0.98, "porta":  0.95, "at":    0.95, "sxparam": 0.95,
+    "assign":  0.95,
+    "bendasn": 0.95,
+    "progrel": 0.95,
+    "banklsb": 0.95,
+    "velsens": 0.95,
+    "fenvcc": 0.95,
+    "pegcc": 0.95,
     "pedals":  0.95, "partsx": 0.95, "rpn": 0.95, "mono": 0.95,
     # 一晩で足した軸（6.125-6.139）。どれも中央 98-100% 出ている
     "ctlreset": 0.95, "ports": 0.95, "scale": 0.95, "kits": 0.95,
@@ -268,6 +311,15 @@ SHAPE_MIN = {
     "ccramp": 0.95, "midreset": 0.98, "partmode": 0.95,
     "drumnrpn": 0.95, "retrig": 0.95, "pedretrig": 0.98, "edges": 0.95,
     "fxchange": 0.95, "dialloop": 0.95, "panrnd": 0.95,
+    # 長く伸ばす音（遅れて掛かるビブラート。6.175）
+    "longtone": 0.95,
+    # 離した音の尾（6.207）
+    "reltail": 0.95,
+    # まだ触っていなかった CC（68・69・96/97・124/125）
+    "ctlrest": 0.95,
+    # XG のパート番地のうち、SysEx を 1 度も通していなかった軸
+    "xgpeg": 0.95,
+    "xgsys": 0.95,
     # meter は 15 パートを同時に鳴らすので dense と同じ事情で形が落ちる
     # （狙いは液晶のほうなので、音は緩めに見る）
     "meter": 0.90, "filtcc": 0.95, "keyrange": 0.95, "rcvch": 0.95, "althh": 0.95, "drumrcv": 0.95,
@@ -344,13 +396,19 @@ def step_native_shape(rep, cases):
         if not cs:
             continue
         med = sorted(cs)[len(cs) // 2]
+        low = min(cs)
         if os.environ.get('SHAPE_VERBOSE'):
             print('    %-10s 波形の相関 中央 %.0f%% 最小 %.0f%%'
-                  % (name, 100 * med, 100 * min(cs)))
+                  % (name, 100 * med, 100 * low))
         if med < worst:
             worst, worst_name = med, name
         if med < SHAPE_MIN.get(name, 0.9):
-            bad.append("%s %.0f%%" % (name, 100 * med))
+            bad.append("%s 中央 %.0f%%" % (name, 100 * med))
+        # **最小も見る**（6.193）。中央だけだと、**一部の窓だけ
+        # 壊れていても気づけない**。`assign` は中央 100%・最小 50% で、
+        # 中央だけの判定をすり抜けていた
+        elif low < SHAPE_LOW.get(name, 0.80):
+            bad.append("%s 最小 %.0f%%" % (name, 100 * low))
     if worst > 1.5:
         rep.add("native の形", True, "測れなかった")
         return
@@ -542,6 +600,82 @@ def step_meter(rep, roms):
     rep.add("メーター", ok, note)
 
 
+def step_screen(rep, roms):
+    """**演奏画面の音色まわり**（doc/native-engine.md の 6.190）。firmware の道と
+    native の口で同じ曲を鳴らして、**音色名（行 0 の 9-16）・プログラムの 3 桁
+    （行 1 の 14-16）・**バンクの 3 桁**（行 1 の 10-12。6.202）・楽器の絵（外字 0-2 と 4-6）**を 0.1 秒ごとに突き合わせる。
+    native はこれを自分で描くので、1 マスでも違えば読み違えている"""
+    exe = tool("render")
+    mid = WORK / "progchg.mid"
+    if not exe.exists() or not mid.exists():
+        rep.add("演奏画面", True, "この回では見ない")
+        return
+    got = {}
+    for tag, extra in (("fw", []), ("ne", ["--native-engine"])):
+        log = WORK / ("screen_%s.log" % tag)
+        rc = run([exe, roms, mid, WORK / ("screen_%s.wav" % tag), "7",
+                  "--boot", "%.3f" % BOOT_AT, "--lcd-every", "0.1"] + extra,
+                 out=log, err=log, env={"SMU2000_NO_VOICECACHE": "1"})
+        if rc != 0:
+            rep.add("演奏画面", False, "%s で鳴らせなかった" % tag)
+            return
+        d = {}
+        for line in log.read_text(encoding="utf-8", errors="replace").splitlines():
+            f = line.split()
+            if f and f[0] == "LCD" and len(f) >= 50:
+                d.setdefault(f[1], {})["d"] = f[2:50]
+            elif f and f[0] == "CG" and len(f) >= 66:
+                d.setdefault(f[1], {})["c"] = f[2:66]
+        got[tag] = d
+    ts = sorted(set(got["fw"]) & set(got["ne"]), key=float)
+    if len(ts) < 10:
+        rep.add("演奏画面", False, "液晶が読めなかった")
+        return
+    ICON = list(range(0, 24)) + list(range(32, 56))
+
+    def fields(v):
+        return (v["d"][9:17], v["d"][24 + 14:24 + 17],
+                v["d"][24 + 10:24 + 13], [v["c"][i] for i in ICON])
+
+    # **native が先を行くのは許す**。native は MIDI を受けた 25ms 後に描き、
+    # firmware は 100ms につき 5ms しか回らないので最大 100ms 遅れる。
+    # だから「その時刻か、そのあと 0.3 秒のどれかの firmware の絵と同じ」なら合格。
+    # 起動の直後（1.2 秒まで）は firmware がまだ絵を描いていないので見ない
+    names = set()
+    bad = []
+    for k, t in enumerate(ts):
+        if float(t) < 1.2:
+            continue
+        b = got["ne"][t]
+        if "d" not in b or "c" not in b:
+            continue
+        fb = fields(b)
+        ahead = []
+        for t2 in ts[k:k + 4]:
+            a = got["fw"][t2]
+            if "d" in a and "c" in a:
+                ahead.append(fields(a))
+        if not ahead:
+            continue
+        names.add(tuple(ahead[0][0]))
+        if fb not in ahead:
+            bad.append((t, ahead[0], fb))
+    if len(names) < 2:
+        rep.add("演奏画面", False, "音色名がひとつも替わっていない")
+        return
+    ok = not bad
+    note = "%d 点 × 音色名 %d 通りが firmware と同じ" % (len(ts), len(names))
+    if bad:
+        t, fa, fb = bad[0]
+        note = "%d 点中 %d 点が違う（%s 秒: %s / %s）" % (
+            len(ts), len(bad), t,
+            "".join(chr(int(x, 16)) if 0x20 <= int(x, 16) < 0x7f else "."
+                    for x in fa[0] + fa[1]),
+            "".join(chr(int(x, 16)) if 0x20 <= int(x, 16) < 0x7f else "."
+                    for x in fb[0] + fb[1]))
+    rep.add("演奏画面", ok, note)
+
+
 def step_dial(rep, roms, cases):
     """**パネルのダイヤルで音色を替える**（doc/native-engine.md の 6.146）。
     ジョグダイヤルの音色替えは MIDI を通らないので、native が拾えないと
@@ -701,6 +835,7 @@ def main():
         print("== 8. パネル（native の口でもボタンと液晶が効くか）")
         step_panel(rep, roms)
         step_meter(rep, roms)
+        step_screen(rep, roms)
         step_dial(rep, roms, cases)
 
         print()

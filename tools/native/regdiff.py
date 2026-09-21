@@ -123,14 +123,30 @@ def main():
         print("鳴らせなかった")
         return 1
     fw, nv = keyons(tf), keyons(tn)
+    # **時刻で結び付ける**。番号順だと、片方だけ
+    # レジスタを 1 本も書かない押鍵があったときに
+    # そこから先が全部ずれる（6.206）
+    TOL = 300                      # これ以上離れたものは別の打と見る
+    pairs = []
+    fi = ni = 0
+    while fi < len(fw) and ni < len(nv):
+        d = nv[ni][0] - fw[fi][0]
+        if abs(d) <= TOL:
+            pairs.append((fi, ni))
+            fi += 1
+            ni += 1
+        elif d < 0:
+            ni += 1                # native の方が早い
+        else:
+            fi += 1                # 実機の方が早い
     print("%s  実機 %d 回 / native %d 回" % (a.name, len(fw), len(nv)))
 
     bad = collections.Counter()
     miss = collections.Counter()
     ncmp = 0
-    for i in range(min(len(fw), len(nv))):
-        at_f, af = fw[i]
-        at_n, an = nv[i]
+    for i, (fi, ni) in enumerate(pairs):
+        at_f, af = fw[fi]
+        at_n, an = nv[ni]
         # **スロットは波形の番地で結び付ける**。実機は 0 から、native は 63 から
         # 取るので、番号の順に並べると要素が逆になる（多要素の音色で全部
         # 食い違って見えていた）。番地が引けないものは残りを順に当てる
@@ -183,9 +199,8 @@ def main():
               " ".join("0x%02x×%d" % (r, c) for r, c in miss.most_common()))
     print("食い違い %d 本 / 突き合わせたスロット %d" % (sum(bad.values()), ncmp))
     # 押鍵の時刻のずれも出す（レジスタが合っていても鳴り出しがずれれば波形は違う）
-    n = min(len(fw), len(nv))
-    if n:
-        d = sorted(nv[i][0] - fw[i][0] for i in range(n))
+    if pairs:
+        d = sorted(nv[ni][0] - fw[fi][0] for fi, ni in pairs)
         hist = collections.Counter(d)
         print("押鍵のずれ: %s" %
               " ".join("%+d×%d" % (k, v) for k, v in sorted(hist.items())))

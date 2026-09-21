@@ -420,6 +420,14 @@ private:
 		                   ? u32(std::atoi(std::getenv("SMU2000_OFF_PROC"))) : 2 * 64;
 		return v;
 	}
+	// 重い SysEx（エフェクトの種類など）のあと、firmware を全速で回す長さ
+	static u32 fx_hold()
+	{
+		static const u32 v = std::getenv("SMU2000_FX_HOLD")
+			? u32(44100 * std::atoi(std::getenv("SMU2000_FX_HOLD")) / 1000)
+			: u32(44100 * 3 / 10);
+		return v;
+	}
 	static u32 native_proc64()
 	{
 		static const u32 v = std::getenv("SMU2000_NATIVE_PROC")
@@ -588,6 +596,18 @@ private:
 	u8 m_meter_smooth[16] = {};     // なまし（実機と同じ半分ずつ寄せる）
 	u8 m_meter_cell[16] = {};       // 前に液晶へ置いた棒の字（下 8 + 上 8）
 	u64 m_meter_next = 0;           // つぎになます時刻
+	// **演奏画面の音色まわりを native が描く**（6.190）。
+	// 名前（行 0 の 9-16）・プログラムの 3 桁（行 1 の 14-16）・
+	// 楽器の絵（外字 0-2・4-6）だけ。firmware は 100ms につき 5ms しか
+	// 回らないので、任せると音色を替えてから最大 100ms 遅れる
+	void draw_voice_fields();
+	void release_voice_fields();
+	bool m_vf_owned = false;        // いま持っているか
+	u8  m_vf_name[8] = {};          // 前に置いた名前
+	u8  m_vf_prog[3] = {};          // 前に置いた番号
+	u8  m_vf_bank[3] = {};          // 前に置いたバンク（6.202）
+	u16 m_vf_icon[16] = {};         // 前に置いた絵
+	int m_vf_part = -1;
 	// **パートの種類**（XG の 08 pp 07。0 が旋律、2-5 がドラム 1-4）。
 	// -1 はまだ SysEx を見ていない（ワーク RAM を読む）。バンク 127/126 で
 	// なくてもここでドラムになるので、音色の引き方を変える必要がある
@@ -609,6 +629,8 @@ private:
 		return m_ram.size() > off && m_ram[off] != 0;
 	}
 	void native_select_voice(int part);
+	// そのバンク LSB を実機が受け付けるか（6.202）
+	bool voice_lsb_ok(int msb, int lsb) const;
 	// 受け取り終えた XG の SysEx を、native の側にも効かせる
 	void native_sysex(u64 fire);
 
@@ -619,6 +641,12 @@ private:
 	int  m_learn_note = 60, m_learn_vel = 100, m_learn_part = 0;
 	// firmware が鳴らしている音の数（パートごと）。0 でなければベンドも firmware へ回す
 	u8   m_fw_notes[64] = {};
+	// firmware が鳴らしている音の、液晶のメーター用の目盛り（6.188）。
+	// 打った時刻も覚えておく（m_fw_notes はオールノートオフなどで
+	// 戻らないことがあり、そのままだと棒が立ちっぱなしになる）
+	u8   m_fw_meter[16] = {};
+	u64  m_fw_meter_at[16] = {};
+	static constexpr u64 FW_METER_HOLD = 44100 * 4;
 	u32  m_fw_note_total = 0;
 	// firmware の音のために回すのは、いちばん新しい音から この長さだけ。
 	// フィルタ・LFO の包絡線はそのころには落ち着いている。

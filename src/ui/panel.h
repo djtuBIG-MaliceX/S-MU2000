@@ -85,6 +85,12 @@ public:
 	void set_grid(bool on) { m_grid = on; }
 	void set_lcd_only(bool on) { m_lcd_only = on; }
 
+	// **上に空ける高さ**（画素）。窓の最上段にボタンの帯を出す
+	// ときに使う（`ui/toolbar.h`）。絵は 1000 × 385 の全面を使っていて
+	// 空きが無いので、重ねると絵が隠れてしまう。**`resize()` をやり直すこと**
+	void set_top_inset(int px) { m_top_inset = px < 0 ? 0 : px; }
+	int  top_inset() const { return m_top_inset; }
+
 	// 配置。**作り直さずに文字ファイルで直せる**（doc/panel-editing.md）。
 	// 読み直したら resize() をやり直すこと
 	layout       &lay()       { return m_lay; }
@@ -156,6 +162,7 @@ private:
 	int m_w = LOGICAL_W, m_h = LOGICAL_H;
 	double m_scale = 1.0;
 	int m_ox = 0, m_oy = 0;      // 縦横比を保つための余白
+	int m_top_inset = 0;         // 帯のために上へ空ける高さ
 
 	page m_page = page::front;
 	std::vector<spot> m_spots;

@@ -96,6 +96,11 @@ constexpr u32 PART_SCALE_SIZE = 12;
 constexpr u32 PART_EQ_XG   = 0x72;
 constexpr u32 PART_EQ_RAM  = 0x6a;
 constexpr u32 PART_EQ_SIZE = 6;
+// 低域のゲイン・高域のゲイン・低域の周波数・高域の周波数（6.181）
+constexpr u32 PART_EQ_LGAIN = 0x6a;
+constexpr u32 PART_EQ_HGAIN = 0x6b;
+constexpr u32 PART_EQ_LFREQ = 0x6e;
+constexpr u32 PART_EQ_HFREQ = 0x6f;
 
 // パートの塊の中の、XG に番地の無い演奏中の値
 constexpr u32 PART_MOD  = 0x7d;     // CC1

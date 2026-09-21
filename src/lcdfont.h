@@ -133,10 +133,16 @@ inline int overlay(std::vector<unsigned char> &rom, const std::string &path)
 }
 
 // 探す順: `SMU2000_LCDFONT` → **実行ファイルの隣**（とその親を 3 つ上まで）
-// → いまいるディレクトリ。
+// → **設定ディレクトリ** → いまいるディレクトリ。
 //
 // gui は build/ から起動することも、ショートカットから起動することもあるので、
 // いまいるディレクトリだけを見ていると見つからない（利用者の報告）。
+//
+// **プラグイン（VST3・CLAP・AU）では実行ファイルの隣が使えない**。
+// Windows の `exe_dir()` は **DAW 本体**の場所を返すので、
+// そこに `art/lcdfont.txt` は置かない。そこで ROM の場所と同じく
+// **設定ディレクトリ**（Windows なら `%LOCALAPPDATA%\S-MU2000`）も見る。
+// `lcdfont.txt` をそこに置けば、DAW でも手描きの字が出る
 inline int overlay_default(std::vector<unsigned char> &rom)
 {
 	if (const char *e = std::getenv("SMU2000_LCDFONT"))
@@ -150,6 +156,13 @@ inline int overlay_default(std::vector<unsigned char> &rom)
 		for (const char *r : REL)
 			if (const int n = overlay(rom, smu2000::join(base, r)))
 				return n;
+	const std::string cfg = smu2000::config_dir();
+	if (!cfg.empty()) {
+		if (const int n = overlay(rom, smu2000::join(cfg, "lcdfont.txt")))
+			return n;
+		if (const int n = overlay(rom, smu2000::join(cfg, "art/lcdfont.txt")))
+			return n;
+	}
 	for (const char *r : REL)
 		if (const int n = overlay(rom, r))
 			return n;

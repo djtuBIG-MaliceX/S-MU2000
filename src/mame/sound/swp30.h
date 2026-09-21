@@ -450,6 +450,18 @@ public:
 	// 実機の firmware も、鳴り終わった声は切らない
 	bool slot_active(int chan) const
 	{ return chan >= 0 && chan < 0x40 && m_envelope[chan].active(); }
+	// **firmware がその声のスロットを空けるところ**（6.207）。firmware は
+	// 内部レジスタ 0 で包絡線を読み（0x12E856）、「立ち上がりではなく、
+	// 減衰が半分（0x2000）まで来た」声のスロットを空ける（0x1278C4）。
+	// 空いたあとはそのスロットに一切書かないので、native もここで止める
+	bool slot_freed(int chan) const
+	{
+		if (chan < 0 || chan >= 0x40)
+			return true;
+		const envelope_block &e = m_envelope[chan];
+		return e.m_envelope_mode != envelope_block::ATTACK &&
+			e.m_envelope_level >= 0x2000;
+	}
 private:
 	void peg_step(int chan);
 	std::array<filter_block,    0x40> m_filter = {};

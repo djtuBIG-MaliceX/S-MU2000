@@ -61,6 +61,11 @@ int plug_key_of_char(int c)
 	case 'z': return PLUG_KEY_AUDITION;
 	case 'x': return PLUG_KEY_SELECT;
 	case 'm': return PLUG_KEY_SAMPLING_MODE;
+	// The same two keys gui.exe uses, as their private-use characters
+	// (NSF3FunctionKey / NSF2FunctionKey)
+	case 0xf706: return PLUG_KEY_LIST;
+	case 0xf705: return PLUG_KEY_EDITOR;
+	case 0xf707: return PLUG_KEY_ENGINE;   // NSF4FunctionKey
 	default: break;
 	}
 	return PLUG_KEY_NONE;
@@ -385,8 +390,16 @@ public:
 
 	// Open a PC window (overview/editor), showing an alert when it fails
 	void open_pc(ui::pc_window &w);
-	void open_list() { open_pc(m_list); }
-	void open_editor() { open_pc(m_editor); }
+	void open_pc_window(int kind) override
+	{
+		switch (kind) {
+		case PC_EDITOR: open_pc(m_editor); break;
+		case PC_FX:     open_pc(m_fx);     break;
+		case PC_SHAPES: open_pc(m_shapes); break;
+		case PC_MASTER: open_pc(m_master); break;
+		default:        open_pc(m_list);   break;
+		}
+	}
 
 private:
 	plug_view &m_owner;
