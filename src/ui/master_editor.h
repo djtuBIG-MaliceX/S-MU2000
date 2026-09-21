@@ -26,6 +26,15 @@ public:
 	int default_width() const override  { return 900; }
 	int default_height() const override { return 560; }
 	void draw(xg::model &m, const xg_snapshot &ram, bridge &br) override;
+
+private:
+	// .syx の書き出し・読み込み（issue #35）
+	void sysex_pane(const xg_snapshot &ram, bridge &br);
+	bool m_diff_only = true;              // 既定と違うものだけ書き出す
+	bool m_export_waiting = false;        // 既定値ができるのを待っている（bridge の request_defaults）
+	std::vector<u8> m_import;             // 読み込んだ中身。1 通ずつ音源へ流す
+	size_t m_import_at = 0;
+	u64 m_import_hold_until = 0;          // XG System On などの後は少し待つ（音源の時計、ミリ秒）
 };
 
 } // namespace ui

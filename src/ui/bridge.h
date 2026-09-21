@@ -160,6 +160,26 @@ public:
 		m_xg_seq.fetch_add(1, std::memory_order_release);
 	}
 
+	// ---- XG の既定値（.syx の書き出しで「既定と違うものだけ」を出すときの比べる相手）
+	//
+	// 画面が頼み、音声の糸が 1 度だけ作って置く（ui/driver.h の serve_defaults）。
+	// 起動した直後の値ではなく、XG System On を受けた直後の値。置いてあれば true
+	void request_defaults() { m_want_defaults.store(true, std::memory_order_relaxed); }
+	bool take_defaults_request() { return m_want_defaults.exchange(false, std::memory_order_relaxed); }
+	void publish_defaults(const xg_snapshot &s)
+	{
+		std::memcpy(&m_defaults, &s, sizeof(m_defaults));
+		m_have_defaults.store(true, std::memory_order_release);
+	}
+	bool have_defaults() const { return m_have_defaults.load(std::memory_order_acquire); }
+	bool read_defaults(xg_snapshot &out) const
+	{
+		if (!m_have_defaults.load(std::memory_order_acquire))
+			return false;
+		std::memcpy(&out, &m_defaults, sizeof(out));   // 1 度置いたら書き換えない
+		return true;
+	}
+
 	void publish(const snapshot &s)
 	{
 		m_seq.fetch_add(1, std::memory_order_release);
@@ -226,6 +246,9 @@ private:
 	snapshot              m_snap;
 	std::atomic<unsigned> m_xg_seq{0};
 	xg_snapshot           m_xg;
+	std::atomic<bool>     m_want_defaults{false};
+	std::atomic<bool>     m_have_defaults{false};
+	xg_snapshot           m_defaults;
 };
 
 } // namespace ui

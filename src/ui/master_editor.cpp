@@ -2,8 +2,10 @@
 
 #include "master_editor.h"
 
+#include "driver.h"
 #include "fx_icons.h"
 #include "overview.h"
+#include "xg_state.h"
 
 #include "imgui.h"
 
@@ -126,6 +128,8 @@ void master_editor::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 		ImGui::PopItemWidth();
 		ImGui::Spacing();
 		ImGui::TextDisabled("チューンは 0.1 セントの目盛り、\n移調は半音");
+		ImGui::Spacing();
+		sysex_pane(ram, br);
 	}
 	ImGui::EndChild();
 	ImGui::SameLine();
@@ -169,6 +173,19 @@ void master_editor::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 			ImGui::TableNextColumn();
 			ImGui::SetNextItemWidth(-FLT_MIN);
 			type_combo("##vartype", xg::ins_types(), "variation.type", m, br);
+
+			// 種類ごとのパラメータは、エフェクトの窓（インサーションと同じ窓の REV・CHO・VAR）で
+			ImGui::TableNextRow();
+			ImGui::TableNextColumn();
+			ImGui::AlignTextToFramePadding();
+			ImGui::TextUnformatted("パラメータ");
+			for (int slot : { 5, 6, 7 }) {
+				ImGui::TableNextColumn();
+				ImGui::PushID(slot);
+				if (ImGui::Button("つまみを開く..."))
+					request_fx(slot);
+				ImGui::PopID();
+			}
 
 			row("戻り量", "reverb.return", "chorus.return", "variation.return");
 			row("パン", "reverb.pan", "chorus.pan", "variation.pan");
@@ -271,6 +288,99 @@ void master_editor::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 
 	ImGui::PopFont();
 	ImGui::End();
+}
+
+// ---- .syx の書き出し・読み込み（issue #35）
+//
+// 書き出し  いまの XG の値を SysEx にしてファイルへ。「既定と違うものだけ」なら、頭に XG System On を
+//           置き、そのあと既定値（XG System On の直後の値）と違うところだけを並べる。曲の頭に
+//           貼るのに向く。外すと全部（プラグインの「XG の値だけ」の状態と同じもの）
+// 読み込み  ファイルの SysEx を 1 通ずつ音源へ流す。リセットの後は 200ms 待つ（実機も受け付けない間がある）
+void master_editor::sysex_pane(const xg_snapshot &ram, bridge &br)
+{
+	const bool ready = ram.serial != 0;
+
+	// 既定値ができたら書き出す
+	if (m_export_waiting && br.have_defaults()) {
+		m_export_waiting = false;
+		const std::unique_ptr<xg_snapshot> base = std::make_unique<xg_snapshot>();
+		br.read_defaults(*base);
+		std::vector<u8> out = { 0xf0, 0x43, 0x10, 0x4c, 0x00, 0x00, 0x7e, 0x00, 0xf7 };
+		const std::vector<u8> diff = setup_diff_messages(ram, *base);
+		out.insert(out.end(), diff.begin(), diff.end());
+		xgui::ask_save_file(std::move(out));
+	}
+
+	// 読み込んだものを流す。輪に入りきらなければ次のコマで続き
+	std::vector<u8> opened;
+	if (xgui::take_opened_file(opened)) {
+		m_import = std::move(opened);
+		m_import_at = 0;
+		m_import_hold_until = 0;
+		size_t n = 0;
+		for (u8 b : m_import)
+			n += b == 0xf0;
+		char note[64];
+		std::snprintf(note, sizeof(note), n ? "読み込み中（SysEx %zu 通）" : "SysEx が入っていない", n);
+		xgui::set_file_note(note);
+	}
+	while (m_import_at < m_import.size() && br.audio_ms() >= m_import_hold_until) {
+		if (m_import[m_import_at] != 0xf0) {        // SysEx の外は飛ばす
+			m_import_at++;
+			continue;
+		}
+		size_t end = m_import_at + 1;
+		while (end < m_import.size() && m_import[end] != 0xf7 && !(m_import[end] & 0x80))
+			end++;
+		if (end >= m_import.size() || m_import[end] != 0xf7) {   // 閉じていない。そこから先を探し直す
+			m_import_at = end;
+			continue;
+		}
+		const size_t len = end + 1 - m_import_at;
+		if (len >= 4096) {                         // 輪より大きいものは送れない
+			m_import_at = end + 1;
+			continue;
+		}
+		if (!br.send(m_import.data() + m_import_at, len))
+			break;
+		if (driver::is_reset(m_import.data() + m_import_at + 1, len - 2))
+			m_import_hold_until = br.audio_ms() + 200;
+		m_import_at = end + 1;
+		if (m_import_at >= m_import.size())
+			xgui::set_file_note("読み込んだ");
+	}
+	if (m_import_at >= m_import.size() && !m_import.empty()) {
+		m_import.clear();
+		m_import_at = 0;
+	}
+
+	ImGui::SeparatorText("SysEx（.syx）");
+	const bool can = xgui::file_dialogs() && ready && !m_export_waiting && m_import.empty();
+	ImGui::BeginDisabled(!can);
+	if (ImGui::Button("書き出す...")) {
+		if (!m_diff_only) {
+			xgui::ask_save_file(setup_messages(ram));
+		} else {
+			m_export_waiting = true;
+			br.request_defaults();              // できたら上で書き出す
+		}
+	}
+	ImGui::SameLine();
+	if (ImGui::Button("読み込む..."))
+		xgui::ask_open_file();
+	ImGui::EndDisabled();
+	if (!xgui::file_dialogs() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+		ImGui::SetTooltip("この環境ではまだファイルの窓を開けない");
+	ImGui::Checkbox("既定と違うものだけ", &m_diff_only);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("入れると、頭に XG System On を置き、既定値と違うところだけを書き出す（曲の頭に貼るのに向く）。\n"
+		                  "外すと、XG の値を全部書き出す。\n"
+		                  "既定値は、機械の姿を控えて XG System On を流して読み、控えを戻して作る。\n"
+		                  "最初の 1 回だけ、音が一瞬途切れることがある");
+	if (m_export_waiting)
+		ImGui::TextDisabled("既定値を読んでいる...");
+	else if (!xgui::file_note().empty())
+		ImGui::TextDisabled("%s", xgui::file_note().c_str());
 }
 
 } // namespace ui

@@ -14,13 +14,14 @@
 #include "xg_ui.h"
 #include "imgui.h"
 #include "xg/fx_params.h"
+#include "xg/sysfx.h"
 
 namespace ui {
 
 class fx_editor : public imgui_view
 {
 public:
-	const wchar_t *title() const override { return L"S-MU2000 インサーションエフェクト"; }
+	const wchar_t *title() const override { return L"S-MU2000 エフェクト"; }
 	int default_width() const override  { return 1000; }
 	int default_height() const override { return 720; }
 	void draw(xg::model &m, const xg_snapshot &ram, bridge &br) override;
@@ -31,7 +32,10 @@ private:
 	// つまみ 1 つ。戻り値は「値が変わったか」
 	bool knob(const char *id, int &v, int lo, int hi, float size, const char *label, const char *text);
 	// EQ のパラメータを持つ種類の、特性のグラフ（p0-p1 の四角に描く）
-	void eq_graph(const xg::fx_def &def, u8 blk, xg::model &m, bridge &br, ImVec2 p0, ImVec2 p1);
+	void eq_graph(const xg::fx_def &def, xg::model &m, bridge &br, ImVec2 p0, ImVec2 p1);
+	// パラメータの番地とバイト数。見ているエフェクト（m_slot）の塊に無ければ false
+	bool where(const xg::fx_param &fp, u32 &addr, int &size) const;
+	int m_slot = 1;                       // 1-4 がインサーション、5-7 がリバーブ・コーラス・バリエーション
 };
 
 } // namespace ui

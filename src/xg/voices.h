@@ -43,6 +43,10 @@ public:
 	}
 
 	bool ok() const { return m_ok; }
+	// ROM の中身（音色の要素の記録を読むとき。xg/native_voice.h の element）
+	const u8 *data() const { return m_ok ? m_rom->data() : nullptr; }
+	// パートの塊（ワーク RAM の写し）から、選んでいる音色の記録の番地。無ければ 0
+	u32 voice_record(const u8 *part_ram) const { return m_ok ? record(part_ram) : 0; }
 
 	// 名前。part_ram はパートの塊（+0xF8 まで含む）。分からなければ空
 	std::string name(const u8 *part_ram, int msb, int prog) const

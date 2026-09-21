@@ -35,8 +35,13 @@ round.select   674.4 258.7 24.9 24.9
 round.audition 735.5 258.7 24.9 24.9
 
 plg 497.5 36.2 336.9
-volume 193.4 172.1 17.6 "../parts/knob.svg"
-dial 893 268 60 "../parts/dial.svg"
+
+# ボリューム
+volume 193.4 163 20 "../parts/knob.svg" # volume 193.4 172.1 17.6 "../parts/knob.svg"
+
+# ジョグダイヤル
+dial 863 261 72 "../parts/dial.svg" # dial 893 268 60 "../parts/dial.svg"
+
 mode.art  "../parts/btn.svg" "../parts/btn-on.svg" "../parts/btn-down.svg"
 nav.art   "../parts/key.svg" "../parts/key-down.svg"
 cat.art   "../parts/cat.svg" "../parts/cat-down.svg"

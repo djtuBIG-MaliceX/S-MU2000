@@ -42,6 +42,8 @@ public:
 	//
 	// EG: アタック・ディケイ・リリースの形を描き、点をつまんで動かす
 	static void eg_cell(int part, xg::model &m, bridge &br, float w, float h, bool compact);
+	// ピッチ EG: 音程の動き（出だし → 本来の音程 → 離してからリリースレベル）を描き、点をつまんで動かす
+	static void peg_cell(int part, xg::model &m, bridge &br, float w, float h, bool compact);
 	// フィルタ: 周波数特性の山を描き、山の頂をつまんで横でカットオフ、縦でレゾナンス
 	static void filter_cell(int part, xg::model &m, bridge &br, float w, float h, bool compact);
 	// パートの EQ: 低音と高音の点をつまんで、横で周波数、縦でゲイン

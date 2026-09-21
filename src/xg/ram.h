@@ -93,6 +93,16 @@ constexpr u32 PART_XG_SIZE = 0x29;  // 08 pp 00-28
 constexpr u32 PART_SCALE_XG  = 0x41;
 constexpr u32 PART_SCALE_RAM = 0x3a;
 constexpr u32 PART_SCALE_SIZE = 12;
+// **08 pp 41-6E**（スケールチューニング・アフタータッチ・AC1・AC2・ポルタメント・ピッチ EG・
+// ベロシティの範囲）。ワーク RAM では塊の +0x3A から、XG の番地の順にそのまま 46 バイト。
+// 1 つずつ書いて RAM の変わった所で確かめた（41 → +3A、4D → +46、59 → +52、67 → +60、6E → +67）
+constexpr u32 PART_EXT_XG   = 0x41;
+constexpr u32 PART_EXT_RAM  = 0x3a;
+constexpr u32 PART_EXT_SIZE = 0x2e;
+// **HPF の切る高さ**（0A pp 20。パートの塊の番地は 08 ではなく 0A）。塊の +0x78
+constexpr u32 PART_HPF_HI  = 0x0a;
+constexpr u32 PART_HPF_XG  = 0x20;
+constexpr u32 PART_HPF_RAM = 0x78;
 constexpr u32 PART_EQ_XG   = 0x72;
 constexpr u32 PART_EQ_RAM  = 0x6a;
 constexpr u32 PART_EQ_SIZE = 6;
@@ -117,10 +127,19 @@ constexpr u32 PART_COPY = 0x100;    // 画面へ写す長さ（上の全部を�
 // エフェクトの塊。xg は XG の番地の先頭、ram はワーク RAM での先頭
 struct block { u8 hi, mid, lo; u32 size; u32 ram; };
 
+// リバーブ・コーラス・バリエーションは**詰めて並ぶ**（XG の番地そのままではない）。
+// 1 つずつ書いて RAM の変わった所で確かめた:
+//   リバーブ       02 01 00-0D が +0x00、10-15（パラメータ 11-16）が +0x0E
+//   コーラス       02 01 20-2E が +0x00。30-35 は書いても RAM に入らない（firmware が捨てる）
+//   バリエーション 02 01 40-41（種類）が +0x00、パラメータ 1-10（42-55）は +0x02 から
+//                  16bit の数で 10 個（VAR_WIDE）、56-60 が +0x16、70-75 が +0x21
 constexpr block EFFECTS[] = {
-	{ 0x02, 0x01, 0x00, 0x14, 0x0cad8 },   // リバーブ
-	{ 0x02, 0x01, 0x20, 0x14, 0x0caec },   // コーラス
-	{ 0x02, 0x01, 0x40, 0x1c, 0x0cb02 },   // バリエーション
+	{ 0x02, 0x01, 0x00, 0x0e, 0x0cad8 },   // リバーブ
+	{ 0x02, 0x01, 0x10, 0x06, 0x0cae6 },
+	{ 0x02, 0x01, 0x20, 0x0f, 0x0caec },   // コーラス
+	{ 0x02, 0x01, 0x40, 0x02, 0x0cb02 },   // バリエーション
+	{ 0x02, 0x01, 0x56, 0x0b, 0x0cb18 },
+	{ 0x02, 0x01, 0x70, 0x06, 0x0cb23 },
 	// インサーションは 03 0n 00-11 がそのまま並び、そのあとに 20-25（パラメータ 11-16）が
 	// 詰めて続く。1 つずつ書いて RAM の変わった所で確かめた。
 	// パラメータ 1-10 の 2 バイトの番地（30-43）は、+0x18 から 16bit の数で 10 個並ぶ
@@ -146,6 +165,8 @@ constexpr u32 VAR_BLOCK = 0x0cb02;
 constexpr u32 VAR_CONNECT = 0x1a;
 constexpr u32 VAR_PART    = 0x1b;
 constexpr u32 INS_WIDE = 0x18;
+// バリエーションのパラメータ 1-10（02 01 42-55）。塊の +0x02 から 16bit の数（上位バイトが先）
+constexpr u32 VAR_WIDE = 0x02;
 
 // XG の番地から、ワーク RAM での位置。無ければ false
 inline bool locate(u32 addr, u32 &off)
@@ -159,9 +180,12 @@ inline bool locate(u32 addr, u32 &off)
 		off = part_base(mid) + lo;
 		return true;
 	}
-	if (hi == 0x08 && mid < 32 && lo >= PART_SCALE_XG &&
-	    lo < PART_SCALE_XG + PART_SCALE_SIZE) {
-		off = part_base(mid) + PART_SCALE_RAM + (lo - PART_SCALE_XG);
+	if (hi == 0x08 && mid < 32 && lo >= PART_EXT_XG && lo < PART_EXT_XG + PART_EXT_SIZE) {
+		off = part_base(mid) + PART_EXT_RAM + (lo - PART_EXT_XG);
+		return true;
+	}
+	if (hi == PART_HPF_HI && mid < 32 && lo == PART_HPF_XG) {
+		off = part_base(mid) + PART_HPF_RAM;
 		return true;
 	}
 	if (hi == 0x08 && mid < 32 && lo >= PART_EQ_XG && lo < PART_EQ_XG + PART_EQ_SIZE) {

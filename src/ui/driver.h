@@ -14,6 +14,9 @@
 
 #include <cstdio>
 #include <initializer_list>
+#include <memory>
+#include <string>
+#include <vector>
 
 namespace ui {
 
@@ -37,6 +40,7 @@ public:
 	template <typename F>
 	void pump_midi(mu2000 &mu, bridge &br, F &&echo)
 	{
+		serve_defaults(mu, br);
 		u8 b;
 		while (br.take_midi(b)) {
 			watch(b, mu.midi_in(b));
@@ -54,6 +58,42 @@ public:
 	void pump_midi(mu2000 &mu, bridge &br)
 	{
 		pump_midi(mu, br, [](u8) {});
+	}
+
+	// 画面に頼まれたら、XG の既定値を 1 度だけ作って置く（bridge の request_defaults）。
+	// 機械の姿を丸ごと控え、XG System On を流して firmware に既定値を書かせ、写してから
+	// 控えを戻す。戻すので、鳴っている音も設定も元のまま。この区間は少し長くかかる
+	// （firmware を 0.3 秒ほど回す）ので、音が一瞬途切れることがある
+	void serve_defaults(mu2000 &mu, bridge &br)
+	{
+		if (!br.take_defaults_request())
+			return;
+		if (br.have_defaults())
+			return;
+		const std::vector<u8> saved = mu.save_state();
+		const int native = mu.native_engine();
+		if (native)
+			mu.set_native_engine(0);             // XG System On は firmware に読ませる
+		for (u8 b : { 0xf0, 0x43, 0x10, 0x4c, 0x00, 0x00, 0x7e, 0x00, 0xf7 })
+			mu.midi_in(b);
+		s32 l, r;
+		u8 v;
+		const int rate = 44100;
+		for (int i = 0; i < 3 * rate && mu.midi_pending(); i++) {   // 前に溜まっていた分ごと読ませる
+			mu.run_sample(l, r);
+			while (mu.midi_out_take(v)) {}
+		}
+		for (int i = 0; i < rate * 3 / 10; i++) {
+			mu.run_sample(l, r);
+			while (mu.midi_out_take(v)) {}
+		}
+		const std::unique_ptr<xg_snapshot> s = std::make_unique<xg_snapshot>();   // 大きいので糸の積み場に置かない
+		copy_xg(mu, *s);
+		std::string err;
+		mu.load_state(saved.data(), saved.size(), err);
+		if (native)
+			mu.set_native_engine(native);
+		br.publish_defaults(*s);
 	}
 
 	// ブロックの終わりで。音源が MIDI OUT から送り出したものを画面へ渡す。

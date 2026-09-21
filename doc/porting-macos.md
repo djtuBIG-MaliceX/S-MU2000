@@ -16,6 +16,7 @@ Target: **Apple silicon (arm64) only.** Build with the system clang++.
 | 3 | GUI window (`gui`) — CoreGraphics drawing + Cocoa window | **done** |
 | 4 | VST3 bundle for `Contents/MacOS` + `probe` | **done** |
 | 5 | Audio Unit wrapper (AUv2, `aumu`), its editor + `au-probe` | **done** |
+| 6 | CLAP bundle, loaded and played by `clap-probe` (`src/clap/probe.cpp`) | **done** (2026-09-20; no DAW yet) |
 
 ```
 make          build every tool and both plug-in bundles
@@ -23,6 +24,7 @@ make check    ROM-free sanity check (runs build/verify)
 make test     the regression suite (audio fingerprints + xgtest)
 make probe    load the VST3 bundle in a headless host
 make au-probe load the AU bundle in a headless host
+make clap-probe load the CLAP bundle in the headless host and run its automation checks
 make check-au same, plus the AU's torture test
 ```
 

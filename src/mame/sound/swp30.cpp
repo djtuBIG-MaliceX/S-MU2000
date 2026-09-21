@@ -1512,6 +1512,44 @@ u16 swp30_device::envelope_block::level_step(s32 level, u32 sample_counter)
 	return (mx[k1] >> ((sample_counter >> sh) & 0xf)) & 1;
 }
 
+// S-MU2000: 画面がフィルタの特性を描くための口。声のフィルタと同じ step を回す
+void swp30_device::filter_impulse(u16 f1a, u16 level1, u16 f2a, u16 level2, u16 fb, float *out, int n)
+{
+	filter_block f;
+	f.filter_1_a_w(f1a);
+	f.level_1_w(level1);
+	f.filter_2_a_w(f2a);
+	f.level_2_w(level2);
+	f.filter_b_w(fb);
+	f.keyon();
+	constexpr s16 ONE = 0x4000;
+	for(int i = 0; i < n; i++)
+		out[i] = float(f.step(i == 0 ? ONE : 0)) / float(s32(ONE) << 6);
+}
+
+// S-MU2000: 画面がビブラートを描くための口。声の LFO と同じ step・get_pitch を回す
+// （乱数の型は使わない前提。3 のときは 0 を返す）
+void swp30_device::lfo_pitch_trace(u16 type_step_pitch, s16 *out, int n)
+{
+	lfo_block l;
+	l.type_step_pitch_w(type_step_pitch);
+	if(l.m_type == 3) {
+		for(int i = 0; i < n; i++)
+			out[i] = 0;
+		return;
+	}
+	for(int i = 0; i < n; i++) {
+		out[i] = l.get_pitch();
+		l.advance();
+	}
+}
+
+// S-MU2000: 画面が包絡線の時間を描くための口（level_step をそのまま）
+u16 swp30_device::envelope_step(s32 speed, u32 sample_counter)
+{
+	return envelope_block::level_step(speed, sample_counter);
+}
+
 u16 swp30_device::envelope_block::step(u32 sample_counter)
 {
 	u16 result = m_envelope_level + ((m_release_glo & 0xff) << 6);
@@ -1694,6 +1732,14 @@ u32 swp30_device::lfo_block::tri_state(u32 counter)
 
 void swp30_device::lfo_block::step(swp30_device &swp)
 {
+	// S-MU2000: 乱数を使わない所を advance に分けた（画面が波の形を描くのに同じものを使う）
+	const u32 pc = advance();
+	if(m_type == 3 && ((pc ^ m_counter) & 0x3fe00))
+		m_state = swp.rand() & 0xfff;
+}
+
+u32 swp30_device::lfo_block::advance()
+{
 	u32 pc = m_counter;
 	m_counter = (m_counter + m_step) & 0x3ffff;
 	if((m_counter & 0x03fc0) == 0x02000)
@@ -1702,8 +1748,8 @@ void swp30_device::lfo_block::step(swp30_device &swp)
 	case 0: m_state = m_counter >> 6; break;
 	case 1: m_state = tri_state(m_counter); break;
 	case 2: m_state = m_counter & 0x20000 ? 0xfff : 0; break;
-	case 3: if((pc ^ m_counter) & 0x3fe00) m_state = swp.rand() & 0xfff; break;
 	}
+	return pc;
 }
 
 u16 swp30_device::lfo_block::get_amplitude() const

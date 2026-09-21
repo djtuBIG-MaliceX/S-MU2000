@@ -151,10 +151,27 @@ bool fx_editor::knob(const char *id, int &v, int lo, int hi, float size, const c
 }
 
 
+// パラメータの番地。インサーションは表のまま、システムエフェクトは xg/sysfx.h で読み替える
+bool fx_editor::where(const xg::fx_param &fp, u32 &addr, int &size) const
+{
+	if (m_slot <= 4) {
+		addr = xg::pack(0x03, u8(m_slot - 1), fp.addr);
+		size = fp.size;
+		return true;
+	}
+	const xg::sysfx which = m_slot == 5 ? xg::sysfx::reverb : m_slot == 6 ? xg::sysfx::chorus : xg::sysfx::variation;
+	const int lo = xg::sysfx_addr(which, fp, size);
+	if (lo < 0)
+		return false;
+	addr = xg::pack(0x02, 0x01, u8(lo));
+	return true;
+}
+
+
 // EQ の特性のグラフ。横が周波数（20Hz-20kHz の対数）、縦がゲイン（±15dB）。
 // 帯の点をつまんで、横で周波数、縦でゲイン。真ん中の帯は点の近くでホイールを回すと幅。
 // パラメータは LCD の名前で見分ける（EQ LowFreq / Low Freq など）
-void fx_editor::eq_graph(const xg::fx_def &def, u8 blk, xg::model &m, bridge &br, ImVec2 p0, ImVec2 p1)
+void fx_editor::eq_graph(const xg::fx_def &def, xg::model &m, bridge &br, ImVec2 p0, ImVec2 p1)
 {
 	struct band { eq::shape shape; int freq = -1, gain = -1, width = -1; int vf = 0, vg = 64, vw = 10; };
 	auto find = [&](std::initializer_list<const char *> names) {
@@ -178,7 +195,9 @@ void fx_editor::eq_graph(const xg::fx_def &def, u8 blk, xg::model &m, bridge &br
 
 	auto value = [&](int index, int &v) {
 		const xg::fx_param &fp = def.params[index];
-		if (!m.get_raw(xg::pack(0x03, blk, fp.addr), fp.size, v))
+		u32 a = 0;
+		int size = 0;
+		if (!where(fp, a, size) || !m.get_raw(a, size, v))
 			return false;
 		v = std::clamp(v, int(fp.lo), int(fp.hi));
 		return true;
@@ -242,8 +261,10 @@ void fx_editor::eq_graph(const xg::fx_def &def, u8 blk, xg::model &m, bridge &br
 		const int nf = eq::index_near((io.MousePos.x + gx - x0) / (x1 - x0), pf.lo, pf.hi);
 		const float db = -((io.MousePos.y + gy) - (top + bottom) * 0.5f) / ((bottom - top) * 0.5f) * DB;
 		const int ng = std::clamp(int(std::lround(64 + db)), int(pg.lo), int(pg.hi));
-		if (nf != b.vf) br.send(m.set_raw(xg::pack(0x03, blk, pf.addr), pf.size, nf));
-		if (ng != b.vg) br.send(m.set_raw(xg::pack(0x03, blk, pg.addr), pg.size, ng));
+		u32 a = 0;
+		int size = 0;
+		if (nf != b.vf && where(pf, a, size)) br.send(m.set_raw(a, size, nf));
+		if (ng != b.vg && where(pg, a, size)) br.send(m.set_raw(a, size, ng));
 		m_focus = b.gain;
 	}
 	const int hot = active ? grab : hovered ? nearest() : -1;
@@ -255,7 +276,9 @@ void fx_editor::eq_graph(const xg::fx_def &def, u8 blk, xg::model &m, bridge &br
 			if (io.MouseWheel != 0.0f) {
 				const xg::fx_param &pw = def.params[b.width];
 				const int nw = std::clamp(b.vw + (io.MouseWheel > 0 ? 1 : -1) * (io.KeyCtrl ? 10 : 2), int(pw.lo), int(pw.hi));
-				if (nw != b.vw) br.send(m.set_raw(xg::pack(0x03, blk, pw.addr), pw.size, nw));
+				u32 a = 0;
+				int size = 0;
+				if (nw != b.vw && where(pw, a, size)) br.send(m.set_raw(a, size, nw));
 				m_focus = b.width;
 			}
 		}
@@ -321,26 +344,33 @@ void fx_editor::draw(xg::model &m, const xg_snapshot &, bridge &br)
 	ImGui::PopStyleVar();
 	const float fs = ImGui::GetFontSize();
 
-	// ---- どのインサーションか
+	// ---- どのエフェクトか。1-4 がインサーション、5-7 がリバーブ・コーラス・バリエーション
 	int slot = fx_window_slot();
-	for (int i = 1; i <= 4; i++) {
-		char name[16];
-		std::snprintf(name, sizeof(name), "INS %d", i);
-		if (i > 1) ImGui::SameLine();
+	static const char *const SLOT_NAMES[] = { "INS 1", "INS 2", "INS 3", "INS 4", "REV", "CHO", "VAR" };
+	for (int i = 1; i <= 7; i++) {
+		if (i > 1) ImGui::SameLine(0, i == 5 ? fs * 0.8f : -1.0f);
 		const bool sel = i == slot;
 		if (sel) ImGui::PushStyleColor(ImGuiCol_Button, col(ImGuiCol_ButtonActive));
-		if (ImGui::Button(name)) { slot = i; set_fx_window_slot(i); }
+		if (ImGui::Button(SLOT_NAMES[i - 1])) { slot = i; set_fx_window_slot(i); }
 		if (sel) ImGui::PopStyleColor();
 	}
-	const u8 blk = u8(slot - 1);
+	m_slot = slot;
+	const bool sys = slot >= 5;
+	static const char *const SYS_TITLES[] = { "REVERB", "CHORUS", "VARIATION" };
 	char type_key[24], part_key[24];
-	std::snprintf(type_key, sizeof(type_key), "insertion%d.type", slot);
-	std::snprintf(part_key, sizeof(part_key), "insertion%d.part", slot);
+	if (sys) {
+		std::snprintf(type_key, sizeof(type_key), "%s.type", slot == 5 ? "reverb" : slot == 6 ? "chorus" : "variation");
+		std::snprintf(part_key, sizeof(part_key), "variation.part");
+	} else {
+		std::snprintf(type_key, sizeof(type_key), "insertion%d.type", slot);
+		std::snprintf(part_key, sizeof(part_key), "insertion%d.part", slot);
+	}
 	const xg::param &ptype = P(type_key);
 	const xg::param &ppart = P(part_key);
 	int type = 0, part = 127;
 	const bool has_type = m.get(ptype, 0, type);
 	m.get(ppart, 0, part);
+	const std::vector<xg::fx_type> &types = slot == 5 ? xg::rev_types() : slot == 6 ? xg::cho_types() : xg::ins_types();
 
 	// ---- 種類と掛けるパート
 	ImGui::SameLine(0, fs * 1.5f);
@@ -351,23 +381,25 @@ void fx_editor::draw(xg::model &m, const xg_snapshot &, bridge &br)
 	if (begin_fx_combo("##type", has_type ? type : -1, ImGuiComboFlags_HeightLarge)) {
 		// 品書きの形（分類 → 系統 → LSB 違い）で選ぶ
 		int chosen = 0;
-		if (fx_type_menu(xg::ins_types(), has_type ? type : -1, chosen)) {
+		if (fx_type_menu(types, has_type ? type : -1, chosen)) {
 			br.send(m.set(ptype, 0, chosen));
 			ImGui::CloseCurrentPopup();
 		}
 		ImGui::EndCombo();
 	}
-	ImGui::SameLine(0, fs);
-	ImGui::TextUnformatted("掛けるパート");
-	ImGui::SameLine();
-	ImGui::SetNextItemWidth(fs * 6);
-	if (ImGui::BeginCombo("##part", part < XG_PARTS + 2 ? part_name(part).c_str() : "OFF", ImGuiComboFlags_HeightLarge)) {
-		if (ImGui::Selectable("OFF", part >= XG_PARTS + 2))
-			br.send(m.set(ppart, 0, 127));
-		for (int i = 0; i < XG_PARTS + 2; i++)   // 64 パートの後ろに AD1・AD2
-			if (ImGui::Selectable(part_name(i).c_str(), i == part))
-				br.send(m.set(ppart, 0, i));
-		ImGui::EndCombo();
+	if (!sys) {
+		ImGui::SameLine(0, fs);
+		ImGui::TextUnformatted("掛けるパート");
+		ImGui::SameLine();
+		ImGui::SetNextItemWidth(fs * 6);
+		if (ImGui::BeginCombo("##part", part < XG_PARTS + 2 ? part_name(part).c_str() : "OFF", ImGuiComboFlags_HeightLarge)) {
+			if (ImGui::Selectable("OFF", part >= XG_PARTS + 2))
+				br.send(m.set(ppart, 0, 127));
+			for (int i = 0; i < XG_PARTS + 2; i++)   // 64 パートの後ろに AD1・AD2
+				if (ImGui::Selectable(part_name(i).c_str(), i == part))
+					br.send(m.set(ppart, 0, i));
+			ImGui::EndCombo();
+		}
 	}
 	ImGui::SameLine(0, fs * 1.5f);
 	help_checkbox();
@@ -397,13 +429,17 @@ void fx_editor::draw(xg::model &m, const xg_snapshot &, bridge &br)
 		fx_icon(dl, ImVec2(pos.x + fs * 1.8f, pos.y + fs * 0.85f), fs * 1.9f, msb, IM_COL32(250, 250, 240, 230));
 	dl->AddText(font, fs * 1.9f, ImVec2(pos.x + fs * (has_type ? 4.2f : 1.8f), pos.y + fs * 0.8f), IM_COL32(250, 250, 240, 255), title.c_str());
 	char sub[64];
-	std::snprintf(sub, sizeof(sub), "INSERTION %d  →  %s", slot, part < XG_PARTS + 2 ? part_name(part).c_str() : "OFF");
+	if (sys)
+		std::snprintf(sub, sizeof(sub), "%s", SYS_TITLES[slot - 5]);
+	else
+		std::snprintf(sub, sizeof(sub), "INSERTION %d  →  %s", slot, part < XG_PARTS + 2 ? part_name(part).c_str() : "OFF");
 	dl->AddText(ImVec2(pos.x + fs * 1.9f, pos.y + fs * 3.0f), IM_COL32(250, 250, 240, 150), sub);
-	// 動作ランプ（パートに掛かっていれば点く）
+	// 動作ランプ（インサーションはパートに掛かっていれば、システムエフェクトは種類があれば点く）
+	const bool lit = sys ? has_type && msb != 0 : part < XG_PARTS + 2;
 	const ImVec2 lamp(end.x - fs * 2.2f, pos.y + fs * 1.8f);
-	if (part < XG_PARTS + 2)
+	if (lit)
 		dl->AddCircleFilled(lamp, fs * 0.9f, IM_COL32(255, 60, 40, 60), 24);
-	dl->AddCircleFilled(lamp, fs * 0.45f, part < XG_PARTS + 2 ? IM_COL32(255, 80, 60, 255) : IM_COL32(70, 22, 18, 255), 20);
+	dl->AddCircleFilled(lamp, fs * 0.45f, lit ? IM_COL32(255, 80, 60, 255) : IM_COL32(70, 22, 18, 255), 20);
 
 	const float left = pos.x + fs * 1.8f, right = end.x - fs * 1.8f;
 	// 種類の説明
@@ -422,8 +458,8 @@ void fx_editor::draw(xg::model &m, const xg_snapshot &, bridge &br)
 
 	// ---- つまみ
 	const xg::fx_def *def = has_type ? xg::fx_find(type) : nullptr;
-	if (m_focus_type != type) {
-		m_focus_type = type;
+	if (m_focus_type != (slot << 16 | type)) {
+		m_focus_type = slot << 16 | type;
 		m_focus = -1;
 	}
 	const float ksize = fs * 3.8f;
@@ -436,34 +472,41 @@ void fx_editor::draw(xg::model &m, const xg_snapshot &, bridge &br)
 		                                 : "この種類のパラメータの表はまだ無い");
 	} else {
 		const int per_row = std::max(1, int((right - left) / (cell_w + fs * 0.6f)));
+		int shown = 0;                          // 並べた数（その塊に無いパラメータは飛ばす）
 		for (int i = 0; i < def->count; i++) {
 			const xg::fx_param &fp = def->params[i];
-			const u32 addr = xg::pack(0x03, blk, fp.addr);
+			u32 addr = 0;
+			int size = 0;
+			if (!where(fp, addr, size))
+				continue;
 			int v = 0;
-			const bool known = m.get_raw(addr, fp.size, v);
+			const bool known = m.get_raw(addr, size, v);
 			v = std::clamp(v, int(fp.lo), int(fp.hi));
 			const std::string text = known ? value_text(fp, v) : "--";
-			ImGui::SetCursorScreenPos(ImVec2(left + float(i % per_row) * (cell_w + fs * 0.6f),
-			                                 y + float(i / per_row) * (cell_h + fs * 0.6f)));
+			ImGui::SetCursorScreenPos(ImVec2(left + float(shown % per_row) * (cell_w + fs * 0.6f),
+			                                 y + float(shown / per_row) * (cell_h + fs * 0.6f)));
+			shown++;
 			char id[8];
 			std::snprintf(id, sizeof(id), "p%d", i);
 			if (knob(id, v, fp.lo, fp.hi, ksize, fp.label, text.c_str()) && known)
-				br.send(m.set_raw(addr, fp.size, v));
+				br.send(m.set_raw(addr, size, v));
 			if (ImGui::IsItemHovered() || ImGui::IsItemActive())
 				m_focus = i;
 		}
 		// EQ のパラメータを持つ種類は、つまみの下に特性のグラフ
-		const int rows = (def->count + per_row - 1) / per_row;
+		const int rows = (shown + per_row - 1) / per_row;
 		const float gy0 = y + float(rows) * (cell_h + fs * 0.6f);
 		const float gy1 = note0.y - fs * 0.6f;
 		if (gy1 - gy0 > fs * 4.0f)
-			eq_graph(*def, blk, m, br, ImVec2(left - fs * 0.4f, gy0), ImVec2(right + fs * 0.4f, gy1));
+			eq_graph(*def, m, br, ImVec2(left - fs * 0.4f, gy0), ImVec2(right + fs * 0.4f, gy1));
 	}
 	dl->AddRectFilled(note0, note1, IM_COL32(0, 0, 0, 70), 8.0f);
-	if (def && m_focus >= 0 && m_focus < def->count) {
+	u32 focus_addr = 0;
+	int focus_size = 0;
+	if (def && m_focus >= 0 && m_focus < def->count && where(def->params[m_focus], focus_addr, focus_size)) {
 		const xg::fx_param &fp = def->params[m_focus];
 		int v = 0;
-		const bool known = m.get_raw(xg::pack(0x03, blk, fp.addr), fp.size, v);
+		const bool known = m.get_raw(focus_addr, focus_size, v);
 		char head[64];
 		std::snprintf(head, sizeof(head), "%s   %s", fp.label, known ? value_text(fp, std::clamp(v, int(fp.lo), int(fp.hi))).c_str() : "--");
 		dl->AddText(font, fs * 1.1f, ImVec2(note0.x + fs * 0.6f, note0.y + fs * 0.4f), IM_COL32(150, 230, 90, 255), head);

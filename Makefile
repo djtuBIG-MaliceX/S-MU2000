@@ -239,6 +239,12 @@ $(BUILD)/fxsweep$(EXE): $(OBJS) $(BUILD)/src/mu2000.o $(BUILD)/tools/fxsweep/fxs
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
 
+# リバーブ・コーラス・バリエーションのパラメータを、種類ごとに firmware に確かめる（src/xg/sysfx.h）。
+#   build/sysfx_check.exe ../MU2000/roms > sysfx.txt
+$(BUILD)/sysfx_check$(EXE): $(OBJS) $(BUILD)/src/mu2000.o $(BUILD)/tools/fxsweep/sysfx_check.o
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+
 # SH-2 を止めたまま音を出す（doc/native-engine.md の段 2）。
 #   build/nativeplay.exe ../MU2000/roms out.wav -b 0,0,0 -n 60
 $(BUILD)/nativeplay$(EXE): $(OBJS) $(BUILD)/src/mu2000.o $(BUILD)/tools/native/nativeplay.o
@@ -617,6 +623,20 @@ install-clap: $(CLAP_BIN)
 	mkdir -p "$(CLAP_INSTALL)"
 	cp -r $(CLAP_DIR) "$(CLAP_INSTALL)/"
 	@echo "入れた: $(CLAP_INSTALL)/S-MU2000.clap"
+
+# The same small CLAP host as on Windows (src/clap/probe.cpp opens the module
+# with dlopen here, so it wants the executable inside the bundle, not the
+# bundle). `make clap-probe` runs its automation and state checks without a
+# DAW; to hear it, give it a song:
+#   build/clapprobe build/S-MU2000.clap/Contents/MacOS/S-MU2000 song.mid out.wav
+$(BUILD)/clapprobe$(EXE): $(BUILD)/clapobj/src/clap/probe.o $(BUILD)/src/smf.o $(BUILD)/src/compat/compat.o
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+
+CLAP_MODULE := $(CLAP_DIR)/Contents/MacOS/S-MU2000
+
+clap-probe: $(BUILD)/clapprobe$(EXE) $(CLAP_BIN)
+	S_MU2000_ROMS=$(ROMS) $(BUILD)/clapprobe$(EXE) $(CLAP_MODULE) --automation
 
 # Small tool that pretends to be a host. Same as the Windows one, except that the
 # module is opened with CFBundle and the parent window is probe_host_mac.mm

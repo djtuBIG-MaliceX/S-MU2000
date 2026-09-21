@@ -55,6 +55,24 @@ def tool(name):
     return BUILD / (name + EXE)
 
 
+# **いくつ同時に鳴らすか**。曲はどれも別々の render で鳴らすので、互いに関係が無い
+# （出てくる音は時計でなく機械の中の時刻で決まるので、同時に回しても 1 ビットも変わらない）。
+# render は 1 本で 2 つの糸（2 個目の SWP30）を使うので、既定はコア数の半分。
+# `-j` か環境変数 SMU_JOBS で変える（1 なら前と同じく 1 本ずつ）
+JOBS = max(1, (os.cpu_count() or 2) // 2)
+
+
+def pmap(fn, items):
+    """items の 1 つずつに fn を JOBS 本まで同時に掛け、**元の並びで**結果を返す。
+    fn は外の exe を待つだけなので、糸で足りる（Python の錠は待っている間は外れている）"""
+    items = list(items)
+    if JOBS <= 1 or len(items) <= 1:
+        return [fn(x) for x in items]
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=JOBS) as ex:
+        return list(ex.map(fn, items))
+
+
 def find_roms(given):
     cands = []
     if given:
@@ -93,6 +111,14 @@ class Report:
         self.rows = []
         self.bad = 0
 
+    def say(self, line):
+        """試験の途中の 1 行（NG の中身など）"""
+        print(line)
+
+    def merge(self, other):
+        self.rows += other.rows
+        self.bad += other.bad
+
     def add(self, name, ok, note=""):
         self.rows.append((name, ok, note))
         if not ok:
@@ -108,6 +134,16 @@ class Report:
             print("  %d 件食い違った。意図した変更なら --update で指紋を焼き直す" % self.bad)
         else:
             print("  全部そろっている")
+
+
+class Buffered(Report):
+    """同時に回す段のための控え。結果の行も途中の行も溜めておき、段の順に後で出す"""
+    def __init__(self):
+        super().__init__()
+        self.lines = []
+
+    def say(self, line):
+        self.lines.append(line)
 
 
 def step_verify(rep, update):
@@ -188,8 +224,8 @@ def render(roms, name, midi, seconds, extra=(), env=None):
 
 def step_cases(rep, roms, cases, update):
     first = None
-    for name, (midi, seconds) in cases.items():
-        fp, took = render(roms, name, midi, seconds)
+    done = pmap(lambda kv: render(roms, kv[0], kv[1][0], kv[1][1]), cases.items())
+    for (name, (midi, seconds)), (fp, took) in zip(cases.items(), done):
         if fp is None:
             rep.add(name, False, "鳴らせなかった（%s.out を見る）" % name)
             continue
@@ -220,13 +256,18 @@ def step_jit_off(rep, roms, cases):
     check the MEG JIT's author asks for by hand). The reference carried by
     tests/*.json cannot catch this on its own, because it is one number."""
     names, bad = [], []
-    for name, (midi, seconds) in cases.items():
+
+    def nojit(kv):
+        name, (midi, seconds) = kv
+        return run([tool("render"), roms, midi, WORK / ("%s_nojit.wav" % name), "%.3f" % seconds,
+                    "--boot", "%.3f" % BOOT_AT],
+                   out=WORK / ("%s_nojit.out" % name), err=WORK / ("%s_nojit.log" % name),
+                   env={"SMU2000_SH2_JIT": "0", "SMU2000_MEG_JIT": "0"})
+
+    rcs = pmap(nojit, cases.items())
+    for (name, (midi, seconds)), rc in zip(cases.items(), rcs):
         on = WORK / ("%s.wav" % name)                     # 3 番が焼いた（JIT あり）
         off = WORK / ("%s_nojit.wav" % name)
-        rc = run([tool("render"), roms, midi, off, "%.3f" % seconds,
-                  "--boot", "%.3f" % BOOT_AT],
-                 out=WORK / ("%s_nojit.out" % name), err=WORK / ("%s_nojit.log" % name),
-                 env={"SMU2000_SH2_JIT": "0", "SMU2000_MEG_JIT": "0"})
         if rc != 0 or not off.exists() or not on.exists():
             bad.append(name)
             continue
@@ -319,6 +360,8 @@ SHAPE_MIN = {
     "ctlrest": 0.95,
     # XG のパート番地のうち、SysEx を 1 度も通していなかった軸
     "xgpeg": 0.95,
+    "xghpf": 0.95,
+    "xgpegatk": 0.95,
     "xgsys": 0.95,
     # meter は 15 パートを同時に鳴らすので dense と同じ事情で形が落ちる
     # （狙いは液晶のほうなので、音は緩めに見る）
@@ -339,13 +382,11 @@ def step_native_engine(rep, roms, cases):
     worst = 0.0
     worst_name = ""
     bad = []
-    for name, (midi, seconds) in cases.items():
-        base = BASE / ("%s.json" % name)
-        if not base.exists():
-            continue
-        ref = json.loads(base.read_text(encoding="utf-8"))
-        fp, _ = render(roms, name + "_ne", midi, seconds,
-                       extra=["--native-engine"], env=env)
+    todo = [(name, v) for name, v in cases.items() if (BASE / ("%s.json" % name)).exists()]
+    done = pmap(lambda kv: render(roms, kv[0] + "_ne", kv[1][0], kv[1][1],
+                                  extra=["--native-engine"], env=env), todo)
+    for (name, (midi, seconds)), (fp, _) in zip(todo, done):
+        ref = json.loads((BASE / ("%s.json" % name)).read_text(encoding="utf-8"))
         if fp is None:
             bad.append("%s: 鳴らせなかった" % name)
             continue
@@ -432,7 +473,7 @@ def step_xg(rep, roms):
         note += "（build/tests/xgtest.log）"
         for l in lines:
             if l.strip().startswith("NG"):
-                print("   " + l.strip())
+                rep.say("   " + l.strip())
     rep.add("xg", rc == 0, note)
 
 
@@ -452,7 +493,7 @@ def step_sampling(rep, roms):
         note += "（build/tests/samptest.log）"
         for l in lines:
             if l.startswith("NG"):
-                print("   " + l.strip())
+                rep.say("   " + l.strip())
     rep.add("sampling", rc == 0, note)
 
 
@@ -775,7 +816,12 @@ def main():
     ap.add_argument("--update", action="store_true", help="指紋を焼き直す")
     ap.add_argument("--require-roms", action="store_true",
                     help="ROM が無ければ失敗にする")
+    ap.add_argument("-j", "--jobs", type=int,
+                    help="同時に鳴らす数（既定はコア数の半分。SMU_JOBS でも渡せる）")
     a = ap.parse_args()
+    global JOBS
+    if a.jobs or os.environ.get("SMU_JOBS"):
+        JOBS = max(1, a.jobs or int(os.environ["SMU_JOBS"]))
 
     WORK.mkdir(parents=True, exist_ok=True)
     BASE.mkdir(parents=True, exist_ok=True)
@@ -819,32 +865,36 @@ def main():
     step_jit_off(rep, roms, cases)
 
     print()
-    print("== 5. スレーブを別の糸で回しても同じ音か")
-    step_threading(rep, roms, first)
-
+    # **5-10 は同時に回す**。どれも 1-2 本の render か道具を順に回すだけで、作業の
+    # ファイルの名前も段ごとに別。1 本ずつだと合わせて 76 秒、同時なら長い段 1 つぶん。
+    # 結果と途中の行は段ごとに控えておき、下で段の順に出す
+    steps = [("== 5. スレーブを別の糸で回しても同じ音か", lambda r: step_threading(r, roms, first))]
     if not a.only:
-        print()
-        print("== 6. パラメータの層を firmware に読み返させる")
-        step_xg(rep, roms)
-
-        print()
-        print("== 7. サンプリング（録音して試聴する）")
-        step_sampling(rep, roms)
-
-        print()
-        print("== 8. パネル（native の口でもボタンと液晶が効くか）")
-        step_panel(rep, roms)
-        step_meter(rep, roms)
-        step_screen(rep, roms)
-        step_dial(rep, roms, cases)
-
-        print()
-        print("== 9. USB の口（プラグインの既定）")
-        step_usb(rep, roms, cases)
-
-        print()
-        print("== 10. 2 回目の音（写し取りが済んだ状態）")
-        step_warm(rep, roms, cases)
+        steps += [
+            ("== 6. パラメータの層を firmware に読み返させる", lambda r: step_xg(r, roms)),
+            ("== 7. サンプリング（録音して試聴する）", lambda r: step_sampling(r, roms)),
+            ("== 8. パネル（native の口でもボタンと液晶が効くか）",
+             lambda r: (step_panel(r, roms), step_meter(r, roms), step_screen(r, roms),
+                        step_dial(r, roms, cases))),
+            ("== 9. USB の口（プラグインの既定）", lambda r: step_usb(r, roms, cases)),
+            ("== 10. 2 回目の音（写し取りが済んだ状態）", lambda r: step_warm(r, roms, cases)),
+        ]
+    subs = [Buffered() for _ in steps]
+    if JOBS <= 1:
+        for (_, fn), sub in zip(steps, subs):
+            fn(sub)
+    else:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=len(steps)) as ex:
+            for f in [ex.submit(fn, sub) for (_, fn), sub in zip(steps, subs)]:
+                f.result()
+    for i, ((title, _), sub) in enumerate(zip(steps, subs)):
+        if i:
+            print()
+        print(title)
+        for line in sub.lines:
+            print(line)
+        rep.merge(sub)
 
     rep.show()
     return 1 if rep.bad else 0

@@ -27,19 +27,9 @@ std::string shown(const xg::param &p, int v)
 	return is_rcv(p) ? channel_name(v) : xg::format(p, v);
 }
 
-// パートの面に並べる組
-struct group { const char *title; const char *const keys[12]; };
-
-const group GROUPS[] = {
-	{ "音色",             { "part.bank_msb", "part.bank_lsb", "part.program", "part.mode", "part.element_reserve" } },
-	{ "音量と送り",       { "part.volume", "part.pan", "part.dry_level", "part.reverb_send", "part.chorus_send", "part.variation_send" } },
-	{ "受信と発音",       { "part.rcv_channel", "part.mono_poly", "part.key_assign", "part.note_low", "part.note_high",
-	                        "part.note_shift", "part.detune", "part.vel_depth", "part.vel_offset" } },
-	{ "フィルタと EG",    { "part.cutoff", "part.resonance", "part.attack", "part.decay", "part.release" } },
-	{ "ビブラート",       { "part.vib_rate", "part.vib_depth", "part.vib_delay" } },
-	{ "モジュレーション", { "part.mw_pitch", "part.mw_filter", "part.mw_amp", "part.mw_lfo_pmod", "part.mw_lfo_fmod", "part.mw_lfo_amod" } },
-	{ "ピッチベンド",     { "part.bend_pitch", "part.bend_filter", "part.bend_amp", "part.bend_lfo_pmod", "part.bend_lfo_fmod", "part.bend_lfo_amod" } },
-};
+// パートの面に並べる組（音色の窓の「すべて」と同じ表。xg_ui.h）
+using group = part_group;
+const auto &GROUPS = PART_GROUPS;
 
 ImU32 col(ImGuiCol c, float alpha = 1.0f) { return ImGui::GetColorU32(c, alpha); }
 

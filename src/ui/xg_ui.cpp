@@ -9,6 +9,7 @@
 #include "imgui.h"
 
 #include <algorithm>
+#include <cstdarg>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -72,6 +73,36 @@ void set_voice_rom(std::shared_ptr<const std::vector<u8>> rom)
 }
 
 const xg::voice_rom *voices() { return g_voices.get(); }
+
+namespace {
+const xg_snapshot *g_current_ram = nullptr;
+}
+
+namespace {
+bool g_hint_bar = false;
+std::string g_hint;
+}
+
+void begin_hint_bar() { g_hint_bar = true; g_hint.clear(); }
+void end_hint_bar() { g_hint_bar = false; }
+bool hint_bar() { return g_hint_bar; }
+const std::string &hint_text() { return g_hint; }
+
+void hint(const char *fmt, ...)
+{
+	char buf[1024];
+	va_list ap;
+	va_start(ap, fmt);
+	std::vsnprintf(buf, sizeof(buf), fmt, ap);
+	va_end(ap);
+	if (g_hint_bar)
+		g_hint = buf;
+	else
+		ImGui::SetItemTooltip("%s", buf);
+}
+
+void set_current_ram(const xg_snapshot *ram) { g_current_ram = ram; }
+const xg_snapshot *current_ram() { return g_current_ram; }
 
 bool fx_type_menu(const std::vector<xg::fx_type> &types, int current, int &chosen)
 {
@@ -183,10 +214,10 @@ int  g_fx_slot = 1;
 bool g_fx_request = false;
 }
 
-void request_fx(int slot) { g_fx_slot = std::clamp(slot, 1, 4); g_fx_request = true; }
+void request_fx(int slot) { g_fx_slot = std::clamp(slot, 1, 7); g_fx_request = true; }
 bool take_fx_request() { const bool r = g_fx_request; g_fx_request = false; return r; }
 int  fx_window_slot() { return g_fx_slot; }
-void set_fx_window_slot(int slot) { g_fx_slot = std::clamp(slot, 1, 4); }
+void set_fx_window_slot(int slot) { g_fx_slot = std::clamp(slot, 1, 7); }
 
 namespace {
 int  g_shape_part = 0;
@@ -204,6 +235,40 @@ bool g_master_request = false;
 
 void request_master() { g_master_request = true; }
 bool take_master_request() { const bool r = g_master_request; g_master_request = false; return r; }
+
+namespace {
+bool g_file_dialogs = false;
+file_ask g_file_ask = file_ask::none;
+std::vector<u8> g_file_out, g_file_in;
+bool g_file_in_ready = false;
+std::string g_file_note;
+}
+
+void set_file_dialogs(bool on) { g_file_dialogs = on; }
+bool file_dialogs() { return g_file_dialogs; }
+void ask_save_file(std::vector<u8> bytes) { g_file_out = std::move(bytes); g_file_ask = file_ask::save; }
+void ask_open_file() { g_file_ask = file_ask::open; }
+file_ask take_file_ask(std::vector<u8> &bytes)
+{
+	const file_ask a = g_file_ask;
+	g_file_ask = file_ask::none;
+	if (a == file_ask::save)
+		bytes = std::move(g_file_out);
+	g_file_out.clear();
+	return a;
+}
+void give_opened_file(std::vector<u8> bytes) { g_file_in = std::move(bytes); g_file_in_ready = true; }
+bool take_opened_file(std::vector<u8> &bytes)
+{
+	if (!g_file_in_ready)
+		return false;
+	bytes = std::move(g_file_in);
+	g_file_in.clear();
+	g_file_in_ready = false;
+	return true;
+}
+void set_file_note(std::string text) { g_file_note = std::move(text); }
+const std::string &file_note() { return g_file_note; }
 
 const xg::param &P(const char *key)
 {
@@ -750,9 +815,10 @@ const help_text HELP[] = {
 		"Part volume (CC7). Balances the loudness of the parts against each other." } },
 	{ "EXP", {
 		"エクスプレッション（CC11）。音量をさらに絞る。VOL と掛け算で効き、\n"
-		"曲の中で抑揚（だんだん大きく・小さく）をつけるのに使われる。表示だけ",
+		"曲の中で抑揚（だんだん大きく・小さく）をつけるのに使われる。\n"
+		"触ると、そのパートの受信チャンネルへ CC11 を送る",
 		"Expression (CC11). Scales the volume further, multiplied with VOL.\n"
-		"Songs use it for swells and fades. Display only." } },
+		"Songs use it for swells and fades. Editing sends CC11 on the part's receive channel." } },
 	{ "PAN", {
 		"左右の位置（CC10 / Pan）。C が真ん中、L は左、R は右。Rnd は弾くたびにばらばら",
 		"Stereo position (CC10). C is centre, L left, R right. Rnd moves on every note." } },
@@ -760,8 +826,10 @@ const help_text HELP[] = {
 		"ピッチベンド。音程を滑らかに上げ下げする。0 が元の音程。表示だけ",
 		"Pitch bend. Slides the pitch up or down; 0 is the original pitch. Display only." } },
 	{ "MOD", {
-		"モジュレーション（CC1）。ビブラートなど、音の揺れの深さ。表示だけ",
-		"Modulation (CC1). Depth of vibrato and similar wobble. Display only." } },
+		"モジュレーション（CC1）。ビブラートなど、音の揺れの深さ。\n"
+		"触ると、そのパートの受信チャンネルへ CC1 を送る",
+		"Modulation (CC1). Depth of vibrato and similar wobble.\n"
+		"Editing sends CC1 on the part's receive channel." } },
 	{ "HOLD", {
 		"ダンパーペダル（CC64）。ON の間は、鍵盤を離しても音が伸びる。表示だけ",
 		"Damper pedal (CC64). While ON, notes keep sounding after the keys are released. Display only." } },
@@ -825,6 +893,45 @@ const help_text HELP[] = {
 	{ "part.resonance", {
 		"フィルタのレゾナンス（CC71）。カットオフのあたりを強調する",
 		"Filter resonance (CC71). Emphasises the area around the cutoff." } },
+	{ "part.hpf_cutoff", {
+		"ハイパスフィルタのカットオフ。この高さより低い音を削る。＋で低音が減って軽く薄い音に。\n"
+		"音色の元の設定からのずらし量（+0 がそのまま）。レゾナンスは効かない",
+		"High-pass filter cutoff. Removes the sound below it; + thins out the low end.\n"
+		"An offset from the voice's own setting (+0 leaves it). Resonance does not apply to it." } },
+	{ "part.peg_init_level", {
+		"ピッチ EG の出だしの音程。鍵盤を押した瞬間、本来の音程からどれだけずれた所から始まるか。\n"
+		"音色の元の設定からのずらし量",
+		"Pitch EG start level: how far from the true pitch a note starts when the key is pressed.\n"
+		"An offset from the voice's own setting." } },
+	{ "part.peg_attack_time", {
+		"ピッチ EG のアタック。出だしの音程から本来の音程へたどり着くまでの時間",
+		"Pitch EG attack: how long the pitch takes to move from the start level to the true pitch." } },
+	{ "part.peg_rel_level", {
+		"ピッチ EG のリリースレベル。鍵盤を離したあと、音程が最後に向かう先",
+		"Pitch EG release level: where the pitch heads after the key is released." } },
+	{ "part.peg_rel_time", {
+		"ピッチ EG のリリース。鍵盤を離してから、リリースレベルの音程へ移るまでの時間",
+		"Pitch EG release time: how long the pitch takes to reach the release level after key-off." } },
+	{ "part.vel_limit_low", {
+		"このパートが鳴る強さ（ベロシティ）の下限。これより弱く弾いた音は鳴らない",
+		"Lowest velocity this part plays. Softer notes are not played." } },
+	{ "part.vel_limit_high", {
+		"このパートが鳴る強さ（ベロシティ）の上限。これより強く弾いた音は鳴らない。\n"
+		"同じチャンネルの 2 つのパートで範囲を分けると、強さで音色を切り替えられる",
+		"Highest velocity this part plays. Harder notes are not played.\n"
+		"Splitting the range between two parts on the same channel switches voices by velocity." } },
+	{ "part.ac1_cc", {
+		"AC1 に使うコントロールチェンジの番号（0-95）。下の AC1 の効き先がこの CC で動く",
+		"Control change number used as AC1 (0-95). The AC1 settings below respond to it." } },
+	{ "part.ac2_cc", {
+		"AC2 に使うコントロールチェンジの番号（0-95）。下の AC2 の効き先がこの CC で動く",
+		"Control change number used as AC2 (0-95). The AC2 settings below respond to it." } },
+	{ "part.porta_switch", {
+		"ポルタメント（CC65）。ON で、次の音へ音程が滑らかに移る。ドラムのパートでは使えない",
+		"Portamento (CC65). When ON, the pitch glides into the next note. Not available on drum parts." } },
+	{ "part.porta_time", {
+		"ポルタメントの時間（CC5）。大きいほどゆっくり滑る",
+		"Portamento time (CC5). Higher values glide more slowly." } },
 	{ "part.attack", {
 		"アタック（CC73）。鍵盤を押してから音が立ち上がるまでの速さ。−で速く、＋でゆっくり",
 		"Attack (CC73). How fast the sound rises after a key is pressed. - is faster, + is slower." } },
@@ -923,12 +1030,49 @@ void ensure_loaded()
 		load_settings();
 }
 
+// 操作の源（モジュレーションホイール・ピッチベンド・アフタータッチ・AC1・AC2）ごとに 6 つずつ並ぶ
+// 「効き先」の説明は、源と効き先の 2 つの表から組み立てる（part.ac1_filter なら AC1 × フィルタ）
+const char *source_help(const char *name)
+{
+	struct part_of { const char *key; const char *ja; const char *en; };
+	static const part_of SOURCES[] = {
+		{ "part.mw_",   "モジュレーションホイール（CC1）", "The modulation wheel (CC1)" },
+		{ "part.bend_", "ピッチベンド",                     "Pitch bend" },
+		{ "part.cat_",  "チャンネルアフタータッチ（鍵盤を押し込む強さ。チャンネルに 1 つ）",
+		                "Channel aftertouch (pressure on the keys, one value per channel)" },
+		{ "part.pat_",  "ポリアフタータッチ（鍵ごとの押し込む強さ）", "Polyphonic aftertouch (pressure per key)" },
+		{ "part.ac1_",  "AC1（AC1 CC No で決めたコントロールチェンジ）", "AC1 (the control change chosen by AC1 CC No)" },
+		{ "part.ac2_",  "AC2（AC2 CC No で決めたコントロールチェンジ）", "AC2 (the control change chosen by AC2 CC No)" },
+	};
+	static const part_of TARGETS[] = {
+		{ "pitch",    "で音程を動かす幅。±24 半音", " moves the pitch by this many semitones (±24)." },
+		{ "filter",   "でフィルタのカットオフを動かす量。＋なら上げるほど開き、−なら上げるほど閉じる",
+		              " moves the filter cutoff by this much. With + raising it opens the filter, with - it closes it." },
+		{ "amp",      "で音量を動かす量。＋なら上げるほど大きく、−なら上げるほど小さく", " changes the volume by this much. With + raising it gets louder, with - quieter." },
+		{ "lfo_pmod", "でビブラート（音程の揺れ）を深くする量", " adds this much vibrato (pitch wobble)." },
+		{ "lfo_fmod", "でフィルタの揺れ（ワウ）を深くする量", " adds this much filter wobble." },
+		{ "lfo_amod", "でトレモロ（音量の揺れ）を深くする量", " adds this much tremolo (volume wobble)." },
+	};
+	static std::string text;
+	for (const part_of &s : SOURCES) {
+		const size_t n = std::strlen(s.key);
+		if (std::strncmp(name, s.key, n))
+			continue;
+		for (const part_of &t : TARGETS)
+			if (!std::strcmp(name + n, t.key)) {
+				text = g_lang == 1 ? std::string(s.en) + t.en : std::string(s.ja) + t.ja;
+				return text.c_str();
+			}
+	}
+	return nullptr;
+}
+
 const char *find_help(const char *name)
 {
 	for (const help_text &h : HELP)
 		if (!std::strcmp(h.name, name))
 			return h.text[g_lang] ? h.text[g_lang] : h.text[0];
-	return nullptr;
+	return source_help(name);
 }
 
 } // namespace
@@ -1013,8 +1157,12 @@ void help_tip(const char *name)
 {
 	if (!help_on() || !ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
 		return;
-	if (const char *t = find_help(name))
-		ImGui::SetTooltip("%s", t);
+	if (const char *t = find_help(name)) {
+		if (g_hint_bar)
+			g_hint = t;                   // 説明の帯のある窓では帯へ
+		else
+			ImGui::SetTooltip("%s", t);
+	}
 }
 
 void help_checkbox()

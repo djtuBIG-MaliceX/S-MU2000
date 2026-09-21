@@ -15,13 +15,23 @@ a value, request that address, and check it reads back. The per-effect layout
 
 | Block | Type | Param N (1..10) | Param N (11..16) |
 |---|---|---|---|
-| Reverb `02 01` | `00` (2B) | `02 + (N-1)` (1B) | — |
-| Chorus `02 01` | `20` (2B) | `22 + (N-1)` (1B) | — |
+| Reverb `02 01` | `00` (2B) | `02 + (N-1)` (1B) | `10 + (N-11)` (1B) |
+| Chorus `02 01` | `20` (2B) | `22 + (N-1)` (1B) | — (not accepted) |
 | **Variation** `02 01` | `40` (2B) | **`42 + 2·(N-1)`** (2B) | **`70 + (N-11)`** (1B) |
 | **Insertion 1** `03 00` | `00` (2B) | **`02 + (N-1)`** (1B) *or* **`30 + 2·(N-1)`** (2B) — see below | **`20 + (N-11)`** (1B) |
 | Insertion 2/3/4 | `03 01/02/03 00` | (same layout as Ins 1) | (same) |
 
 `2B` = two data bytes (MSB, LSB); `1B` = one data byte.
+
+**Reverb, chorus and variation use the insertion tables.** `tools/fxsweep/sysfx_check.cpp` takes each
+type's insertion parameters (`src/xg/fx_params.h`), maps them to the addresses above
+(`src/xg/sysfx.h`), writes the lower and upper limit and reads them back. All 196 reverb, 154 chorus and
+1256 variation parameters came back as written, except parameter 10 (Dry/Wet) of reverb and chorus: it
+always reads 0, because a system effect is mixed by its return level instead. Chorus P11–16 (`30–35`)
+answer a Parameter Request but a write is dropped, and the work RAM has no room for them.
+
+**In work RAM the three blocks are packed** (`src/xg/ram.h`): reverb `00–0D` then `10–15`; chorus `20–2E`;
+variation `40–41`, then P1–10 as ten 16-bit values, then `56–60`, then `70–75`.
 
 **Insertion P1–10 come in two forms, per effect type.** Most effects store P1–10
 as **1-byte** values at `03 0n 02–0B`. Effects whose parameters need more than 7

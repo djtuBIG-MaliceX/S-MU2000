@@ -1499,6 +1499,55 @@ def case_xgpeg():
     return [track(seq(ev))], t + 1.0
 
 
+def case_xgpegatk():
+    """**音程の包絡線の出だし**（XG の `08 pp 69`・`6A` ＝ ワーク RAM の +0x62・+0x63。6.214）。
+
+    xgpeg は離し（6B・6C）だけで、出だしの 2 つは native が読んでいなかった
+    （鍵を押すときに 64 を渡していた）。アタックの時間は素の速さを立ち上がりのつまみと
+    同じ表で動かすので、素が即到達（63）の GrandPno では 64 より上でだけ効く。
+    SquareLd は素の速さが鍵で動く音色。
+    """
+    ev = head()
+    ev += [(1.0, bytes([0xc0, 0])), (1.0, bytes([0xc1, 80]))]     # GrandPno / SquareLd
+    ev += note(0, 60, 100, 1.2, 0.5)                  # 1 音目。ここで写し取る
+    ev += note(1, 60, 100, 1.8, 0.5)
+    t = 2.6
+    for init, atk in ((0x7f, 0x60), (0x00, 0x50), (0x60, 0x30), (0x20, 0x7f), (0x40, 0x40)):
+        for ch in (0, 1):
+            ev += [(t, xg([0x08, ch, 0x69, init])), (t, xg([0x08, ch, 0x6a, atk]))]
+        ev += note(0, 62, 100, t + 0.2, 0.5)
+        ev += note(1, 62, 100, t + 0.8, 0.5)
+        t += 1.4
+    return [track(seq(ev))], t + 1.0
+
+
+def case_xghpf():
+    """**パートの HPF**（`0A pp 20`。パートの塊の番地は 08 ではなく 0A）。
+
+    firmware はフィルタの第 2 段（レジスタ `0x02`、上 4bit の 8 がハイパス）に
+    `要素の byte82 × 16 + 24 × (値 - 64)` を 0-0x7FF に収めて書く。native の口は
+    写し取った値をそのまま使っていたので、HPF を動かしても音が変わらなかった。
+    byte82 が 0 の GrandPno と 0x180 の DistGtr、ドラムのパート（記録の byte20）で振る。
+    低い値（0x20）は 0 で止まる側、0x7F は高い側。
+    """
+    # パートは同時に鳴らさず、順に鳴らす（3 つを同時に打つと、HPF と関係なく
+    # native の形がずれる。別の話なのでここには混ぜない）
+    ev = head()
+    ev += [(1.0, bytes([0xc0, 0])), (1.0, bytes([0xc1, 30]))]     # GrandPno / DistGtr
+    ev += note(0, 36, 100, 1.2, 0.5)                  # 1 音目。ここで写し取る
+    ev += note(1, 40, 100, 1.8, 0.5)
+    ev += note(9, 38, 100, 2.4, 0.5)
+    t = 3.2
+    for val in (0x7f, 0x60, 0x20, 0x40):
+        ev += [(t, xg([0x0a, 0x00, 0x20, val])), (t, xg([0x0a, 0x01, 0x20, val])),
+               (t, xg([0x0a, 0x09, 0x20, val]))]
+        ev += note(0, 36, 100, t + 0.2, 0.5)
+        ev += note(1, 40, 100, t + 0.8, 0.5)
+        ev += note(9, 38, 100, t + 1.4, 0.5)
+        t += 2.0
+    return [track(seq(ev))], t + 1.0
+
+
 def case_xgsys():
     """**つまみと同じ所を SysEx で書く**。ビブラート（`08 pp 15/16/17`）・
     明るさと響き（`18/19`）・包絡線（`1A/1B/1C`）・ベンドの幅（`23`）は
@@ -1597,6 +1646,8 @@ CASES = {
     "reltail": case_reltail,
     "ctlrest": case_ctlrest,
     "xgpeg":   case_xgpeg,
+    "xghpf":   case_xghpf,
+    "xgpegatk": case_xgpegatk,
     "xgsys":   case_xgsys,
 }
 

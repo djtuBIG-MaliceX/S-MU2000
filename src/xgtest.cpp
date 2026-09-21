@@ -12,6 +12,13 @@
 #include "mu2000.h"
 #include "xg/model.h"
 #include "xg/ram.h"
+#include "ui/xg_state.h"
+#include "xg/sysfx.h"
+
+using ui::XG_SYSTEM_SIZE;
+using ui::XG_EFFECT_SIZE;
+using ui::XG_PARTS;
+using ui::XG_PART_COPY;
 
 #include <cstdio>
 #include <cstring>
@@ -183,8 +190,8 @@ int main(int argc, char **argv)
 				}
 			}
 			for (const xg::param &p : xg::params()) {
-				// パートの一括ダンプは 00-28 の 41 バイトだけ。EQ（72-77）は入らない
-				if (p.where != xg::area::part || p.lo >= xg::ram::PART_XG_SIZE)
+				// パートの一括ダンプは 08 pp 00-28 の 41 バイトだけ。EQ（72-77）や HPF（0A pp 20）は入らない
+				if (p.where != xg::area::part || p.hi != 0x08 || p.lo >= xg::ram::PART_XG_SIZE)
 					continue;
 				int a = 0, b = 0;
 				const bool in_dump = dumped.get(p, part, a);
@@ -376,6 +383,165 @@ int main(int argc, char **argv)
 		if (wide != 1234) {
 			bad++;
 			problems.push_back("インサーションの 2 バイトのパラメータの RAM の位置");
+		}
+	}
+
+	// ---- 6. XG の値の控え（ui/xg_state.h の setup_messages）を、起動しただけの機械へ流して戻るか。
+	//         プラグインの「XG の値だけ」の状態と、.syx の書き出しがこれを使う
+	{
+		auto set = [&](std::initializer_list<int> m) {
+			std::vector<u8> v = { 0xf0, 0x43, 0x10, 0x4c };
+			for (int b : m) v.push_back(u8(b));
+			v.push_back(0xf7);
+			g.send(v);
+			g.pump(60);
+		};
+		set({ 0x02, 0x01, 0x00, 0x01, 0x01 });          // リバーブ HALL 2
+		set({ 0x02, 0x01, 0x02, 0x2a });
+		set({ 0x02, 0x01, 0x10, 0x05 });                // リバーブのパラメータ 11・15（詰めて並ぶところ）
+		set({ 0x02, 0x01, 0x14, 0x33 });
+		set({ 0x02, 0x01, 0x20, 0x43, 0x00 });          // コーラス FLANGER 1
+		set({ 0x02, 0x01, 0x24, 0x55 });
+		set({ 0x02, 0x01, 0x40, 0x05, 0x00 });          // バリエーション DELAY LCR
+		set({ 0x02, 0x01, 0x44, 2000 >> 7, 2000 & 0x7f });   // パラメータ 2 に 128 を超える値
+		set({ 0x02, 0x01, 0x56, 0x51 });
+		set({ 0x02, 0x01, 0x72, 0x0a });                // パラメータ 13
+		for (int part : { 0, 9, 17, 40 }) {
+			set({ 0x08, part, 0x67, 0x01 });            // ポルタメント・ピッチ EG・HPF・EQ
+			set({ 0x08, part, 0x68, 0x30 + part });
+			set({ 0x08, part, 0x69, 0x50 });
+			set({ 0x08, part, 0x6c, 0x22 });
+			set({ 0x0a, part, 0x20, 0x55 - part });
+			set({ 0x08, part, 0x72, 0x46 });
+			set({ 0x08, part, 0x43, 0x50 });            // スケールチューニング・AC1・ベロシティの範囲
+			set({ 0x08, part, 0x5b, 0x30 + part });
+			set({ 0x08, part, 0x6d, 0x20 });
+			set({ 0x08, part, 0x76, 0x10 });
+		}
+		set({ 0x08, 0x09, 0x07, 0x04 });                // パート 10 を DRUMS3
+		g.pump(300);
+
+		auto snapshot = [](const mu2000 &mu, ui::xg_snapshot &s) {
+			const std::vector<u8> &ram = mu.nvram();
+			std::memcpy(s.system, ram.data() + xg::ram::SYSTEM, XG_SYSTEM_SIZE);
+			std::memcpy(s.effect, ram.data() + xg::ram::EFFECT, XG_EFFECT_SIZE);
+			for (int p = 0; p < XG_PARTS; p++)
+				std::memcpy(s.parts[p], ram.data() + xg::ram::part_base(p), XG_PART_COPY);
+		};
+		static ui::xg_snapshot from, to;
+		snapshot(g.mu, from);
+		const std::vector<u8> msgs = ui::setup_messages(from);
+
+		auto boot = [&](rig &x) {
+			x.mu.load_program(dir + "/mu2000_flash.bin");
+			x.mu.load_wave(dir + "/dump");
+			x.mu.load_sintab(dir + "/standin/sin-table.bin");
+			x.mu.set_usb_host(usb_host);
+			x.mu.reset();
+			for (; x.samples < 30 * RATE && !x.mu.midi_ready(); x.samples++)
+				x.mu.run_sample(l, r);
+			if (usb_host)
+				for (; x.samples < 10 * RATE; x.samples++)
+					x.mu.run_sample(l, r);
+			x.pump(500);
+		};
+
+		// 表にある番地を全部（システム・エフェクト・64 パート）比べる
+		auto compare = [&](const ui::xg_snapshot &to, const char *what, size_t bytes) {
+			int n = 0, diff = 0;
+			std::vector<std::string> where;
+			auto cmp = [&](const u8 *a, const u8 *b, int size, const char *name, int part, int lo) {
+				for (int i = 0; i < size; i++) {
+					n++;
+					if (a[i] == b[i])
+						continue;
+					diff++;
+					char t[80];
+					std::snprintf(t, sizeof(t), "%s%s%d %02X: %02x / %02x", name, part >= 0 ? " パート " : "",
+					              part >= 0 ? part + 1 : 0, lo + i, a[i], b[i]);
+					where.push_back(t);
+				}
+			};
+			cmp(from.system, to.system, XG_SYSTEM_SIZE, "システム", -1, 0);
+			// エフェクトは、表の値と、いまの種類が使うパラメータだけ（種類が使わないバイトは
+			// firmware が MIDI で書かせないので、前に何をしたかで違ってよい）
+			std::vector<bool> used(XG_EFFECT_SIZE, false);
+			auto mark = [&](u32 addr, int size) {
+				u32 off = 0;
+				if (xg::ram::locate(addr, off))
+					for (int i = 0; i < size; i++)
+						used[off - xg::ram::EFFECT + u32(i)] = true;
+			};
+			for (const xg::param &p : xg::params())
+				if (p.where == xg::area::effect)
+					mark(xg::address(p), p.size);
+			const u32 vw = xg::ram::VAR_BLOCK - xg::ram::EFFECT + xg::ram::VAR_WIDE;
+			for (xg::sysfx which : { xg::sysfx::reverb, xg::sysfx::chorus, xg::sysfx::variation }) {
+				u32 off = 0;
+				xg::ram::locate(xg::pack(0x02, 0x01, xg::sysfx_type_lo(which)), off);
+				const u8 *t = from.effect + (off - xg::ram::EFFECT);
+				const xg::fx_def *def = xg::fx_find(t[0] << 7 | t[1]);
+				for (int i = 0; def && i < def->count; i++) {
+					int size = 0;
+					const int lo = xg::sysfx_addr(which, def->params[i], size);
+					if (lo < 0)
+						continue;
+					if (size == 2)
+						used[vw + u32(lo - 0x42)] = used[vw + u32(lo - 0x42) + 1] = true;
+					else
+						mark(xg::pack(0x02, 0x01, u8(lo)), 1);
+				}
+			}
+			for (int k = 0; k < 4; k++) {
+				const u32 blk = xg::ram::INS_BLOCK[k] - xg::ram::EFFECT;
+				const xg::fx_def *def = xg::fx_find(from.effect[blk] << 7 | from.effect[blk + 1]);
+				for (int i = 0; def && i < def->count; i++) {
+					const xg::fx_param &fp = def->params[i];
+					if (fp.size == 2)
+						used[blk + xg::ram::INS_WIDE + (fp.addr - 0x30)] = used[blk + xg::ram::INS_WIDE + (fp.addr - 0x30) + 1] = true;
+					else
+						mark(xg::pack(0x03, u8(k), fp.addr), 1);
+				}
+			}
+			for (int i = 0; i < XG_EFFECT_SIZE; i++)
+				if (used[size_t(i)])
+					cmp(from.effect + i, to.effect + i, 1, "エフェクトの RAM +", -1, i);
+			for (int p = 0; p < XG_PARTS; p++) {
+				cmp(from.parts[p], to.parts[p], xg::ram::PART_XG_SIZE, "08", p, 0);
+				cmp(from.parts[p] + xg::ram::PART_EXT_RAM, to.parts[p] + xg::ram::PART_EXT_RAM,
+				    xg::ram::PART_EXT_SIZE, "08", p, xg::ram::PART_EXT_XG);
+				cmp(from.parts[p] + xg::ram::PART_HPF_RAM, to.parts[p] + xg::ram::PART_HPF_RAM, 1, "0A", p, xg::ram::PART_HPF_XG);
+				for (int k : { 0, 1, 4, 5 })
+					cmp(from.parts[p] + xg::ram::PART_EQ_RAM + k, to.parts[p] + xg::ram::PART_EQ_RAM + k, 1, "08", p,
+					    xg::ram::PART_EQ_XG + k);
+			}
+			std::printf("%s（%zu バイト）を流して戻るか: %d バイト、食い違い %d\n", what, bytes, n, diff);
+			for (size_t i = 0; i < where.size() && i < 20; i++)
+				problems.push_back(std::string(what) + "から戻らない: " + where[i]);
+			bad += diff;
+		};
+
+		// 全部（プラグインの「XG の値だけ」の状態、.syx の書き出し）
+		{
+			static rig h;
+			boot(h);
+			const std::vector<u8> msgs = ui::setup_messages(from);
+			h.send(msgs);
+			h.pump(6000);             // 10KB あまり。DIN の速さで 3 秒を超える
+			snapshot(h.mu, to);
+			compare(to, "XG の値の控え", msgs.size());
+		}
+		// 起動しただけの機械との違いだけ（.syx の「既定と違うものだけ」）
+		{
+			static rig k;
+			static ui::xg_snapshot base;
+			boot(k);
+			snapshot(k.mu, base);
+			const std::vector<u8> msgs = ui::setup_diff_messages(from, base);
+			k.send(msgs);
+			k.pump(3000);
+			snapshot(k.mu, to);
+			compare(to, "既定との違いだけの控え", msgs.size());
 		}
 	}
 
