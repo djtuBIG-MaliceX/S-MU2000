@@ -362,6 +362,7 @@ SHAPE_MIN = {
     "xgpeg": 0.95,
     "xghpf": 0.95,
     "xgpegatk": 0.95,
+    "xgmwvib": 0.95,
     "xgsys": 0.95,
     # meter は 15 パートを同時に鳴らすので dense と同じ事情で形が落ちる
     # （狙いは液晶のほうなので、音は緩めに見る）

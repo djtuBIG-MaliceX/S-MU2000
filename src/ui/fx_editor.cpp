@@ -263,8 +263,8 @@ void fx_editor::eq_graph(const xg::fx_def &def, xg::model &m, bridge &br, ImVec2
 		const int ng = std::clamp(int(std::lround(64 + db)), int(pg.lo), int(pg.hi));
 		u32 a = 0;
 		int size = 0;
-		if (nf != b.vf && where(pf, a, size)) br.send(m.set_raw(a, size, nf));
-		if (ng != b.vg && where(pg, a, size)) br.send(m.set_raw(a, size, ng));
+		if (nf != b.vf && where(pf, a, size)) drag_send(br, m.set_raw(a, size, nf));
+		if (ng != b.vg && where(pg, a, size)) drag_send(br, m.set_raw(a, size, ng));
 		m_focus = b.gain;
 	}
 	const int hot = active ? grab : hovered ? nearest() : -1;
@@ -278,7 +278,7 @@ void fx_editor::eq_graph(const xg::fx_def &def, xg::model &m, bridge &br, ImVec2
 				const int nw = std::clamp(b.vw + (io.MouseWheel > 0 ? 1 : -1) * (io.KeyCtrl ? 10 : 2), int(pw.lo), int(pw.hi));
 				u32 a = 0;
 				int size = 0;
-				if (nw != b.vw && where(pw, a, size)) br.send(m.set_raw(a, size, nw));
+				if (nw != b.vw && where(pw, a, size)) drag_send(br, m.set_raw(a, size, nw));
 				m_focus = b.width;
 			}
 		}
@@ -489,7 +489,7 @@ void fx_editor::draw(xg::model &m, const xg_snapshot &, bridge &br)
 			char id[8];
 			std::snprintf(id, sizeof(id), "p%d", i);
 			if (knob(id, v, fp.lo, fp.hi, ksize, fp.label, text.c_str()) && known)
-				br.send(m.set_raw(addr, size, v));
+				drag_send(br, m.set_raw(addr, size, v));
 			if (ImGui::IsItemHovered() || ImGui::IsItemActive())
 				m_focus = i;
 		}

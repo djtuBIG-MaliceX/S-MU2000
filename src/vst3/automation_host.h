@@ -55,6 +55,25 @@ public:
 	// 区間の頭で呼ぶ（写しはその区間で要るときに 1 回だけ読む）
 	void begin_block() { m_audio_ram_read = false; }
 
+	// 起動（または状態を戻した）直後の 1 ブロック目、イベントを裁く前に呼ぶ。
+	// foo_midi のようなホストは再生頭で 1,300 個近いパラメータをまとめて
+	// 流してくる。それらは自分で戻した値の写しなので直列に戻してはいけない。
+	// 直列は約 3kB/秒しか流れないので 10kB 詰まると数秒詰まり、後ろに並んだ
+	// ノートが全部遅れて鳴る（報告された「冒頭が無音」の正体）。
+	// ふだんは音源に echo を出して確かめるが、1 ブロック目で echo は間に合わ
+	// ない。だから firmware の RAM から直接写して「音源が今持っている値」の
+	// 種を仕掛けておく。host_value の known && cur == value で全部弾ける
+	bool seed_values()
+	{
+		if (!m_audio_ram || !m_engine.copy_xg_now(*m_audio_ram))
+			return false;
+		if (m_audio_ram->serial == 0)
+			m_audio_ram->serial = 1;         // この写しを host_value に信用させる
+		m_seeded    = true;
+		return true;
+	}
+	bool seeded() const { return m_seeded; }
+
 	// ホストから値が来た。値が変わったところだけ、emit(port, bytes, n) で CC かパラメータチェンジを出す
 	template <typename Emit>
 	void host_value(int i, int value, Emit &&emit)
@@ -69,7 +88,14 @@ public:
 		if (s.sent_value.load() == value && fresh)
 			return;                          // 送ったばかり（画面で触って戻ってきた値も）
 		if (!m_audio_ram_read) {
-			m_engine.panel().read_xg(*m_audio_ram);
+			// 区ごとに firmware の RAM から直接写す。bridge の写しは再生頭に
+			// まだ空だったり（serial=0）、状態を戻す前の古かったりで、1,200 個
+			// 違えの flood を呼んでいた。機械はこの直後に音を作るので写しは
+			// この区間の真実。錠が込んで取れないときだけ旧い道（bridge の写し）
+			if (!m_engine.copy_xg_now(*m_audio_ram))
+				m_engine.panel().read_xg(*m_audio_ram);
+			if (m_audio_ram->serial == 0)
+				m_audio_ram->serial = 1;
 			m_audio_ram_read = true;
 		}
 		int cur = 0;
@@ -145,6 +171,7 @@ public:
 	{
 		for (size_t i = 0; i < entries().size(); i++)
 			m_slots[i].recent_ms.store(0);
+		m_seeded = false;                    // 次の区間の頭で RAM から種を買い直す
 		std::lock_guard<std::mutex> lock(m_view_mutex);
 		m_view_ram_ms = 0;
 	}
@@ -239,6 +266,7 @@ private:
 
 	std::unique_ptr<ui::xg_snapshot> m_audio_ram;
 	bool m_audio_ram_read = false;
+	std::atomic<bool> m_seeded{false};       // seed_values が 1 枚目を仕込んだか（main が捨てる）
 
 	std::unique_ptr<ui::xg_snapshot> m_view_ram;
 	std::mutex m_view_mutex;

@@ -25,6 +25,7 @@
 #include "midi_guard.h"
 #include "midi_in.h"
 #include "midi_out.h"
+#include "texts.h"
 #include "analog_out.h"
 #include "mu2000.h"
 #include "bootcache.h"
@@ -85,10 +86,10 @@ struct engine {
 		if (!mu.load_program(dir + "/mu2000_flash.bin")) { message = mu.error(); return false; }
 		if (!mu.load_wave(dir + "/dump"))                { message = mu.error(); return false; }
 		if (!mu.load_sintab(dir + "/standin/sin-table.bin"))
-			std::fprintf(stderr, "警告: %s\n", mu.error().c_str());
+			std::fprintf(stderr, texts().engine_warn_fmt, mu.error().c_str());
 		if (!mu.load_lcd_font(dir + "/hd44780u_b04.bin") &&
 		    !mu.load_lcd_font(dir + "/standin/hd44780u_b04.bin"))
-			std::fprintf(stderr, "警告: %s\n", mu.error().c_str());
+			std::fprintf(stderr, texts().engine_warn_fmt, mu.error().c_str());
 		return true;
 	}
 
@@ -97,7 +98,7 @@ struct engine {
 	{
 		mu.set_threaded(true);
 		if (use_nvram && smu2000::nvram::load(mu))
-			std::printf("設定: %s\n", smu2000::nvram::path(mu).c_str());
+			std::printf(texts().engine_nvram_fmt, smu2000::nvram::path(mu).c_str());
 		// 鍵は起動に使うワーク RAM も混ぜるので、reset() の前に作る
 		const u64 key = smu2000::bootcache::key(mu);
 		mu.reset();
@@ -105,7 +106,7 @@ struct engine {
 		// 回した結果と 1 ビットも違わないので、音は同じ。
 		// **reset() のあとで読むこと**（タイマが揃っていないと形が合わない）
 		if (smu2000::bootcache::load(mu, key)) {
-			std::printf("起動: 前の写しから（%s）\n", smu2000::bootcache::path(key).c_str());
+			std::printf(texts().engine_boot_cached_fmt, smu2000::bootcache::path(key).c_str());
 			publish();
 			return true;
 		}
@@ -115,11 +116,11 @@ struct engine {
 		for (; i < limit && !mu.midi_ready(); i++)
 			mu.run_sample(l, r);
 		if (i >= limit) {
-			message = "起動しなかった";
+			message = texts().engine_boot_failed;
 			return false;
 		}
 		if (smu2000::bootcache::save(mu, key))
-			std::printf("起動の写しを残した: %s\n", smu2000::bootcache::path(key).c_str());
+			std::printf(texts().engine_boot_saved_fmt, smu2000::bootcache::path(key).c_str());
 		publish();
 		return true;
 	}
@@ -146,7 +147,7 @@ struct engine {
 	void factory_reset()
 	{
 		state.store(0);
-		message = "工場出荷状態に戻している...";
+		message = texts().engine_resetting;
 		publish();
 		while (in_fill.load())
 			smu2000::sleep_ms(1);
@@ -164,7 +165,7 @@ struct engine {
 		}
 		// すぐ残す。ここで落ちても前の設定に戻らないように
 		smu2000::nvram::save(mu);
-		std::printf("工場出荷状態に戻した\n");
+		std::printf("%s", texts().engine_reset_done);
 		std::fflush(stdout);
 		state.store(1);
 		publish();

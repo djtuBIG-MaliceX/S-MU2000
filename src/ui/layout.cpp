@@ -2,6 +2,7 @@
 
 #include "layout.h"
 #include "draw.h"
+#include "texts.h"
 #include "compat/paths.h"
 
 #include <cstdio>
@@ -218,7 +219,7 @@ layout::layout()
 
 	add_box(8, 248, 68, 36, 3, "key", "keyedge");
 	add_text(4, 288, 96, 24, 0, "leftwrap", "ink", "STANDBY / ON");
-	add_disc(130, 266, 34, "socket", "jackedge", 2);
+	add_disc(141, 266, 34, "socket", "jackedge", 2);
 	add_text(96, 304, 90, 14, 0, "center", "ink", "MIDI IN A");
 	add_disc(228, 269, 14, "jack", "jackedge", 1);
 	add_text(198, 304, 60, 14, 0, "center", "ink", "PHONES");
@@ -257,7 +258,7 @@ bool layout::load(const std::string &path, std::string &err)
 	int lineno = 0;
 	auto bad = [&](const char *why) {
 		char m[256];
-		std::snprintf(m, sizeof(m), "%d 行目: %s\n", lineno, why);
+		std::snprintf(m, sizeof(m), texts().layout_line_error, lineno, why);
 		err += m;
 	};
 

@@ -52,6 +52,8 @@
 #include <windows.h>
 #elif defined(__APPLE__)
 #include <CoreFoundation/CoreFoundation.h>
+#elif defined(__linux__)
+#include <dlfcn.h>
 #endif
 
 using namespace Steinberg;
@@ -1084,6 +1086,9 @@ int main(int argc, char **argv)
 	// the way a host opens it, and the entry point is bundleEntry
 	bool (*init)() = nullptr;
 	IPluginFactory *(PLUGIN_API *getf)() = nullptr;
+#if defined(__linux__)
+	void *dl_mod = nullptr;
+#endif
 
 #if defined(_WIN32)
 	HMODULE lib = LoadLibraryA(dll.c_str());
@@ -1116,6 +1121,16 @@ int main(int argc, char **argv)
 		entry(bundle);
 	getf = reinterpret_cast<IPluginFactory *(PLUGIN_API *)()>(
 		CFBundleGetFunctionPointerForName(bundle, CFSTR("GetPluginFactory")));
+#elif defined(__linux__)
+	// Linux: the argument is the ELF .so itself (bundle Contents/x86_64-linux).
+	// Hosts dlopen it and call GetPluginFactory directly; no InitDll.
+	dl_mod = dlopen(dll.c_str(), RTLD_NOW);
+	if (!dl_mod) {
+		std::fprintf(stderr, "読めない: %s (%s)\n", dll.c_str(), dlerror());
+		return 1;
+	}
+	getf = reinterpret_cast<IPluginFactory *(PLUGIN_API *)()>(
+		dlsym(dl_mod, "GetPluginFactory"));
 #endif
 
 	if (!getf) {

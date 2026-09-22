@@ -78,8 +78,10 @@ constexpr clap_id kGainId = 0;
 
 #if defined(_WIN32)
 constexpr const char *kWindowApi = CLAP_WINDOW_API_WIN32;
-#else
+#elif defined(__APPLE__)
 constexpr const char *kWindowApi = CLAP_WINDOW_API_COCOA;
+#else
+constexpr const char *kWindowApi = CLAP_WINDOW_API_X11;
 #endif
 
 // 状態の保存は途中までしか書けない・読めないことがある。全部済むまで回す
@@ -250,6 +252,10 @@ private:
 	void params_flush(const clap_input_events_t *in, const clap_output_events_t *out)
 	{
 		if (in) {
+			// process の前にもパラメータは来る。種がまだならここで仕込む
+			// （機械が ready でなければ seed_values は何もしないで、次の機会に）
+			if (!m_xg.seeded())
+				m_xg.seed_values();
 			m_xg.begin_block();
 			const uint32_t n = in->size(in);
 			for (uint32_t i = 0; i < n; i++) {
@@ -452,6 +458,9 @@ private:
 		if (!blob.empty() || !setup.empty())
 			m_engine.load_state(blob.empty() ? nullptr : blob.data(), blob.size(),
 			                    setup.empty() ? nullptr : setup.data(), setup.size());
+		// 戻したばかりの値を bridge にも載せ直す。载せないと音声の糸が read_xg で
+		// 戻す前の古い写しを引いて、ホストの照合値と食い違う（flood の温床）
+		m_engine.publish_xg_now();
 
 		if (!card.empty()) {
 			std::string err;
@@ -733,6 +742,12 @@ clap_process_status mu_plugin::process(const clap_process_t *pr)
 		if (any)
 			m_engine.all_notes_off(mask, mu2000::MIDI_PORTS);
 	}
+
+	// 最初の区間（と状態を戻した直後）の頭で、RAM から「音源の今の値」を
+	// 種に仕込む。ホストが再生頭で流す 1,300 個近いパラメータの再送は
+	// ほとんどがこの値と一致するので、直列に載る前に弾ける（seed_values）
+	if (!m_xg.seeded())
+		m_xg.seed_values();
 
 	// イベントは時刻順に来る。その時刻まで音を作ってから流す
 	m_xg.begin_block();

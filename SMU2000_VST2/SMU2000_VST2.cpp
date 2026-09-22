@@ -51,16 +51,7 @@ SMU2000_VST2::SMU2000_VST2(const InstanceInfo& info)
   // must never malloc on the audio thread. clear() keeps capacity, so after the first
   // block this is the steady-state footprint (~128 KB + 64 KB).
   m_midi_q.reserve(8192, 8192 * 8);
-  // Boot synchronously here: the host starts its timeline the moment the instance
-  // exists and a plug-in cannot pause it, so the old async boot streamed the first
-  // 2-5 s of every song out as silence with the song-start MIDI queued behind it
-  // (render.exe avoids this by running the boot loop before feeding MIDI from
-  // position 0). The constructor runs before audio streaming, so this is where
-  // "delay the streaming start until live" has to happen — state() is ready (or
-  // failed) when the ctor returns. The midi() queue + fill() silence stay as the
-  // safety net (and for the async opt-out: plugin.ini boot=async / SMU2000_SYNC_BOOT=0).
-  // A post-boot snapshot (bootcache.bin) makes only the first cold instance pay.
-  m_engine->start(true);
+  m_engine->start();
 
 #if PLUG_HAS_UI  // native GDI editor (SMU2000_ENABLE_GUI=ON); untouched when OFF. Attaches to
                  // the host HWND on OpenWindow (effEditOpen / guiSetParent). No IGraphics.

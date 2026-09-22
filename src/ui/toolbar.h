@@ -20,7 +20,7 @@
 #include <string>
 #include <vector>
 
-#include <windows.h>
+#include "compat/gdi.h"
 
 #include "compat/gdi.h"
 #include "ui/draw.h"
@@ -32,6 +32,26 @@ struct tool_item {
 	std::string label;
 	int id = 0;
 };
+
+// Which window each button opens. The one vocabulary for gui.exe, the Mac
+// GUI, --shot and the plug-ins: every painter builds the same strip from
+// window_bar_items() and dispatches the hit id through these, so a button
+// can never name one window in one program and another elsewhere.
+enum bar_window {
+	BAR_LIST = 0,   // 一覧
+	BAR_EDITOR = 1, // エディタ
+	BAR_FX = 2,     // インサーションの設定
+	BAR_SHAPES = 3, // パートの音色
+	BAR_MASTER = 4, // マスター
+};
+
+// The strip every window shows, in the same order with the same ids
+inline std::vector<tool_item> window_bar_items()
+{
+	return { { "一覧", BAR_LIST }, { "エディタ", BAR_EDITOR },
+	         { "音色", BAR_SHAPES }, { "エフェクト", BAR_FX },
+	         { "マスター", BAR_MASTER } };
+}
 
 class toolbar
 {

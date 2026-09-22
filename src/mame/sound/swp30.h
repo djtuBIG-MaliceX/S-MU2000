@@ -111,6 +111,12 @@ public:
 	u32 m_dbg_meg_from = 0, m_dbg_meg_count = 0;
 	u16 m_dbg_meg_pc0 = 0, m_dbg_meg_pc1 = 0x180;
 
+	// S-MU2000: 声ごとの出力（包絡線を掛けたあと、混ぜる前）を 1 サンプルごとに渡す口。
+	// 画面がパートの音のスペクトラムを描くのに使う（mu2000 の scope_*）。音には触らない
+	using voice_tap_fn = void (*)(void *ctx, const s32 *samples_per_chan);
+	voice_tap_fn m_voice_tap = nullptr;
+	void *m_voice_tap_ctx = nullptr;
+
 	// MEG の入口・出口の書き出し（移植の突き合わせ用）
 	std::FILE *m_dbg_dac = nullptr;
 	int m_dbg_chan = -1;              // --dump-dac のとき、この声の中身も出す

@@ -21,23 +21,23 @@
 #include <string>
 #include <vector>
 
-#if defined(__APPLE__)
-#include <memory>
-#else
+#if defined(_WIN32)
 #include <thread>
+#else
+#include <memory>
 #endif
 
 namespace ui {
 
-#if defined(__APPLE__)
+#if !defined(_WIN32)
 
-// macOS: the same contract as the WASAPI class below -- list the inputs, open
-// one, and hand the machine 44100Hz 16bit 2ch frames one at a time -- but the
-// device is a HAL input AudioUnit, which calls the input callback on its own
-// real-time thread. So unlike the Windows side there is no worker thread here,
-// and the ring the audio thread reads is filled straight from that callback.
-// A pimpl for the same reason audio_out has one: nothing in here should have
-// to know about CoreAudio.
+// The same contract as the WASAPI class below -- list the inputs, open one,
+// and hand the machine 44100Hz 16bit 2ch frames one at a time.
+// macOS: the device is a HAL input AudioUnit, which calls the input callback
+// on its own real-time thread, so unlike the Windows side there is no worker
+// thread there. Linux (ALSA capture, audio_in_linux.cpp) runs a worker thread
+// instead. A pimpl for the same reason audio_out has one: nothing in here
+// should have to know about the platform API.
 class audio_in
 {
 public:
@@ -65,7 +65,7 @@ private:
 	std::unique_ptr<impl> m_impl;
 };
 
-#else
+#else // _WIN32
 
 class audio_in
 {
@@ -129,7 +129,7 @@ private:
 	std::atomic<u64>  m_empty{0}, m_dropped{0};
 };
 
-#endif // __APPLE__
+#endif // _WIN32
 
 } // namespace ui
 

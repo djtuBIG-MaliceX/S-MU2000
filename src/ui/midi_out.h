@@ -22,19 +22,20 @@
 #include <thread>
 #include <vector>
 
-#if defined(__APPLE__)
+#if !defined(_WIN32)
 #include <condition_variable>
 #include <mutex>
 #endif
 
 namespace ui {
 
-#if defined(__APPLE__)
+#if !defined(_WIN32)
 
-// macOS: CoreMIDI. The shape matches the Windows class, and so does the
-// lock-free ring, because the audio thread must still be able to hand a byte
-// over without ever waiting. What differs is the wake-up: CoreMIDI has no event
-// object to signal, so a condition variable stands in for the Win32 one.
+// macOS: CoreMIDI. Linux: the ALSA sequencer (midi_out_linux.cpp). The shape
+// matches the Windows class, and so does the lock-free ring, because the audio
+// thread must still be able to hand a byte over without ever waiting. What
+// differs is the wake-up: neither CoreMIDI nor ALSA has a Win32 event object
+// to signal, so a condition variable stands in for it.
 class midi_out
 {
 public:
@@ -65,7 +66,8 @@ private:
 	std::condition_variable m_wake;
 	std::mutex              m_wake_mutex;
 
-	struct ctx;                       // CoreMIDI client / port / destination
+	struct ctx;                       // CoreMIDI client / port / destination,
+	                                // or the ALSA sequencer handle, in the .cpp
 	ctx        *m_ctx = nullptr;
 	std::atomic<bool> m_open{false};
 	std::string m_name;
@@ -80,7 +82,7 @@ private:
 	std::vector<u8> m_sysex;
 };
 
-#else
+#else // _WIN32
 
 class midi_out
 {
@@ -134,7 +136,7 @@ private:
 	std::vector<u8> m_sysex;
 };
 
-#endif // __APPLE__
+#endif // _WIN32
 
 } // namespace ui
 

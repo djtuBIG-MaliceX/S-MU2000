@@ -192,11 +192,12 @@ all: $(BUILD)/verify$(EXE) $(BUILD)/boot$(EXE) $(BUILD)/render$(EXE) \
      $(BUILD)/statetest$(EXE) $(BUILD)/rec$(EXE) $(BUILD)/blocktime$(EXE) \
      vst3 $(BUILD)/vst3probe$(EXE) clap $(BUILD)/clapprobe$(EXE)
 else ifeq ($(PLATFORM),linux)
-# Linux (issue #25). The windowed program and the plug-ins are not ported yet;
-# these need no window
+# Linux (issue #25). The windowed program (gui, SDL3 + Cairo) and the
+# headless plug-ins build here too (doc/porting-linux-gui.md)
 all: $(BUILD)/verify$(EXE) $(BUILD)/boot$(EXE) $(BUILD)/render$(EXE) \
      $(BUILD)/panel$(EXE) $(BUILD)/statetest$(EXE) $(BUILD)/blocktime$(EXE) \
-     $(BUILD)/live$(EXE)
+     $(BUILD)/live$(EXE) $(BUILD)/gui$(EXE) \
+     vst3 $(BUILD)/vst3probe$(EXE) clap $(BUILD)/clapprobe$(EXE)
 else
 # macOS. vst3 and vst3probe are defined below
 all: $(BUILD)/verify$(EXE) $(BUILD)/boot$(EXE) $(BUILD)/render$(EXE) \
@@ -444,9 +445,166 @@ $(BUILD)/live$(EXE): $(OBJS) $(BUILD)/src/mu2000.o $(LINUX_IO_OBJS) $(BUILD)/src
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) -lasound
 
-# The windowed program and the plug-ins are not ported to Linux yet
-gui vst3 install-vst3 probe clap install-clap au install-au au-probe check-au:
-	@echo "$@ は Linux ではまだ作れません。doc/linux.md を見よ"
+# ---- Linux GUI + plug-ins (doc/porting-linux-gui.md) --------------------------
+#
+# gui is an SDL3 window drawing the shared panel through Cairo. The plug-ins
+# are ELF shared objects with headless editors for now (hosts fall back to
+# their generic UI). Needs libcairo2-dev, libfontconfig-dev and libsdl3-dev
+# alongside libasound2-dev.
+
+LINUX_GUI_CFLAGS := $(shell pkg-config --cflags cairo fontconfig 2>/dev/null)
+LINUX_GUI_LIBS := $(shell pkg-config --libs cairo fontconfig 2>/dev/null)
+LINUX_SDL_CFLAGS := $(shell pkg-config --cflags sdl3 2>/dev/null)
+LINUX_SDL_LIBS := $(shell pkg-config --libs sdl3 2>/dev/null)
+CXXFLAGS += $(LINUX_GUI_CFLAGS)
+# Everything also links into .so plug-ins, so build position-independent
+CXXFLAGS += -fPIC
+
+# ALSA MIDI out + capture in (upstream issue #25 covers PCM out + sequencer
+# in only). Same POSIX class shape as the macOS headers.
+LINUX_EXTRA_IO_OBJS := $(BUILD)/src/ui/midi_out_linux.o $(BUILD)/src/ui/audio_in_linux.o
+
+$(BUILD)/src/ui/midi_out_linux.o $(BUILD)/src/ui/audio_in_linux.o: CXXFLAGS += $(shell pkg-config --cflags alsa 2>/dev/null)
+
+# The PC editor views are compiled for gui; no backend is linked until one is
+# used (Dear ImGui SDL3 backends below, vendored unmodified).
+IMGUI_DIR   := third_party/imgui
+IMGUI_CORE  := $(IMGUI_DIR)/imgui.cpp $(IMGUI_DIR)/imgui_draw.cpp \
+               $(IMGUI_DIR)/imgui_tables.cpp $(IMGUI_DIR)/imgui_widgets.cpp
+IMGUI_FLAGS := -I $(IMGUI_DIR)
+
+$(BUILD)/imgui/%.o: %.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(IMGUI_FLAGS) $(LINUX_SDL_CFLAGS) -c -o $@ $<
+
+IMGUI_OBJS := $(IMGUI_CORE:%.cpp=$(BUILD)/imgui/%.o)
+
+# Dear ImGui SDL3 backends for the PC editor windows.
+# Vendored unmodified from the matching ImGui release, like the rest.
+IMGUI_SDL_BACKENDS := third_party/imgui/backends/imgui_impl_sdl3.cpp \
+                      third_party/imgui/backends/imgui_impl_sdlrenderer3.cpp
+IMGUI_SDL_OBJS := $(IMGUI_SDL_BACKENDS:%.cpp=$(BUILD)/imgui/%.o)
+
+LINUX_GUI_SRCS := src/ui/panel.cpp src/ui/layout.cpp src/ui/svg.cpp \
+                  src/ui/editor.cpp src/ui/effects.cpp src/ui/png.cpp \
+                  src/ui/player.cpp src/xg/model.cpp \
+                  src/ui/xg_ui.cpp src/ui/fx_help.cpp src/ui/fx_icons.cpp \
+                  src/ui/sdl_popup.cpp \
+                  src/ui/pc_window_linux.cpp \
+                  src/ui/pc_editor.cpp src/ui/overview.cpp src/ui/fx_editor.cpp \
+                  src/ui/part_shapes.cpp src/ui/master_editor.cpp
+LINUX_GUI_OBJS := $(LINUX_GUI_SRCS:%.cpp=$(BUILD)/guiobj/%.o)
+
+$(BUILD)/guiobj/%.o: %.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(IMGUI_FLAGS) $(LINUX_SDL_CFLAGS) -c -o $@ $<
+
+$(BUILD)/src/gui_linux.o: CXXFLAGS += $(IMGUI_FLAGS) $(LINUX_SDL_CFLAGS)
+
+$(BUILD)/gui$(EXE): $(OBJS) $(BUILD)/src/mu2000.o $(BUILD)/src/smf.o \
+                    $(BUILD)/src/compat/gdi_linux.o $(LINUX_GUI_OBJS) $(IMGUI_OBJS) \
+                    $(IMGUI_SDL_OBJS) $(LINUX_IO_OBJS) $(LINUX_EXTRA_IO_OBJS) \
+                    $(BUILD)/src/gui_linux.o
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) -lasound $(LINUX_GUI_LIBS) $(LINUX_SDL_LIBS)
+
+# ---- VST3 plug-in (Linux)
+#
+# Steinberg's SDK is not used, only the MIT interface headers in
+# third_party/vst3. The bundle holds an ELF .so at Contents/x86_64-linux/;
+# hosts dlopen it and call GetPluginFactory directly (no InitDll, no CFBundle).
+
+VST3_DIR  := $(BUILD)/S-MU2000.vst3
+VST3_BIN  := $(VST3_DIR)/Contents/x86_64-linux/S-MU2000.so
+VST3_INC  := -I third_party/vst3
+
+VST3_SDK_SRCS := \
+	third_party/vst3/pluginterfaces/base/funknown.cpp \
+	third_party/vst3/pluginterfaces/base/coreiids.cpp \
+	third_party/vst3/pluginterfaces/base/conststringtable.cpp \
+	third_party/vst3/pluginterfaces/base/ustring.cpp
+
+LINUX_PANEL_SRCS := src/compat/gdi_linux.cpp \
+              src/ui/panel.cpp src/ui/layout.cpp src/ui/svg.cpp src/ui/editor.cpp \
+              src/ui/effects.cpp src/xg/model.cpp \
+              src/ui/xg_ui.cpp src/ui/fx_help.cpp src/ui/fx_icons.cpp $(IMGUI_CORE)
+
+VST3_SRCS := src/vst3/plugin.cpp src/vst3/engine.cpp src/vst3/iids.cpp src/vst3/automation.cpp \
+             src/vst3/view.cpp src/vst3/plug_window_linux.cpp \
+             $(LINUX_PANEL_SRCS) $(VST3_SDK_SRCS)
+VST3_OBJS := $(VST3_SRCS:%.cpp=$(BUILD)/vst3obj/%.o)
+
+$(BUILD)/vst3obj/%.o: %.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(VST3_INC) $(IMGUI_FLAGS) $(LINUX_SDL_CFLAGS) -c -o $@ $<
+
+vst3: $(VST3_BIN)
+
+$(VST3_BIN): $(OBJS) $(BUILD)/src/mu2000.o $(VST3_OBJS) $(IMGUI_SDL_OBJS)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -shared -o $@ $^ $(LDFLAGS) -lasound $(LINUX_GUI_LIBS) $(LINUX_SDL_LIBS)
+	@mkdir -p $(VST3_DIR)/Contents/Resources
+	@cp -f doc/vst3-readme.txt $(VST3_DIR)/Contents/Resources/README.txt 2>/dev/null || true
+	@cp -f LICENSE $(VST3_DIR)/Contents/Resources/LICENSE.txt
+	@cp -f NOTICE.txt $(VST3_DIR)/Contents/Resources/NOTICE.txt
+
+VST3_INSTALL ?= $(HOME)/.vst3
+
+install-vst3: $(VST3_BIN)
+	rm -rf "$(VST3_INSTALL)/S-MU2000.vst3"
+	mkdir -p "$(VST3_INSTALL)"
+	cp -r $(VST3_DIR) "$(VST3_INSTALL)/"
+	@echo "入れた: $(VST3_INSTALL)/S-MU2000.vst3"
+
+$(BUILD)/vst3probe$(EXE): $(BUILD)/vst3obj/src/vst3/probe.o \
+                          $(BUILD)/vst3obj/src/vst3/probe_host_linux.o \
+                          $(BUILD)/vst3obj/src/vst3/iids.o \
+                          $(BUILD)/vst3obj/third_party/vst3/pluginterfaces/base/funknown.o \
+                          $(BUILD)/vst3obj/third_party/vst3/pluginterfaces/base/coreiids.o \
+                          $(BUILD)/vst3obj/third_party/vst3/pluginterfaces/base/conststringtable.o \
+                          $(BUILD)/vst3obj/third_party/vst3/pluginterfaces/base/ustring.o \
+                          $(BUILD)/src/smf.o $(BUILD)/src/compat/compat.o
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) -ldl
+
+ROMS ?= roms
+
+probe: $(BUILD)/vst3probe$(EXE) $(VST3_BIN)
+	S_MU2000_ROMS=$(ROMS) $(BUILD)/vst3probe$(EXE) $(VST3_BIN)
+
+# ---- CLAP plug-in (Linux)
+#
+# Same engine and headless panel as the VST3; only src/clap/plugin.cpp differs.
+# A CLAP on Linux is one ELF .so, conventionally with a .clap suffix.
+
+CLAP_BIN  := $(BUILD)/S-MU2000.clap
+CLAP_INC  := -I third_party/clap $(VST3_INC)
+CLAP_OBJS := $(BUILD)/clapobj/src/clap/plugin.o $(filter-out $(BUILD)/vst3obj/src/vst3/plugin.o,$(VST3_OBJS))
+
+$(BUILD)/clapobj/%.o: %.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $(CLAP_INC) $(IMGUI_FLAGS) $(LINUX_SDL_CFLAGS) -c -o $@ $<
+
+clap: $(CLAP_BIN)
+
+$(CLAP_BIN): $(OBJS) $(BUILD)/src/mu2000.o $(CLAP_OBJS) $(IMGUI_SDL_OBJS)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -shared -o $@ $^ $(LDFLAGS) -lasound $(LINUX_GUI_LIBS) $(LINUX_SDL_LIBS)
+
+$(BUILD)/clapprobe$(EXE): $(BUILD)/clapobj/src/clap/probe.o $(BUILD)/src/smf.o $(BUILD)/src/compat/compat.o
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) -ldl
+
+CLAP_INSTALL ?= $(HOME)/.clap
+
+install-clap: $(CLAP_BIN)
+	mkdir -p "$(CLAP_INSTALL)"
+	cp -f $(CLAP_BIN) "$(CLAP_INSTALL)/"
+	@echo "入れた: $(CLAP_INSTALL)/S-MU2000.clap"
+
+# The Audio Unit is a macOS port; nothing to build here
+au install-au au-probe check-au:
+	@echo "Audio Unit は macOS の口です。doc/porting-macos.md を見よ"
 
 else # macOS
 

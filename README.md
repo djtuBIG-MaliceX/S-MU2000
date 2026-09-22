@@ -286,9 +286,43 @@ Windows の「既定の再生デバイス」は勝手に変わる（実際、設
 ## ビルドについて
 
 Windows は MSYS2 / MinGW-w64 の g++、macOS は Apple の clang++、Linux は g++ を想定している。C++20 が要る。
-Linux は画面の要らない道具（render・panel・各種試験）だけが動く（[doc/linux.md](doc/linux.md)）。
 `make test` で回帰試験が回る（[doc/testing.md](doc/testing.md)）。ROM が無い
 機械でも、ROM の要らない分だけは走る。
+
+### Linux で作る
+
+> **Linux の画面とプラグインについて（PR [#33](https://github.com/tarboh/S-MU2000/pull/33)）**
+> Linux の `gui`・VST3・CLAP は spessasus さんの寄稿で、作者は Linux を使っておらず、
+> 動作を確かめることも、面倒を見ることも、**責任を取ることもできない**。使うのは自己責任で。
+> 不具合の報告や直しは、Linux を使っている人からの issue・PR を歓迎する。
+>
+> **Linux GUI and plug-ins (PR #33).** These were contributed by spessasus. The maintainer does not use
+> Linux and **cannot test, support, or take responsibility for them**. Use them at your own risk.
+> Reports and fixes from Linux users are welcome.
+
+Debian/Ubuntu では次を、Arch ではその下のを入れる。
+
+```
+sudo apt install build-essential libasound2-dev libcairo2-dev libfontconfig-dev libsdl3-dev
+sudo pacman -Sy base-devel alsa-lib cairo fontconfig sdl3
+```
+
+`make` で `build-linux/` に道具一式と `gui`、VST3・CLAP ができる。ROM は
+`roms/` に置く（中身は「[ROM について](#rom-について)」と同じ）。
+
+```
+build-linux/gui roms                       実機パネル風の画面で鳴らす（表示は英語。F2・F3 で PC の窓）
+build-linux/gui roms --boot --shot out.png 画面の絵だけ書き出す
+make vst3 / make clap                      DAW に挿す形（画面は汎用のもの）
+make probe                                 DAW 無しで読み込みと発音を確かめる
+make test                                  回帰試験（ROM と numpy が要る。Debian は python3-numpy、Arch は python-numpy）
+```
+
+VST3・CLAP の ROM は `S_MU2000_ROMS` 環境変数か、バンドルの横の `roms.txt`
+（`~/.vst3`・`~/.clap` へ入れたものは `~/.local/share/S-MU2000/roms.txt`）
+で場所を教える。待ち時間・MIDI の選び方など使い方は Windows 版と同じ。
+くわしくは [doc/linux.md](doc/linux.md)（道具と `live`）と
+[doc/porting-linux-gui.md](doc/porting-linux-gui.md)（画面）。
 Windows の exe は **MSYS2 の DLL に依存しない**ように静的リンクしてある
 （動的リンクのままだと、素の PowerShell から起動しても何も言わずに終わる）。
 

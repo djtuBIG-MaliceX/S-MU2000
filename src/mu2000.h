@@ -263,6 +263,17 @@ public:
 	// サンプリング RAM（4MB）。確かめる用
 	const std::vector<u8> &sample_ram() const { return m_sampram; }
 
+	// ---- S-MU2000: パートの音（画面のスペクトラム用）
+	// 声（2 つのチップで 128）の出力を、混ぜる前に拾ってパートごとに足す。見たいパートを
+	// 決めたときだけ動く（-1 で止める）。声 → パートは、firmware が鳴らした声なら firmware の
+	// 声の表（ワーク RAM 0x424386 + 声 × 148 にパートの塊の番地。実測で 11387 回とも一致）、
+	// native が鳴らしている声なら native_driver が持つもの。音には触らない
+	static constexpr size_t SCOPE_N = 4096;       // 溜めておくサンプル数（2 の冪）
+	void set_scope_part(int part);
+	int scope_part() const { return m_scope_part.load(std::memory_order_relaxed); }
+	// 直近の n サンプル（n ≤ SCOPE_N、古い順）。読み手は画面の糸。途中の値が混ざってもよい
+	void scope_read(float *out, size_t n) const;
+
 	sh7043a_device &cpu()  { return *m_cpu; }
 	swp30_device   &swpm() { return m_swpm; }
 
@@ -721,6 +732,18 @@ private:
 	void native_learn_finish();
 
 	swp30_device m_swpm, m_swps;   // マスタ 0x800000 / スレーブ 0x802000
+
+	// パートの音（set_scope_part）。チップごとに輪を持ち、読むときに足す
+	// （スレーブは別の糸で回ることがあるので、書き手を分ける）
+	struct scope_tap { mu2000 *self; int chip; };
+	scope_tap m_scope_ctx[2] = { { this, 0 }, { this, 1 } };
+	std::atomic<int> m_scope_part{-1};
+	std::array<std::atomic<s8>, 128> m_scope_owner{};     // 声 → パート（-1 は無し）
+	std::array<std::array<float, SCOPE_N>, 2> m_scope_ring{};
+	std::array<std::atomic<u32>, 2> m_scope_w{};          // チップごとの書いた数
+	u32 m_scope_tick = 0;
+	static void scope_tap_fn(void *ctx, const s32 *samples);
+	void scope_refresh_owner();
 	required_device<sci4_device> m_sci4_finder;
 	sci4_device *m_sci4 = nullptr;   // PLG ボード用 0xf00000
 	mem_bus      m_bus;

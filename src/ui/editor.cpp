@@ -12,6 +12,7 @@
 
 #include "panel.h"
 #include "draw.h"
+#include "texts.h"
 #include "xg/ram.h"
 #include "xg_state.h"
 
@@ -201,10 +202,7 @@ void panel::paint_editor(HDC dc, const char *status) const
 	text_in(dc, info, line1, TEXT, m_font_small, DT_LEFT | DT_TOP | DT_WORDBREAK);
 
 	RECT hint = scale(26, 288, 290, 60);
-	text_in(dc, hint,
-	        "つまみは上下にドラッグ、またはホイール。\n"
-	        "送っているのは XG のパラメータチェンジ。\n"
-	        "値は MU2000 に問い合わせて読み返している。",
+	text_in(dc, hint, texts().editor_hint,
 	        RGB(104, 109, 116), m_font_small, DT_LEFT | DT_TOP | DT_WORDBREAK);
 
 	if (status && status[0])
@@ -403,9 +401,9 @@ void panel::build_editor_spots()
 	}
 
 	m_spots.push_back({ spot_kind::action, mu2000::button::count, CTL_XG_RESET,
-	                    scale(26, 250, 130, 24), "XG リセット", "" });
+	                    scale(26, 250, 130, 24), texts().editor_xg_reset, "" });
 	m_spots.push_back({ spot_kind::action, mu2000::button::count, CTL_ALL_OFF,
-	                    scale(162, 250, 150, 24), "オールノートオフ", "" });
+	                    scale(162, 250, 150, 24), texts().editor_all_off, "" });
 }
 
 } // namespace ui

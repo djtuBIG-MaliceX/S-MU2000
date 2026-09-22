@@ -660,13 +660,6 @@ this harness. No plugin/GUI/editor regression observed on any arch.
        `tools/msvc32_build.ps1` (MSVC amd64_x86 harness — mingw32 cc1plus broken on this box, do
        not repair), `tools/x64asm32_test.cpp` (encoding gate). Supersedes every "Win32 =
        interpreter-only" note above (Findings §32-bit JIT, P1, P5, P0-P7 status entries).
- - [x] Boot gating + snapshot cache — **DONE 2026-09-16** (full write-up: §Boot gating above).
-       Ctor boots the firmware synchronously (`start(bool block)`; plug-in ctor uses
-       `start(true)`) so host timeline sample 0 is already live — no more silent song head;
-       `bootcache.bin` makes every later instantiation ~instant (0.93 s cold → 0.07 s warm,
-       bit-identical audio, SCI rx + RAM verified round-trip). Knobs: `plugin.ini`/env
-       `boot=async`·`SMU2000_SYNC_BOOT=0` (opt out), `bootcache=0`·`SMU2000_BOOT_CACHE=0`
-        (disable). Supersedes the P2 "engine boots async — poll state()" probe note.
   - [x] MIDI queue perf — **DONE 2026-09-16** (P2-FIX2 above). POD event + byte arena + ctor
         reserve + append-only hot path + sortedness check (no per-msg/per-block mallocs); also
         fixed the LNK2001 HEAD-break from upstream `5901ea5` via `engine/xgui_plugin_stub.cpp`.

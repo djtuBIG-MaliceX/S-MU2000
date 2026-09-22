@@ -28,11 +28,13 @@ namespace vst3 {
 
 class plug_view;
 
-// The panel buttons a keyboard can reach.
+// The panel buttons a keyboard can reach, as mu2000::button values.
 //
 // Each platform maps its own key codes onto these, and view.cpp maps these onto
 // mu2000::button. Doing it in two steps keeps the meaning of a key in one place
-// instead of once per window system.
+// instead of once per window system. The letter keys additionally share their
+// meaning with the GUI front ends through ui/keymap.h: each platform window
+// turns its key codes into characters first, then into these.
 enum plug_key {
 	PLUG_KEY_NONE = 0,
 	PLUG_KEY_PLAY,
@@ -69,6 +71,7 @@ enum pc_kind {
 	PC_SHAPES,        // パートの音色
 	PC_MASTER,        // マスター
 };
+
 
 // A real window on the host's platform, holding the panel
 class plug_window

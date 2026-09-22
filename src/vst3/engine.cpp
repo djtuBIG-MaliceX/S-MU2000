@@ -452,7 +452,7 @@ engine::~engine()
 		if (!smartmedia::write_blocks(card_path(), blocks, err))
 			log_line(err.c_str());
 	}
-	delete m_mu;
+	m_mu.reset();
 }
 
 std::string engine::message() const
@@ -465,17 +465,14 @@ void engine::log_line(const char *text)
 	logf("%s", text);
 }
 
-void engine::start(bool block)
+void engine::start()
 {
-	// DAW はプラグインを造った瞬間から音作りを始める（時間軸は止められない）。
-	// だからプラグインは block=true で呼んで、造る糸のまま起動を済ませる。
-	// plugin.ini の boot=async か SMU2000_SYNC_BOOT=0 の時だけ裏スレッド
-	if (block && sync_boot_wanted()) {
-		boot();
+	// 起動は 1 度だけ（m_boot_once）。2 度 boot を走らせると、動き出した
+	// 機械 m_mu を差し替えて音声スレッドが半分できた機械を触ってしまう。
+	// 終わりを待つのは wait_ready の仕事
+	if (m_boot_once.exchange(true, std::memory_order_acq_rel))
 		return;
-	}
-	if (!m_thread.joinable())
-		m_thread = std::thread([this] { boot(); });
+	m_thread = std::thread([this] { boot(); });
 }
 
 bool engine::wait_ready(int ms)
@@ -505,7 +502,7 @@ void engine::boot()
 	logf("ROM: %s", dir.c_str());
 	ui::driver::publish_message(m_bridge, "ROM 読み込み中");
 
-	mu2000 *mu = new mu2000;
+	std::unique_ptr<mu2000> mu = std::make_unique<mu2000>();
 	std::string warn;
 	{
 		// ROM は読むだけなので、この DLL の中で 1 組あればいい。
@@ -527,7 +524,7 @@ void engine::boot()
 			    !mu->load_wave(smu2000::join(dir, "dump"))) {
 				m_message = mu->error();
 				logf("%s", m_message.c_str());
-				delete mu;
+				mu.reset();
 				m_state.store(status::failed, std::memory_order_release);
 				return;
 			}
@@ -573,6 +570,13 @@ void engine::boot()
 	// 写し取りをファイルに残す（voicecache.h）。経路の印が付いているので
 	// 別の曲の写しが混ざっても安全。plugin.ini の voicecache=0 で切る
 	int voicecache = 0;
+	// 実物の直列速度（DIN 31250bps / USB の実機相当）で firmware に届けるか。
+	// **既定は実物と同じ速さ** — 実機の間隔をそのまま出すのがこの project の
+	// 狙いなので、速い方は選んで入れるもの。plugin.ini に fast_midi=1 と
+	// 書くと、口では順番だけ保って速く渡す（gui / live の --fast-midi と同じ）。
+	// 再生頭の 1,000 個越えのパート設定の洪水は、Automation の種
+	// （automation_host.h の seed_values）で直列に載せる前に弾く
+	int fast_midi = 0;
 	if (const std::string local = smu2000::config_dir(); !local.empty())
 		if (std::FILE *f = std::fopen(smu2000::join(local, "plugin.ini").c_str(), "rb")) {
 			char line[256];
@@ -589,6 +593,8 @@ void engine::boot()
 					nocal = std::atoi(line + 6);
 				if (!std::strncmp(line, "voicecache=", 11))
 					voicecache = std::atoi(line + 11);
+				if (!std::strncmp(line, "fast_midi=", 10))
+					fast_midi = std::atoi(line + 10);
 				m_voicecache = voicecache != 0;
 			}
 			std::fclose(f);
@@ -598,6 +604,9 @@ void engine::boot()
 	ui::xgui::set_voice_rom(mu->program_rom());
 	mu->set_usb_host(usb);
 	logf(usb ? "MIDI は USB の口（A-D の 64 パート）" : "plugin.ini: usb=0（DIN の口 A・B だけ）");
+	mu->set_fast_midi(fast_midi != 0);
+	if (fast_midi)
+		logf("plugin.ini: fast_midi=1（実物より速く直列に流す。実機と同じ間隔ではなくなる）");
 	mu->set_threaded(threaded);
 	if (!threaded)
 		logf("plugin.ini: threaded=0（スレーブを別スレッドにしない）");
@@ -630,10 +639,10 @@ void engine::boot()
 				logf("写し取り: %d 音色を前の写しから", int(mu->native_cal_count()));
 		}
 		if (nocal) {
-		xg::native_driver::set_nocal(true);
-		logf("plugin.ini: nocal=1（写し取りを 1 音もしない）");
-	}
-	m_mu = mu;
+			xg::native_driver::set_nocal(true);
+			logf("plugin.ini: nocal=1（写し取りを 1 音もしない）");
+		}
+		m_mu = std::move(mu);
 		m_message = warn.empty() ? std::string("ROM: ") + dir
 		                         : std::string("ROM: ") + dir + "\n警告: " + warn;
 		m_state.store(status::ready, std::memory_order_release);
@@ -643,46 +652,27 @@ void engine::boot()
 
 	ui::driver::publish_message(m_bridge, "MU2000 起動中");
 
-	// 先にブートキャッシュを試す。前に起動し終えた機械が置いてあれば、
-	// そこへ戻して空回しを丸ごと飛ばす（戻した機械は midi_ready() が
-	// 立った状態）。怪しければ reset() で引き直して普通に起動する
-	const auto  t_boot      = std::chrono::steady_clock::now();
-	const bool  cache_wanted = boot_cache_wanted();
-	const std::string cache  = cache_wanted ? boot_cache_path() : std::string();
-	bool restored = false;
-	if (!cache.empty())
-		restored = cache_restore(*mu, cache, dir);   // 壊れたら自分で reset() して返す
+	// 起動を待つ。ここを待たずに MIDI を流すと音色指定が全部捨てられる
+	const auto t0 = std::chrono::steady_clock::now();
+	const int64_t limit = int64_t(30.0 * NATIVE_RATE);
 
 	int64_t i = 0;
-	if (!restored) {
-		// 起動を待つ。ここを待たずに MIDI を流すと音色指定が全部捨てられる
-		const auto t0 = std::chrono::steady_clock::now();
-		const int64_t limit = int64_t(30.0 * NATIVE_RATE);
-		for (; i < limit; i++) {
-			if (!(i & 4095) && m_abort.load(std::memory_order_relaxed)) {
-				delete mu;
-				return;
-			}
-			if (mu->midi_ready())
-				break;
-			s32 l = 0, r = 0;
-			mu->run_sample(l, r);
-		}
-		if (i >= limit) {
-			m_message = "MU2000 が起動しなかった（ROM が壊れている可能性）";
-			logf("%s", m_message.c_str());
-			delete mu;
-			m_state.store(status::failed, std::memory_order_release);
+
+	for (; i < limit; i++) {
+		if (!(i & 4095) && m_abort.load(std::memory_order_relaxed)) {
 			return;
 		}
-
-		const double wall = std::chrono::duration<double>(
-		    std::chrono::steady_clock::now() - t0).count();
-		logf("起動: 音 %.2f 秒ぶん / 実時間 %.2f 秒", double(i) / NATIVE_RATE, wall);
-
-		// 起動し終えた機械まるごとを書き置く。次からはここから始める
-		if (cache_wanted && !cache.empty())
-			cache_store(*mu, cache, dir);
+		if (mu->midi_ready())
+			break;
+		s32 l = 0, r = 0;
+		mu->run_sample(l, r);
+	}
+	if (i >= limit) {
+		m_message = "MU2000 が起動しなかった（ROM が壊れている可能性）";
+		logf("%s", m_message.c_str());
+		mu.reset();
+		m_state.store(status::failed, std::memory_order_release);
+		return;
 	}
 
 	// Run past midi_ready until the firmware settles: at midi_ready the LCD
@@ -691,7 +681,6 @@ void engine::boot()
 	// forever, so only save once the steady screen is up
 	for (int64_t j = 0; j < int64_t(2.0 * NATIVE_RATE); j++) {
 		if (!(j & 4095) && m_abort.load(std::memory_order_relaxed)) {
-			delete mu;
 			return;
 		}
 		s32 l = 0, r = 0;
@@ -699,7 +688,8 @@ void engine::boot()
 	}
 
 	const double wall = std::chrono::duration<double>(
-	    std::chrono::steady_clock::now() - t_boot).count();
+		std::chrono::steady_clock::now() - t0).count();
+	logf("起動: 音 %.2f 秒ぶん / 実時間 %.2f 秒", double(i) / NATIVE_RATE, wall);
 	// 次からはここまでを飛ばせるように残す
 	if (bootcache::save(*mu, boot_key))
 		logf("起動の写しを残した: %s", bootcache::path(boot_key).c_str());
@@ -710,7 +700,7 @@ void engine::boot()
 		if (voicecache && smu2000::voicecache::load(*mu, smu2000::voicecache::key(*mu)))
 			logf("写し取り: %d 音色を前の写しから", int(mu->native_cal_count()));
 	}
-	m_mu = mu;
+	m_mu = std::move(mu);
 	m_message = warn.empty() ? std::string("ROM: ") + dir
 	                         : std::string("ROM: ") + dir + "\n警告: " + warn;
 	// A restore that arrived before the machine came up is kept in
@@ -800,7 +790,8 @@ void engine::midi(const uint8_t *bytes, size_t n, int port)
 			return;
 		}
 	}
-	// 起動待ちか、機械を他が使っている。あふれるようなら捨てる（上限は機械の溜めと同じ。mu2000.h）
+	// 起動待ちか、機械を他が使っている。落さず溜めて、fill が順番どおりに流す
+	// （issue #19。あふれるようなら捨てる。上限は機械の溜めと同じ。mu2000.h）
 	std::vector<uint8_t> &pending = m_pending[port];
 	if (pending.size() + n > mu2000::MIDI_QUEUE_LIMIT)
 		return;

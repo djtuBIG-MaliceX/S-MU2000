@@ -211,9 +211,24 @@ public:
 			return;
 		m_since = 0;
 		publish_now(mu, br, ready, message);
-		if (ready)
+		if (ready) {
 			publish_xg(mu, br);
+			publish_scope(mu, br);
+		}
 	}
+
+	// パートの音（音色の窓のスペクトラム）。見たいパートを音源に伝え、直近の波形を置く
+	void publish_scope(mu2000 &mu, bridge &br)
+	{
+		const int want = br.scope_wanted();
+		mu.set_scope_part(want);
+		if (want < 0)
+			return;
+		static_assert(bridge::SCOPE_N <= mu2000::SCOPE_N, "scope sizes");
+		mu.scope_read(m_scope, bridge::SCOPE_N);
+		br.publish_scope(m_scope, want);
+	}
+	float m_scope[bridge::SCOPE_N] = {};
 
 	// firmware のワーク RAM から XG の値を写す（xg/ram.h）
 	void publish_xg(mu2000 &mu, bridge &br)

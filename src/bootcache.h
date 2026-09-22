@@ -26,6 +26,7 @@
 
 #include "mu2000.h"
 #include "nvram.h"
+#include "ui/texts.h"
 
 #include "compat/paths.h"
 
@@ -150,7 +151,7 @@ inline bool load(mu2000 &mu, u64 k)
 	}
 	std::string err;
 	if (!mu.load_state(buf.data() + kEnvSize, buf.size() - kEnvSize, err)) {
-		std::fprintf(stderr, "起動の写しを読めない: %s\n", err.c_str());
+		std::fprintf(stderr, ui::texts().bootcache_read_error_fmt, err.c_str());
 		std::remove(p.c_str());
 		return false;
 	}

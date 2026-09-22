@@ -256,7 +256,7 @@ int main(int argc, char** argv)
 
   smu2000::vst3::engine eng;
   eng.set_output_rate(44100.0);
-  eng.start(true);
+  eng.start();
   if (eng.state() != smu2000::vst3::status::ready)
   {
     std::fprintf(stderr, "engine failed to boot: %s\n", eng.message().c_str());

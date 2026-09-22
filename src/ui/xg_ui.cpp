@@ -7,6 +7,7 @@
 #include "fx_icons.h"
 
 #include "imgui.h"
+#include "imgui_internal.h"   // SetKeyOwner（棒が矢印キーをもらう）
 
 #include <algorithm>
 #include <cstdarg>
@@ -81,12 +82,44 @@ const xg_snapshot *g_current_ram = nullptr;
 namespace {
 bool g_hint_bar = false;
 std::string g_hint;
+std::vector<std::string> g_values;               // begin_values から集めている点の字
+bool g_collect = false;
 }
 
 void begin_hint_bar() { g_hint_bar = true; g_hint.clear(); }
 void end_hint_bar() { g_hint_bar = false; }
 bool hint_bar() { return g_hint_bar; }
 const std::string &hint_text() { return g_hint; }
+
+void begin_values()
+{
+	g_values.clear();
+	g_collect = true;
+}
+
+std::vector<std::string> end_values()
+{
+	g_collect = false;
+	return std::move(g_values);
+}
+
+void shape_value(const char *text)
+{
+	if (!g_collect)
+		return;
+	std::string line;
+	for (const char *c = text;; c++) {          // 2 行の字は 2 行に分ける
+		if (*c == '\n' || !*c) {
+			if (!line.empty())
+				g_values.push_back(line);
+			line.clear();
+			if (!*c)
+				break;
+		} else {
+			line += *c;
+		}
+	}
+}
 
 void hint(const char *fmt, ...)
 {
@@ -99,6 +132,55 @@ void hint(const char *fmt, ...)
 		g_hint = buf;
 	else
 		ImGui::SetItemTooltip("%s", buf);
+}
+
+// ---- マウスで動かしている間の送信の間引き
+namespace {
+struct drag_msg { std::string key; std::vector<u8> bytes; };
+std::vector<drag_msg> g_drag;                       // 送っていない分（番地ごとに最新だけ）
+std::chrono::steady_clock::time_point g_drag_sent;
+constexpr auto DRAG_EVERY = std::chrono::milliseconds(60);   // 画面は 30 コマ／秒。2 コマに 1 回くらい
+
+// 同じ行き先かを見分ける印。パラメータチェンジは番地まで、CC は番号まで
+std::string drag_key(const std::vector<u8> &b)
+{
+	size_t n = b.size();
+	if (!b.empty() && b[0] == 0xf0)
+		n = std::min<size_t>(n, 7);             // F0 43 1n 4C 上 中 下
+	else if (!b.empty() && (b[0] & 0xf0) == 0xb0)
+		n = std::min<size_t>(n, 2);             // Bn 番号
+	return std::string(b.begin(), b.begin() + std::ptrdiff_t(n));
+}
+
+void drag_send_now(bridge &br)
+{
+	for (drag_msg &d : g_drag)
+		br.send(std::move(d.bytes));
+	g_drag.clear();
+	g_drag_sent = std::chrono::steady_clock::now();
+}
+} // namespace
+
+void drag_send(bridge &br, std::vector<u8> bytes)
+{
+	if (bytes.empty())
+		return;
+	const std::string key = drag_key(bytes);
+	auto it = std::find_if(g_drag.begin(), g_drag.end(), [&](const drag_msg &d) { return d.key == key; });
+	if (it != g_drag.end())
+		it->bytes = std::move(bytes);
+	else
+		g_drag.push_back({ key, std::move(bytes) });
+	drag_flush(br);
+}
+
+void drag_flush(bridge &br)
+{
+	if (g_drag.empty())
+		return;
+	// ボタンを離したらすぐ。押している間は間を空けて
+	if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) || std::chrono::steady_clock::now() - g_drag_sent >= DRAG_EVERY)
+		drag_send_now(br);
 }
 
 void set_current_ram(const xg_snapshot *ram) { g_current_ram = ram; }
@@ -277,6 +359,26 @@ const xg::param &P(const char *key)
 	return *p;
 }
 
+std::string value_text(const char *key, int v)
+{
+	const xg::param &p = P(key);
+	if (std::strstr(key, "eq") && std::strstr(key, "freq"))
+		return eq::hz_text(v) + " Hz";
+	if (!std::strncmp(key, "master_eq.q", 11)) {
+		char buf[16];
+		std::snprintf(buf, sizeof(buf), "%.1f", v / 10.0);
+		return buf;
+	}
+	return xg::format(p, v);
+}
+
+std::string param_line(const char *key, int part, xg::model &m)
+{
+	const xg::param &p = P(key);
+	int v = 0;
+	return std::string(p.label) + " : " + (m.get(p, part, v) ? value_text(key, v) : std::string("--"));
+}
+
 bool param_slider(const char *key, int part, xg::model &m, bridge &br, const char *label)
 {
 	ImGui::PushID(key);
@@ -291,18 +393,7 @@ bool param_slider(const char *key, int part, xg::model &m, bridge &br, const cha
 		return false;
 	}
 	// 書式の % は SliderInt の書式として読まれないよう重ねる
-	const bool hz = std::strstr(key, "eq") && std::strstr(key, "freq");
-	const bool q = !std::strncmp(key, "master_eq.q", 11);
-	std::string shown;
-	if (hz) {
-		shown = eq::hz_text(v) + " Hz";
-	} else if (q) {
-		char buf[16];
-		std::snprintf(buf, sizeof(buf), "%.1f", v / 10.0);
-		shown = buf;
-	} else {
-		shown = xg::format(p, v);
-	}
+	const std::string shown = value_text(key, v);
 	std::string text;
 	for (char c : shown) {
 		if (c == '%')
@@ -310,9 +401,23 @@ bool param_slider(const char *key, int part, xg::model &m, bridge &br, const cha
 		text += c;
 	}
 	int nv = v;
-	const bool changed = ImGui::SliderInt(label ? label : p.label, &nv, p.min, p.max, text.c_str()) && nv != v;
+	ImGui::SliderInt(label ? label : p.label, &nv, p.min, p.max, text.c_str());
+	// ← → で 1 つずつ（Shift で 10）。カーソルが載っている棒か、ほかに載っていなければ最後に触った棒
+	const bool typing = ImGui::GetIO().WantTextInput;
+	if (!typing && (ImGui::IsItemHovered() || (ImGui::IsItemFocused() && !ImGui::IsAnyItemHovered()))) {
+		// キーはこの棒がもらう（ImGui のキーボード移動で、隣の部品へ移らないように）
+		const ImGuiID id = ImGui::GetItemID();
+		ImGui::SetKeyOwner(ImGuiKey_LeftArrow, id);
+		ImGui::SetKeyOwner(ImGuiKey_RightArrow, id);
+		const int step = ImGui::GetIO().KeyShift ? 10 : 1;
+		if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow, ImGuiInputFlags_Repeat, id))
+			nv = std::max(p.min, nv - step);
+		if (ImGui::IsKeyPressed(ImGuiKey_RightArrow, ImGuiInputFlags_Repeat, id))
+			nv = std::min(p.max, nv + step);
+	}
+	const bool changed = nv != v;
 	if (changed)
-		br.send(m.set(p, part, nv));
+		drag_send(br, m.set(p, part, nv));      // ドラッグ中は間引く。キーや数の打ち込みはすぐ送られる
 	help_tip(key);
 	ImGui::PopID();
 	return changed;
@@ -942,7 +1047,17 @@ const help_text HELP[] = {
 		"リリース（CC72）。鍵盤を離してから音が消えるまでの長さ",
 		"Release (CC72). How long the sound takes to fade after the key is released." } },
 	{ "part.vib_rate", { "ビブラートの速さ", "Vibrato speed." } },
-	{ "part.vib_depth", { "ビブラートの深さ", "Vibrato depth." } },
+	{ "part.eq_bass_gain", { "パートの EQ の低音のゲイン（±12 の目盛り）。フィルタのすぐ後ろ、声ごとに掛かる（インサーションより前）。"
+	                         "実機でも効き方は ±2.4 dB ほどと小さい（2026-09-17 に実機と比べて確かめた）",
+	                         "Part EQ bass gain (±12 steps). Applied per voice right after the filter (before insertion effects). "
+	                         "The real unit only moves about ±2.4 dB (checked against hardware)." } },
+	{ "part.eq_treble_gain", { "パートの EQ の高音のゲイン（±12 の目盛り）。フィルタのすぐ後ろ、声ごとに掛かる（インサーションより前）。"
+	                           "実機でも効き方は ±2.4 dB ほどと小さい",
+	                           "Part EQ treble gain (±12 steps). Applied per voice right after the filter. The real unit only moves about ±2.4 dB." } },
+	{ "part.eq_bass_freq", { "パートの EQ の低音の周波数（32 Hz-2 kHz）。これより下を上げ下げする", "Part EQ bass shelf frequency (32 Hz-2 kHz)." } },
+	{ "part.eq_treble_freq", { "パートの EQ の高音の周波数（500 Hz-16 kHz）。これより上を上げ下げする", "Part EQ treble shelf frequency (500 Hz-16 kHz)." } },
+	{ "part.vib_depth", { "ビブラートの深さ（音色自身の揺れを深くする）。モジュレーションホイールなどの揺れとは足し合わさず、深いほうが効く",
+	                      "Vibrato depth (the voice's own vibrato). It does not add to the vibrato from the mod wheel etc.; the deeper one wins." } },
 	{ "part.vib_delay", { "弾いてからビブラートが掛かり始めるまでの時間", "Time before the vibrato starts." } },
 	{ "part.note_shift", { "音程を半音単位でずらす（移調）", "Transposes the part in semitones." } },
 	{ "part.detune", { "音程をわずかにずらす（音の厚みを出すときなど）", "Fine pitch offset, e.g. to thicken the sound." } },
@@ -972,6 +1087,7 @@ int   g_lang = 0;
 float g_zoom = 0.625f;                 // 一覧の表示の大きさ
 float g_shapes_zoom = 0.6f;            // パートの音色の窓の表示の大きさ
 float g_master_zoom = 0.8f;            // マスターの窓の表示の大きさ
+unsigned g_shapes_knobs = 0;           // 音色の窓の区画ごとに「つまみで触る」か（ビットごと）
 int   g_audition_note = -1;            // 試聴で鳴らす鍵（-1 は決まっていない）
 bool  g_loaded = false;
 
@@ -999,6 +1115,8 @@ void load_settings()
 			g_zoom = std::clamp(float(std::atof(line + 14)), 0.5f, 1.5f);
 		else if (!std::strncmp(line, "shapes_zoom=", 12))
 			g_shapes_zoom = std::clamp(float(std::atof(line + 12)), 0.4f, 1.5f);
+		else if (!std::strncmp(line, "shapes_knobs=", 13))
+			g_shapes_knobs = unsigned(std::strtoul(line + 13, nullptr, 10));
 		else if (!std::strncmp(line, "audition_note=", 14))
 			g_audition_note = std::clamp(std::atoi(line + 14), -1, 127);
 		else if (!std::strncmp(line, "master_zoom=", 12))
@@ -1018,8 +1136,9 @@ void save_settings()
 		return;
 	smu2000::ensure_dir(path.substr(0, path.find_last_of("\\/")));
 	if (FILE *f = std::fopen(path.c_str(), "wb")) {
-		std::fprintf(f, "help=%d\nlang=%s\noverview_zoom=%.3f\nshapes_zoom=%.3f\nmaster_zoom=%.3f\naudition_note=%d\n",
-		             g_help ? 1 : 0, LANGS[g_lang].code, g_zoom, g_shapes_zoom, g_master_zoom, g_audition_note);
+		std::fprintf(f, "help=%d\nlang=%s\noverview_zoom=%.3f\nshapes_zoom=%.3f\nmaster_zoom=%.3f\naudition_note=%d\nshapes_knobs=%u\n",
+		             g_help ? 1 : 0, LANGS[g_lang].code, g_zoom, g_shapes_zoom, g_master_zoom, g_audition_note,
+		             g_shapes_knobs);
 		std::fclose(f);
 	}
 }
@@ -1049,7 +1168,8 @@ const char *source_help(const char *name)
 		{ "filter",   "でフィルタのカットオフを動かす量。＋なら上げるほど開き、−なら上げるほど閉じる",
 		              " moves the filter cutoff by this much. With + raising it opens the filter, with - it closes it." },
 		{ "amp",      "で音量を動かす量。＋なら上げるほど大きく、−なら上げるほど小さく", " changes the volume by this much. With + raising it gets louder, with - quieter." },
-		{ "lfo_pmod", "でビブラート（音程の揺れ）を深くする量", " adds this much vibrato (pitch wobble)." },
+		{ "lfo_pmod", "でビブラート（音程の揺れ）を深くする量。音色のビブラート（Vib Depth を含む）とは足し合わさず、深いほうが効く",
+		              " adds this much vibrato (pitch wobble). It does not add to the voice's own vibrato (including Vib Depth); the deeper one wins." },
 		{ "lfo_fmod", "でフィルタの揺れ（ワウ）を深くする量", " adds this much filter wobble." },
 		{ "lfo_amod", "でトレモロ（音量の揺れ）を深くする量", " adds this much tremolo (volume wobble)." },
 	};
@@ -1083,6 +1203,12 @@ int help_lang()
 	return g_lang;
 }
 
+void set_help_lang(int lang)
+{
+	if (lang >= 0 && lang < NLANG)
+		g_lang = lang;
+}
+
 float &overview_zoom()
 {
 	ensure_loaded();
@@ -1103,6 +1229,22 @@ float &shapes_zoom()
 {
 	ensure_loaded();
 	return g_shapes_zoom;
+}
+
+bool shapes_knobs(int panel)
+{
+	ensure_loaded();
+	return (g_shapes_knobs >> panel) & 1;
+}
+
+void set_shapes_knobs(int panel, bool knobs)
+{
+	ensure_loaded();
+	const unsigned v = knobs ? g_shapes_knobs | (1u << panel) : g_shapes_knobs & ~(1u << panel);
+	if (v != g_shapes_knobs) {
+		g_shapes_knobs = v;
+		save_settings();
+	}
 }
 
 void set_shapes_zoom(float zoom)
@@ -1158,11 +1300,78 @@ void help_tip(const char *name)
 	if (!help_on() || !ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
 		return;
 	if (const char *t = find_help(name)) {
-		if (g_hint_bar)
-			g_hint = t;                   // 説明の帯のある窓では帯へ
+		if (g_hint_bar) {
+			// 説明の帯のある窓では帯へ。1 行目に XG の正式名（あれば）
+			const std::string on = official_name(name);
+			g_hint = on.empty() ? std::string(t) : on + "\n" + t;
+		}
 		else
 			ImGui::SetTooltip("%s", t);
 	}
+}
+
+std::string official_name(const char *key)
+{
+	// XG の仕様書のパラメータ名（パートの番地 08 pp xx の表の名前）
+	static const std::pair<const char *, const char *> NAMES[] = {
+		{ "part.element_reserve", "ELEMENT RESERVE" }, { "part.bank_msb", "BANK SELECT MSB" },
+		{ "part.bank_lsb", "BANK SELECT LSB" }, { "part.program", "PROGRAM NUMBER" },
+		{ "part.rcv_channel", "Rcv CHANNEL" }, { "part.mono_poly", "MONO/POLY MODE" },
+		{ "part.key_assign", "SAME NOTE NUMBER KEY ON ASSIGN" }, { "part.mode", "PART MODE" },
+		{ "part.note_shift", "NOTE SHIFT" }, { "part.detune", "DETUNE" }, { "part.volume", "VOLUME" },
+		{ "part.vel_depth", "VELOCITY SENSE DEPTH" }, { "part.vel_offset", "VELOCITY SENSE OFFSET" },
+		{ "part.pan", "PAN" }, { "part.note_low", "NOTE LIMIT LOW" }, { "part.note_high", "NOTE LIMIT HIGH" },
+		{ "part.dry_level", "DRY LEVEL" }, { "part.chorus_send", "CHORUS SEND" },
+		{ "part.reverb_send", "REVERB SEND" }, { "part.variation_send", "VARIATION SEND" },
+		{ "part.vib_rate", "VIBRATO RATE" }, { "part.vib_depth", "VIBRATO DEPTH" },
+		{ "part.vib_delay", "VIBRATO DELAY" }, { "part.cutoff", "FILTER CUTOFF FREQUENCY" },
+		{ "part.resonance", "FILTER RESONANCE" }, { "part.attack", "EG ATTACK TIME" },
+		{ "part.decay", "EG DECAY TIME" }, { "part.release", "EG RELEASE TIME" },
+		{ "part.ac1_cc", "AC1 CONTROLLER NUMBER" }, { "part.ac2_cc", "AC2 CONTROLLER NUMBER" },
+		{ "part.porta_switch", "PORTAMENTO SWITCH" }, { "part.porta_time", "PORTAMENTO TIME" },
+		{ "part.peg_init_level", "PITCH EG INITIAL LEVEL" }, { "part.peg_attack_time", "PITCH EG ATTACK TIME" },
+		{ "part.peg_rel_level", "PITCH EG RELEASE LEVEL" }, { "part.peg_rel_time", "PITCH EG RELEASE TIME" },
+		{ "part.vel_limit_low", "VELOCITY LIMIT LOW" }, { "part.vel_limit_high", "VELOCITY LIMIT HIGH" },
+		{ "part.hpf_cutoff", "HPF CUTOFF FREQUENCY" }, { "part.eq_bass_gain", "EQ BASS GAIN" },
+		{ "part.eq_treble_gain", "EQ TREBLE GAIN" }, { "part.eq_bass_freq", "EQ BASS FREQUENCY" },
+		{ "part.eq_treble_freq", "EQ TREBLE FREQUENCY" },
+	};
+	// 操作子 × 行き先の 36 個は形がそろっている（MW LFO PMOD DEPTH など）
+	static const std::pair<const char *, const char *> SRC[] = {
+		{ "part.mw_", "MW" }, { "part.bend_", "BEND" }, { "part.cat_", "CAT" },
+		{ "part.pat_", "PAT" }, { "part.ac1_", "AC1" }, { "part.ac2_", "AC2" },
+	};
+	static const std::pair<const char *, const char *> DST[] = {
+		{ "pitch", "PITCH CONTROL" }, { "filter", "FILTER CONTROL" }, { "amp", "AMPLITUDE CONTROL" },
+		{ "lfo_pmod", "LFO PMOD DEPTH" }, { "lfo_fmod", "LFO FMOD DEPTH" }, { "lfo_amod", "LFO AMOD DEPTH" },
+	};
+	std::string name;
+	for (const auto &n : NAMES)
+		if (!std::strcmp(n.first, key))
+			name = n.second;
+	if (name.empty())
+		for (const auto &s : SRC) {
+			const size_t len = std::strlen(s.first);
+			if (std::strncmp(key, s.first, len))
+				continue;
+			for (const auto &d : DST)
+				if (!std::strcmp(key + len, d.first))
+					name = std::string(s.second) + " " + d.second;
+		}
+	if (name.empty())
+		return std::string();
+	// 番地も添える（08 pp 20 のように。pp はパート）
+	if (const xg::param *p = xg::find(key)) {
+		char b[24];
+		std::snprintf(b, sizeof(b), "（%02X pp %02X）", p->hi, p->lo);
+		name += b;
+	}
+	return name;
+}
+
+const char *help_for(const char *name)
+{
+	return help_on() ? find_help(name) : nullptr;
 }
 
 void help_checkbox()

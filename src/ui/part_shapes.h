@@ -36,6 +36,7 @@ public:
 	{
 		xgui::audition_stop(br);
 		m_strip.strip_hidden(br);
+		br.want_scope(-1);            // パートの音を拾うのもやめる
 	}
 
 private:

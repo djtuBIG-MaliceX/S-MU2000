@@ -4315,6 +4315,9 @@ void swp30_device::sample_step()
 
 	std::array<s32, 0x40> samples_per_chan;
 	awm2_step(samples_per_chan);
+	// S-MU2000: 声ごとの出力を画面へ（パートの音のスペクトラム）
+	if(m_voice_tap)
+		m_voice_tap(m_voice_tap_ctx, samples_per_chan.data());
 
 	// S-MU2000: 声そのものの出力（--dump-dac のときだけ）。
 	// 暴れているのが声なのかエフェクトなのかを分けるため

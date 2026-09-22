@@ -20,6 +20,8 @@
 
 #include "pluginterfaces/gui/iplugview.h"
 
+#include "plug_window.h"
+
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -29,6 +31,13 @@ namespace vst3 {
 
 class engine;
 class plug_window;
+
+// mu2000::button value -> plug_key for the panel keys (view.cpp): the reverse
+// of its button_of(), for platform windows that share their letter map through
+// ui/keymap.h. int because mu2000.h is too heavy for this header (MAME CPU
+// headers next to Cocoa). Returns PLUG_KEY_NONE for anything that is not
+// a panel key.
+plug_key plug_key_of_button(int button);
 
 class plug_view : public Steinberg::IPlugView
 {
@@ -70,7 +79,7 @@ public:
 	void mouse_drag(int x, int y);
 	void mouse_up();
 	void wheel(int x, int y, int steps);
-	void key(int code, bool down);          // code is a plug_key
+	void key(plug_key code, bool down);
 	void focus_lost();
 	void mouse_right(int x, int y);         // the card slot answers a right click
 	void log_line(const char *text);        // one line to the engine's log

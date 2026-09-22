@@ -20,7 +20,7 @@
 #include "ui/panel.h"
 #include "ui/toolbar.h"
 
-#if !defined(_WIN32)
+#if defined(__APPLE__)
 #include <CoreGraphics/CoreGraphics.h>
 #endif
 
@@ -68,6 +68,35 @@ mu2000::button button_of(int code, bool &ok)
 
 } // namespace
 
+// mu2000::button -> plug_key for the panel keys: the reverse of button_of(),
+// for platform windows that share their letter map through ui/keymap.h
+// (shared characters become mu2000::button there, then these here).
+// Returns PLUG_KEY_NONE for anything that is not a panel key.
+plug_key plug_key_of_button(int button)
+{
+	const auto b = mu2000::button(button);
+	switch (b) {
+	case mu2000::button::play:          return PLUG_KEY_PLAY;
+	case mu2000::button::edit:          return PLUG_KEY_EDIT;
+	case mu2000::button::util:          return PLUG_KEY_UTIL;
+	case mu2000::button::effect:        return PLUG_KEY_EFFECT;
+	case mu2000::button::mute_solo:     return PLUG_KEY_MUTE_SOLO;
+	case mu2000::button::part_plus:     return PLUG_KEY_PART_PLUS;
+	case mu2000::button::part_minus:    return PLUG_KEY_PART_MINUS;
+	case mu2000::button::value_plus:    return PLUG_KEY_VALUE_PLUS;
+	case mu2000::button::value_minus:   return PLUG_KEY_VALUE_MINUS;
+	case mu2000::button::enter:         return PLUG_KEY_ENTER;
+	case mu2000::button::exit:          return PLUG_KEY_EXIT;
+	case mu2000::button::select_right:  return PLUG_KEY_SELECT_RIGHT;
+	case mu2000::button::select_left:   return PLUG_KEY_SELECT_LEFT;
+	case mu2000::button::seq:           return PLUG_KEY_SEQ;
+	case mu2000::button::audition:      return PLUG_KEY_AUDITION;
+	case mu2000::button::select:        return PLUG_KEY_SELECT;
+	case mu2000::button::sampling_mode: return PLUG_KEY_SAMPLING_MODE;
+	default: break;
+	}
+	return PLUG_KEY_NONE;
+}
 
 // The panel lives here so that view.h can stay free of compat/gdi.h
 struct plug_view::impl
@@ -88,9 +117,11 @@ struct plug_view::impl
 
 	explicit impl(engine &e) : eng(e)
 	{
-		bar.set_items({ { "一覧", PC_LIST }, { "エディタ", PC_EDITOR },
-		                { "音色", PC_SHAPES }, { "エフェクト", PC_FX },
-		                { "マスター", PC_MASTER } });
+		// The bar ids are the pc_kind the view dispatches (open_pc_window)
+		static_assert(int(ui::BAR_LIST) == PC_LIST && int(ui::BAR_EDITOR) == PC_EDITOR &&
+		              int(ui::BAR_FX) == PC_FX && int(ui::BAR_SHAPES) == PC_SHAPES &&
+		              int(ui::BAR_MASTER) == PC_MASTER, "bar ids are pc_kind");
+		bar.set_items(ui::window_bar_items());
 		panel.set_top_inset(ui::toolbar::HEIGHT);
 	}
 
@@ -282,13 +313,17 @@ void plug_view::repaint(void *native, int w, int h)
 	}
 	m_impl->paint_panel(m_impl->mem_dc);
 	BitBlt(dst, 0, 0, w, h, m_impl->mem_dc, 0, 0, SRCCOPY);
-#else
+#elif defined(__APPLE__)
 	// The subview is flipped, so the context is already top-left with y down
 	// and only has to be wrapped -- no flipping, same as the GUI window
 	CGContextRef ctx = static_cast<CGContextRef>(native);
 	HDC dc = static_cast<HDC>(smu_gdi_wrap_view_context(ctx, w, h));
 	m_impl->paint_panel(dc);
 	DeleteDC(dc);
+#else
+	// Linux headless build (plug_window_linux): the stub window never paints.
+	// The editor view arrives in a later phase (doc/porting-linux-gui.md).
+	(void)native; (void)w; (void)h;
 #endif
 
 	card_tick();
@@ -344,7 +379,7 @@ void plug_view::wheel(int x, int y, int steps)
 		m_impl->panel.wheel_at(x, y, steps, m_engine.panel());
 }
 
-void plug_view::key(int code, bool down)
+void plug_view::key(plug_key code, bool down)
 {
 	// **F4 で native の口を入切**（gui.exe と同じ。6.207）。
 	// 切り替えは音声の糸がつぎの区間の頭で行う

@@ -367,7 +367,11 @@ static ImGuiKey key_from_code(unsigned short code)
 	const ImGuiKey key = key_from_code([event keyCode]);
 	if (key != ImGuiKey_None)
 		io.AddKeyEvent(key, true);
-	// Text, where there is any. The views' text boxes are the only readers
+	// Text, where there is any. The views' text boxes are the only readers, so only while one is
+	// active: a held key (playing notes from the keyboard) repeats text, and ImGui trickles text
+	// against mouse moves, so a drag would lag further and further behind
+	if (!io.WantTextInput)
+		return;
 	NSString *chars = [event characters];
 	for (NSUInteger i = 0; i < [chars length]; i++)
 		io.AddInputCharacterUTF16([chars characterAtIndex:i]);
@@ -701,6 +705,7 @@ void pc_window::frame(xg::model &m, const xg_snapshot &ram, bridge &br)
 	ImGui_ImplMetal_NewFrame(pass);
 	ImGui::NewFrame();
 	m_view->draw(m, ram, br);
+	xgui::drag_flush(br);          // マウスで動かしている値の、間引いた送信
 	ImGui::Render();
 
 	id<MTLCommandBuffer> buf = [h->queue commandBuffer];

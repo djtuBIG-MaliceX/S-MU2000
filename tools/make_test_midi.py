@@ -1521,6 +1521,37 @@ def case_xgpegatk():
     return [track(seq(ev))], t + 1.0
 
 
+def case_xgmwvib():
+    """**モジュレーションのビブラートと、パートのビブラートの組み合わせ**（6.215）。
+
+    firmware は LFO の音程の深さ（レジスタ `0x0a` の下位）を
+    `表[max(つまみの合計の頭打ち, 音色自身の目盛り)]` で出す。足さない。
+    音色自身の目盛りには Vib Depth（08 pp 16）と遅れてせり上がる分が入る。
+    native の口は足していたので、Vib Depth を上げた音色でホイールを上げると深さが 2 倍近くになっていた。
+    GrandPno（音色自身は 0）・Violin（遅れてせり上がる）・ChiffLead（音色自身が 6）で、
+    MW LFO PM（08 pp 20）と CC1 を振り、鳴らしている途中でもホイールを動かす。
+    """
+    ev = head()
+    progs = (0, 40, 83)                                # GrandPno / Violin / ChiffLead
+    for ch, pg in enumerate(progs):
+        ev += [(1.0, bytes([0xc0 | ch, pg]))]
+    for ch in range(3):
+        ev += note(ch, 60, 100, 1.2 + ch * 0.1, 0.4)   # 1 音目。ここで写し取る
+    t = 2.4
+    for vib, mw, cc1 in ((80, 10, 127), (96, 64, 127), (64, 64, 64), (70, 32, 100), (64, 10, 0)):
+        for ch in range(3):
+            ev += [(t, xg([0x08, ch, 0x16, vib])), (t, xg([0x08, ch, 0x20, mw])),
+                   (t, bytes([0xb0 | ch, 1, cc1]))]
+        for ch in range(3):
+            ev += note(ch, 62 + ch * 3, 100, t + 0.2, 1.6)
+        # 鳴らしている途中でホイールを動かす
+        for i, w in enumerate((127, 40, 0)):
+            for ch in range(3):
+                ev += [(t + 0.9 + i * 0.25, bytes([0xb0 | ch, 1, w]))]
+        t += 2.3
+    return [track(seq(ev))], t + 1.0
+
+
 def case_xghpf():
     """**パートの HPF**（`0A pp 20`。パートの塊の番地は 08 ではなく 0A）。
 
@@ -1648,6 +1679,7 @@ CASES = {
     "xgpeg":   case_xgpeg,
     "xghpf":   case_xghpf,
     "xgpegatk": case_xgpegatk,
+    "xgmwvib": case_xgmwvib,
     "xgsys":   case_xgsys,
 }
 

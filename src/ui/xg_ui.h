@@ -53,6 +53,16 @@ bool hint_bar();
 // 説明を出す。帯があれば帯へ、無ければ直前の部品のツールチップへ（printf の書式）
 void hint(const char *fmt, ...);
 const std::string &hint_text();
+// 絵の点の字（実際の時間や音程）を集める。begin_values と end_values の間に描いた字を、
+// 出せなかった分も含めて 1 行ずつ返す（音色の窓が、区画にカーソルが載ったとき帯に並べる）
+void begin_values();
+std::vector<std::string> end_values();
+void shape_value(const char *text);
+
+// マウスで動かしている値の送信。押している間は 60 ms に 1 回、行き先ごとに最新の値だけ送り、
+// 離したらすぐ送る（毎コマ送ると直列が詰まって反応が遅れる）。窓の持ち主は毎コマ描いた後に drag_flush を呼ぶ
+void drag_send(bridge &br, std::vector<u8> bytes);
+void drag_flush(bridge &br);
 
 // 今のコマの RAM の写し。窓が描く前に置き、絵（音色の中身を読むもの）が読む
 void set_current_ram(const xg_snapshot *ram);
@@ -126,6 +136,9 @@ inline constexpr part_group PART_GROUPS[] = {
 // EQ の周波数は表の番号でなく Hz、マスター EQ の Q は 10 分の 1 で出す。戻り値は「値を変えたか」。
 // label を渡すとパラメータの名前の代わりにそれを出す（"##" で始めれば名前を出さない）
 bool param_slider(const char *key, int part, xg::model &m, bridge &br, const char *label = nullptr);
+// 値の棒と同じ書き方の値（EQ の周波数は Hz など）と、「名前 : 値」の 1 行
+std::string value_text(const char *key, int value);
+std::string param_line(const char *key, int part, xg::model &m);
 
 // ---- 一覧の表示の大きさ（文字の大きさの倍率、0.5〜1.5）。editor.ini に覚えておく
 float &overview_zoom();
@@ -134,6 +147,9 @@ void set_overview_zoom(float zoom);
 // ---- パートの音色の窓の表示の大きさ（0.4〜1.5、既定 0.6）。editor.ini に覚えておく
 float &shapes_zoom();
 void set_shapes_zoom(float zoom);
+// 音色の窓の区画（番号）ごとに、絵で触るか（false）つまみで触るか（true）。editor.ini に覚えておく
+bool shapes_knobs(int panel);
+void set_shapes_knobs(int panel, bool knobs);
 
 // ---- マスターの窓の表示の大きさ（0.4〜1.5、既定 0.8）。editor.ini に覚えておく
 float &master_zoom();
@@ -156,8 +172,14 @@ void set_audition_note(int note);
 // %LOCALAPPDATA%\S-MU2000\editor.ini に覚えておく（窓どうしで共通）
 bool &help_on();
 int help_lang();                        // 0 が日本語、1 が English
+// 言語を選ぶ。editor.ini に lang= があれば、次に読んだときにそちらが勝つ
+void set_help_lang(int lang);
 // 直前の部品にカーソルが載っていれば、説明を出す。name は列の見出しかパラメータのキー
 void help_tip(const char *name);
+// 説明の文そのもの（説明を消していれば、または無ければ nullptr）
+const char *help_for(const char *name);
+// XG の仕様書のパラメータ名と番地（"MW LFO PMOD DEPTH（08 pp 20）"）。パートの項目だけ。無ければ空
+std::string official_name(const char *key);
 // 「説明を出す」のチェックボックスと、言語の選択
 void help_checkbox();
 // 表の見出しの行を、説明つきで出す（ImGui::TableHeadersRow の代わり）

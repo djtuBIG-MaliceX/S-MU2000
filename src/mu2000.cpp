@@ -84,8 +84,81 @@ mu2000::mu2000()
 	m_sampram.assign(0x400000, 0);   // SWP30 のサンプリング RAM
 	m_swpm.set_sample_ram(m_sampram.data(), m_sampram.size());
 	m_swps.set_sample_ram(m_sampram.data(), m_sampram.size());
+	// パートの音を拾う口（見たいパートが無ければ、渡された所ですぐ帰る）
+	for (auto &o : m_scope_owner)
+		o.store(-1, std::memory_order_relaxed);
+	m_swpm.m_voice_tap = &mu2000::scope_tap_fn;
+	m_swpm.m_voice_tap_ctx = &m_scope_ctx[0];
+	m_swps.m_voice_tap = &mu2000::scope_tap_fn;
+	m_swps.m_voice_tap_ctx = &m_scope_ctx[1];
 
 	build_bus();
+}
+
+// ---- パートの音（画面のスペクトラム用）
+
+void mu2000::set_scope_part(int part)
+{
+	const int p = (part >= 0 && part < 64) ? part : -1;
+	if (m_scope_part.exchange(p, std::memory_order_relaxed) != p && p >= 0)
+		scope_refresh_owner();
+}
+
+void mu2000::scope_tap_fn(void *ctx, const s32 *samples)
+{
+	const scope_tap &t = *static_cast<const scope_tap *>(ctx);
+	mu2000 &m = *t.self;
+	const int part = m.m_scope_part.load(std::memory_order_relaxed);
+	if (part < 0)
+		return;
+	float sum = 0.0f;
+	const int base = t.chip * 64;
+	for (int i = 0; i < 64; i++)
+		if (samples[i] && m.m_scope_owner[size_t(base + i)].load(std::memory_order_relaxed) == part)
+			sum += float(samples[i]);
+	const u32 w = m.m_scope_w[size_t(t.chip)].load(std::memory_order_relaxed);
+	m.m_scope_ring[size_t(t.chip)][w & (SCOPE_N - 1)] = sum;
+	m.m_scope_w[size_t(t.chip)].store(w + 1, std::memory_order_release);
+}
+
+void mu2000::scope_refresh_owner()
+{
+	// パートの塊の番地（下 16bit）→ パート
+	static const std::array<u16, 64> PART_PTR = [] {
+		std::array<u16, 64> a{};
+		for (int p = 0; p < 64; p++)
+			a[size_t(p)] = u16(0x400000 + xg::ram::part_base(p));
+		return a;
+	}();
+	constexpr u32 VOICE_TABLE = 0x24386;     // 0x424386: 声ごとの記録（148 バイト）の +6 がパートの塊の番地
+	constexpr u32 VOICE_STRIDE = 148;
+	for (int v = 0; v < 128; v++) {
+		int owner = -1;
+		if (m_native_engine && v < 64)
+			owner = m_ndrv.slot_part(v);
+		if (owner < 0) {
+			const u32 off = VOICE_TABLE + u32(v) * VOICE_STRIDE;
+			const u16 ptr = u16(m_ram[off] << 8 | m_ram[off + 1]);
+			for (int p = 0; p < 64; p++)
+				if (PART_PTR[size_t(p)] == ptr) {
+					owner = p;
+					break;
+				}
+		}
+		m_scope_owner[size_t(v)].store(s8(owner), std::memory_order_relaxed);
+	}
+}
+
+void mu2000::scope_read(float *out, size_t n) const
+{
+	n = std::min(n, SCOPE_N);
+	const u32 w0 = m_scope_w[0].load(std::memory_order_acquire);
+	const u32 w1 = m_scope_w[1].load(std::memory_order_acquire);
+	const u32 end = std::min(w0, w1);
+	for (size_t i = 0; i < n; i++) {
+		const u32 k = end - u32(n) + u32(i);
+		out[i] = (end >= n || k < end) ? m_scope_ring[0][k & (SCOPE_N - 1)] + m_scope_ring[1][k & (SCOPE_N - 1)] : 0.0f;
+	}
 }
 
 mu2000::~mu2000()
@@ -2700,6 +2773,9 @@ void mu2000::run_sample(s32 &left, s32 &right)
 	// S-MU2000: 軽量モードでは、XG の設定をときどき読み直す
 	if (m_nfx_on && !(++m_nfx_tick & 0x1ff))
 		native_fx_update();
+	// 画面がパートの音を見ているときは、声 → パートを 256 サンプル（6ms）ごとに読み直す
+	if (m_scope_part.load(std::memory_order_relaxed) >= 0 && !(++m_scope_tick & 0xff))
+		scope_refresh_owner();
 
 	// 台数が変わっていたら別スレッドの使い方を見直す（8192 サンプルごと）
 	if (m_want_threaded && !(++m_thread_check & 0x1fff))

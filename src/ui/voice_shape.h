@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <complex>
 #include <cstring>
 #include <vector>
 
@@ -352,6 +353,55 @@ inline std::vector<vib_line> vib_lines(const u8 *rom, u32 rec, const u8 *part, f
 	return out;
 }
 
+// ---- モジュレーションのビブラート
+//
+// レジスタ 0x0a の下位（LFO の音程の深さ）→ 片側のセント。下位 7bit が深さ、bit7 で 8 倍
+// （swp30 の get_pitch: 状態 ±0x800 × 深さ を 12bit か 9bit 右へ。音程は 1 オクターブ 1024）
+inline float lfo_depth_cents(int low)
+{
+	const int d = low & 0x7f;
+	const double units = (low & 0x80) ? 2048.0 * d / 512.0 : 2048.0 * d / 4096.0;
+	return float(units * 1200.0 / 1024.0);
+}
+
+// ホイールの位置ごとの揺れの深さ。実機は 表[max(つまみの合計の頭打ち, 音色自身の目盛り)]
+// で、足さない（doc/native-engine.md の 6.215）。音色自身は Vib Depth と遅れてせり上がる
+// 分の行き着く先を含む。ホイール以外のつまみ（AT・AC など）は 0 と見る
+struct mod_line {
+	float own_cents = 0;                    // 音色自身の揺れ（Vib Depth 込み、行き着いた深さ）
+	std::array<float, 128> wheel{};         // ホイールのぶんだけの深さ（位置ごと）
+	std::array<float, 128> eff{};           // 実際に効く深さ（大きいほう）
+	bool active = true;
+};
+
+inline std::vector<mod_line> mod_lines(const u8 *rom, u32 rec, const u8 *part)
+{
+	namespace nv = xg::nv;
+	std::vector<mod_line> out;
+	if (!rom || !rec)
+		return out;
+	const int n = nv::element_count(rom, rec);
+	const int depth = part[0x20];                // MW LFO PM
+	for (int e = 0; e < n; e++) {
+		const u8 *el = nv::element(rom, rec, e);
+		mod_line line;
+		line.active = nv::element_active(el, NOTE, VEL);
+		const nv::slot_regs sr = nv::build_note(rom, el, NOTE, 0, nullptr, nv::defaults(), 0, VEL, part[0x1a], part[0x1b],
+		                                        part[0x15], part[0x16], -1, NOTE, false, part[0x62], part[0x63]);
+		int own = sr.v[0x0a] & 0xff;
+		if (nv::vib_ramps(el))                   // 遅れてせり上がる音色は、行き着く先
+			own = nv::vib_depth(nv::vib_ramp_reg(rom, nv::vib_ramp_target(el)) & 0x7f, part[0x16]);
+		line.own_cents = lfo_depth_cents(own);
+		for (int w = 0; w < 128; w++) {
+			const int wheel = nv::pmod_reg(rom, depth * w / 128);
+			line.wheel[size_t(w)] = lfo_depth_cents(wheel);
+			line.eff[size_t(w)] = lfo_depth_cents(own > wheel ? own : wheel);
+		}
+		out.push_back(std::move(line));
+	}
+	return out;
+}
+
 // ---- フィルタ
 //
 // 鍵を押したときのフィルタのレジスタ（0x00-0x04）を native の口と同じ式で組み、チップの
@@ -448,6 +498,35 @@ inline std::vector<filter_line> filter_lines(const u8 *rom, u32 rec, const u8 *p
 		line.hpf = (line.regs[2] & 0x7ff) != 0;
 		line.pts = filter_response(line.regs, hz);
 		out.push_back(std::move(line));
+	}
+	return out;
+}
+
+// ---- パートの EQ（08 pp 72・73・76・77）
+//
+// firmware は声ごとのレジスタ 0x20-0x2B に、低音と高音の 1 次の IIR を 1 つずつ書く（native の eq_set と同じ表）。
+// チップ（swp30 の iir1_block::step）は y = (a0·x + a1·x[-1] + b1·y[-1]) >> 13 を 2 段。
+// だから 1 段の特性は H(z) = (a0 + a1·z⁻¹) / (8192 − b1·z⁻¹)。フィルタのすぐ後ろ、声ごとに掛かる
+inline std::vector<pt> eq_response(const u8 *rom, const u8 *part, const std::vector<float> &hz)
+{
+	namespace nv = xg::nv;
+	std::vector<pt> out;
+	if (!rom)
+		return out;
+	nv::slot_regs r{};
+	nv::eq_set(rom, r, part[xg::ram::PART_EQ_LGAIN], part[xg::ram::PART_EQ_HGAIN],
+	           part[xg::ram::PART_EQ_LFREQ], part[xg::ram::PART_EQ_HFREQ]);
+	// 段 0（低音）: 0x20 a1・0x22 b1・0x24 a0。段 1（高音）: 0x26 b1・0x28 a1・0x2A a0（swp30 の書き込みの割り当て）
+	const double a0[2] = { double(s16(r.v[0x24])), double(s16(r.v[0x2a])) };
+	const double a1[2] = { double(s16(r.v[0x20])), double(s16(r.v[0x28])) };
+	const double b1[2] = { double(s16(r.v[0x22])), double(s16(r.v[0x26])) };
+	for (float f : hz) {
+		const double w = 2.0 * 3.14159265358979323846 * double(f) / RATE;
+		const std::complex<double> z1 = std::polar(1.0, -w);
+		std::complex<double> h = 1.0;
+		for (int k = 0; k < 2; k++)
+			h *= (a0[k] + a1[k] * z1) / (8192.0 - b1[k] * z1);
+		out.push_back({ f, float(20.0 * std::log10(std::max(std::abs(h), 1e-6))) });
 	}
 	return out;
 }

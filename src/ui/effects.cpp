@@ -23,6 +23,7 @@
 
 #include "panel.h"
 #include "draw.h"
+#include "texts.h"
 #include "xg/fx_types.h"
 
 #include <algorithm>
@@ -231,7 +232,7 @@ void panel::paint_effects(HDC dc, const char *status) const
 	fill(dc, top, BODY_TOP);
 
 	text_in(dc, scale(20, 6, 460, 16),
-	        "エフェクト（送っているのは XG のパラメータチェンジ）", TEXT_DIM,
+	        texts().effects_title, TEXT_DIM,
 	        m_font_small, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
 	for (const fx_row &row : ROWS) {
@@ -258,11 +259,10 @@ void panel::paint_effects(HDC dc, const char *status) const
 	}
 
 	text_in(dc, scale(150, 356, 830, 20),
-	        "値は MU2000 に問い合わせて読み返している。パネルや曲で変えたものもここに出る。",
+	        texts().effects_values_note,
 	        RGB(104, 109, 116), m_font_small, DT_LEFT | DT_TOP | DT_SINGLELINE);
 	text_in(dc, scale(150, 324, 830, 34),
-	        "インサーションは掛けたいパートを選ぶと働く。バリエーションは\n"
-	        "CONNECT を INSERTION にするとインサーションとして使える。",
+	        texts().effects_insertion_note,
 	        RGB(104, 109, 116), m_font_small, DT_LEFT | DT_TOP | DT_WORDBREAK);
 
 	if (status && status[0])

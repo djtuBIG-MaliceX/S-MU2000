@@ -180,6 +180,33 @@ public:
 		return true;
 	}
 
+	// ---- パートの音（音色の窓のスペクトラム）。画面が見たいパートを置き（-1 で止める）、
+	// 音声の糸が 25ms ごとに直近の SCOPE_N サンプルを置く（mu2000::scope_read）。読み手は待たない
+	static constexpr size_t SCOPE_N = 2048;
+	void want_scope(int part) { m_scope_want.store(part, std::memory_order_relaxed); }
+	int scope_wanted() const { return m_scope_want.load(std::memory_order_relaxed); }
+	void publish_scope(const float *s, int part)
+	{
+		m_scope_seq.fetch_add(1, std::memory_order_release);
+		std::memcpy(m_scope, s, sizeof(m_scope));
+		m_scope_part = part;
+		m_scope_seq.fetch_add(1, std::memory_order_release);
+	}
+	// 置いてあれば、そのパートの番号を返す（無ければ -1）
+	int read_scope(float *out) const
+	{
+		for (int tries = 0; tries < 8; tries++) {
+			const unsigned a = m_scope_seq.load(std::memory_order_acquire);
+			if (a & 1)
+				continue;
+			std::memcpy(out, m_scope, sizeof(m_scope));
+			const int part = m_scope_part;
+			if (m_scope_seq.load(std::memory_order_acquire) == a)
+				return a ? part : -1;
+		}
+		return -1;
+	}
+
 	void publish(const snapshot &s)
 	{
 		m_seq.fetch_add(1, std::memory_order_release);
@@ -245,6 +272,10 @@ private:
 	std::atomic<unsigned> m_seq{0};
 	snapshot              m_snap;
 	std::atomic<unsigned> m_xg_seq{0};
+	std::atomic<int>      m_scope_want{-1};
+	std::atomic<unsigned> m_scope_seq{0};
+	float                 m_scope[SCOPE_N] = {};
+	int                   m_scope_part = -1;
 	xg_snapshot           m_xg;
 	std::atomic<bool>     m_want_defaults{false};
 	std::atomic<bool>     m_have_defaults{false};

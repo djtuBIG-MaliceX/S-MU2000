@@ -246,6 +246,7 @@ void pc_window::frame(xg::model &m, const xg_snapshot &ram, bridge &br)
 	ImGui_ImplWin32_NewFrame();
 	ImGui::NewFrame();
 	m_view->draw(m, ram, br);
+	xgui::drag_flush(br);          // マウスで動かしている値の、間引いた送信
 	ImGui::Render();
 
 	const float clear[4] = { 0.10f, 0.10f, 0.11f, 1.0f };
@@ -266,6 +267,11 @@ LRESULT CALLBACK pc_window::proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 	auto *self = reinterpret_cast<pc_window *>(GetWindowLongPtrW(h, GWLP_USERDATA));
 	if (self && self->m_imgui) {
 		ImGui::SetCurrentContext(self->m_imgui);
+		// 文字を打つ箱の外では、文字（WM_CHAR）を ImGui に渡さない。鍵盤で弾こうとキーを押しっぱなしに
+		// するとリピートで文字が毎秒何十も来て、ImGui がマウスの動きと交互に 1 コマずつしか進めない
+		// （trickle）。マウスの軌跡が溜まって、絵の点も送る値も遅れてついてくる
+		if (msg == WM_CHAR && !ImGui::GetIO().WantTextInput)
+			return 0;
 		if (ImGui_ImplWin32_WndProcHandler(h, msg, wp, lp))
 			return 1;
 	}
