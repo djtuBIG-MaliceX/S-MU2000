@@ -364,6 +364,8 @@ SHAPE_MIN = {
     "xgpegatk": 0.95,
     "xgmwvib": 0.95,
     "xgsys": 0.95,
+    # 短い音で写し取ったあとの、遅れて掛かるビブラート（6.217）
+    "xgvibshort": 0.95,
     # meter は 15 パートを同時に鳴らすので dense と同じ事情で形が落ちる
     # （狙いは液晶のほうなので、音は緩めに見る）
     "meter": 0.90, "filtcc": 0.95, "keyrange": 0.95, "rcvch": 0.95, "althh": 0.95, "drumrcv": 0.95,

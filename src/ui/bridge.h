@@ -182,24 +182,31 @@ public:
 
 	// ---- パートの音（音色の窓のスペクトラム）。画面が見たいパートを置き（-1 で止める）、
 	// 音声の糸が 25ms ごとに直近の SCOPE_N サンプルを置く（mu2000::scope_read）。読み手は待たない
-	static constexpr size_t SCOPE_N = 2048;
+	// 4096 サンプル（93ms）。2048 だと刻みが 21.5Hz で、低いほうが 1 本ずつ飛んで絵が荒れた
+	static constexpr size_t SCOPE_N = 4096;
 	void want_scope(int part) { m_scope_want.store(part, std::memory_order_relaxed); }
 	int scope_wanted() const { return m_scope_want.load(std::memory_order_relaxed); }
-	void publish_scope(const float *s, int part)
+	// 置くもの: 0 が声の和（mu2000::scope_read）、1 + fx × 2 + out がエフェクト fx（mu2000::scope_fx）の
+	// 入口（out = 0。MEG への送り）と出口（out = 1）。all は SCOPE_SRCS × SCOPE_N 個を続けて
+	static constexpr int SCOPE_SRCS = 1 + 2 * mu2000::SCOPE_FX_N;
+	static constexpr int scope_src(int fx, bool out) { return 1 + fx * 2 + (out ? 1 : 0); }
+	void publish_scope(const float *all, int part)
 	{
 		m_scope_seq.fetch_add(1, std::memory_order_release);
-		std::memcpy(m_scope, s, sizeof(m_scope));
+		std::memcpy(m_scope.data(), all, m_scope.size() * sizeof(float));
 		m_scope_part = part;
 		m_scope_seq.fetch_add(1, std::memory_order_release);
 	}
-	// 置いてあれば、そのパートの番号を返す（無ければ -1）
-	int read_scope(float *out) const
+	// 置いてあれば、そのパートの番号を返す（無ければ -1）。src は上の番号（既定は声の和）
+	int read_scope(float *out, int src = 0) const
 	{
+		if (src < 0 || src >= SCOPE_SRCS)
+			return -1;
 		for (int tries = 0; tries < 8; tries++) {
 			const unsigned a = m_scope_seq.load(std::memory_order_acquire);
 			if (a & 1)
 				continue;
-			std::memcpy(out, m_scope, sizeof(m_scope));
+			std::memcpy(out, m_scope.data() + size_t(src) * SCOPE_N, SCOPE_N * sizeof(float));
 			const int part = m_scope_part;
 			if (m_scope_seq.load(std::memory_order_acquire) == a)
 				return a ? part : -1;
@@ -274,7 +281,7 @@ private:
 	std::atomic<unsigned> m_xg_seq{0};
 	std::atomic<int>      m_scope_want{-1};
 	std::atomic<unsigned> m_scope_seq{0};
-	float                 m_scope[SCOPE_N] = {};
+	std::vector<float>    m_scope = std::vector<float>(size_t(SCOPE_SRCS) * SCOPE_N);
 	int                   m_scope_part = -1;
 	xg_snapshot           m_xg;
 	std::atomic<bool>     m_want_defaults{false};

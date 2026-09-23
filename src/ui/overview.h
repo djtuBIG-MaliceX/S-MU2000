@@ -13,6 +13,7 @@
 #pragma once
 
 #include "xg_ui.h"
+#include "imgui.h"
 #include "xg/fx_types.h"
 
 namespace ui {
@@ -52,6 +53,19 @@ public:
 	static void env_cell(int part, xg::model &m, bridge &br, float w, float h);
 	// 音色の窓の縦 2 段つなぎの区画（フィルタと EQ、EG とピッチ EG）で、絵の段が占める割合
 	static constexpr float MAISON_SPLIT = 0.5f;
+	// パートの音のスペクトラムを a-b の四角に描く。横は実際の周波数（20 Hz-20 kHz の対数）、縦は出す線の
+	// いちばん大きい所から 60 dB 下まで。src は bridge::read_scope の番号（0 が声の和、bridge::scope_src で
+	// エフェクトの入口・出口）。ghost_src が 0 以上なら、それ（エフェクトの入口など）を灰色の線で同じ目盛りに重ねる。
+	// key は下がるときの滑らかさの状態を区画ごとに分ける番号。label は左上に小さく出す字（nullptr で無し）。
+	// backdrop ならほかの絵の背景に薄く描く（地の四角・周波数の目盛り・「鳴っていない」の字は出さない）
+	static void spectrum_view(bridge &br, int part, int src, int ghost_src, int key, ImVec2 a, ImVec2 b, const char *label,
+	                          bool backdrop = false);
+	// フェーダーを n 本、今の位置から size の四角に横に並べる（音色の窓の下の段と同じ絵と操作）。
+	// パートのパラメータは part の値、エフェクトのパラメータ（reverb.* など）は共通の値。group_after の後ろで組を分ける。
+	// dim_mask のビットが立ったフェーダーは、動かせるが今は効かない値として色を落とす。
+	// 戻り値はカーソルが載っているかつまんでいるフェーダー（無ければ -1）
+	static int fader_strip(const char *id, const char *const *keys, const char *const *names, int n, int group_after, int part,
+	                       xg::model &m, bridge &br, ImVec2 size, unsigned dim_mask = 0);
 	// フィルタ: 実際の周波数特性とパートの音のスペクトラムを同じ目盛りで描き、Cutoff・Resonance・HPF のフェーダー（音色の窓）
 	static void filter_cell(int part, xg::model &m, bridge &br, float w, float h, bool compact);
 	// 一覧の小さなマスのフィルタ（目安の形。filter_cell が compact のとき使う）

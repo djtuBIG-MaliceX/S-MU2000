@@ -187,7 +187,7 @@ DIN の口 A・B だけに戻したいときは gui なら `--host-midi`、プ�
 USB の口のときは **A・B も USB 側を通る**。実機で HOST SELECT を USB にすると
 DIN が黙るのと同じで、MU2000 が送り出す MIDI OUT も USB 側から出る（こちらでは
 同じ「MIDI OUT」の口から取れるので、外から見た違いは無い）。
-バイトの届き方も DIN の 31250bps から実機の USB の速さ（19,500 byte/s）になる。
+バイトの届き方も DIN の 31250bps から実機の USB の速さ（10,000 byte/s）になる。
 
 loopMIDI で使うときは、**仮想ケーブルを口の数だけ作って**それぞれに割り当てる。
 DAW では、プラグインが **MIDI 入力バスを 4 本**（`MIDI In A (Part 1-16)` から

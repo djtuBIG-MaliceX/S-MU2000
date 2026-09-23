@@ -297,6 +297,18 @@ struct vib_line {
 	bool active = true;
 };
 
+// 遅れて掛かる音色の、せり上がりの途中の深さ（native と同じ式。xg/native_voice.h の vib_ramp_value）
+inline int vib_ramp_value(const u8 *rom, int dpt, int c1, int c2)
+{
+	return xg::nv::vib_ramp_value(rom, dpt, c1, c2);
+}
+
+// せり上がりきった深さ
+inline int vib_ramp_settled(const u8 *rom, const u8 *el, int dpt)
+{
+	return vib_ramp_value(rom, dpt, xg::nv::vib_ramp_target(el), 127);
+}
+
 inline std::vector<vib_line> vib_lines(const u8 *rom, u32 rec, const u8 *part, float span_ms)
 {
 	namespace nv = xg::nv;
@@ -313,35 +325,47 @@ inline std::vector<vib_line> vib_lines(const u8 *rom, u32 rec, const u8 *part, f
 		const nv::slot_regs sr = nv::build_note(rom, el, NOTE, 0, nullptr, nv::defaults(), 0, VEL, part[0x1a], part[0x1b],
 		                                        part[0x15], part[0x16], -1, NOTE, false, part[0x62], part[0x63]);
 		const u16 reg = sr.v[0x0a];
-		// 深さの移り変わり（20ms ごと）。遅れの無い音色は押した瞬間の深さのまま
-		int full = reg & 0x7f;
+		// 深さ（レジスタ 0x0a の下位 8bit）。下位 7bit が深さ、bit7 が「8 倍の目盛り」（lfo_depth_cents）。
+		// 遅れの無い音色は押した瞬間の値のまま（build_note が Vib Depth 込みで作る）。
+		// **遅れて掛かる音色**は、遅れが明けてから 20ms ごとに 2 本のせり上がりを進め、大きいほうが効く
+		// （2026-09-23 に firmware の 0x0a と 20ms ごとに突き合わせた。Violin・Dyna Saw・Flute・Cello・Oboe の
+		// Vib Depth 0-127 で、行き着く値はすべて一致。Depth 65-68 の出だし 100ms ほどの上がり方だけが少し違う）:
+		//   音色のぶん  = 表[c1]。c1 は 0 から音色の刻み（vib_ramp_step）で目標（byte14）まで。
+		//                 Depth が 64 より下なら、1 段ごとに 14 目盛り引く（62 以下はまず 0）
+		//   Depth のぶん = 表[c2] を VIB_DEPTH_TAB[Depth] で止めたもの。c2 は 0 から 5 ずつ（表の 63 より先も引く）
+		// 表[c] = VIB_REG_TAB[VIB_CNT_TAB[c]]。前はせり上がりを音色の小さな表で止め、bit7 も落としていたので、
+		// Vib Depth を上げても絵が数セントのまま動かなかった
+		const int dpt = part[0x16];
 		int dly = 0, step = 0, tgt = 0;
 		const bool ramps = nv::vib_ramps(el);
 		if (ramps) {
 			tgt  = nv::vib_ramp_target(el);
 			step = nv::vib_ramp_step(el);
 			dly  = nv::vib_delay_ticks(el);
-			full = nv::vib_depth(nv::vib_ramp_reg(rom, tgt) & 0x7f, part[0x16]);
 		}
-		// 深さ 127 で回して、深さの比で縮める（get_pitch は深さに比例）
-		swp30_device::lfo_pitch_trace(u16((reg & 0xff80) | 0x7f), wave.data(), N);
+		// bit7 を落とした深さ 127 で回して、深さの比（と bit7 なら 8 倍）で伸び縮みさせる（get_pitch は深さに比例）
+		swp30_device::lfo_pitch_trace(u16((reg & 0xff00) | 0x7f), wave.data(), N);
 		const double unit = 1200.0 / 1024.0;
 		const int tick = int(nv::VIB_TICK);          // 20ms
-		int depth = ramps ? 0 : (reg & 0x7f);
-		int cnt = 0, left = dly;
+		auto scale = [](int d) { return double(d & 0x7f) / 127.0 * ((d & 0x80) ? 8.0 : 1.0); };
+		int depth = ramps ? 0 : (reg & 0xff);
+		int c1 = 0, c2 = 0, left = dly;
+		bool started = false;
 		float peak = 0;
 		for (int i = 0; i < N; i += 32) {
 			if (ramps && i > 0 && i % tick < 32) {
 				if (left > 0)
 					left--;
-				else if (cnt < tgt) {
-					cnt = std::min(tgt, cnt + step);
-					depth = std::min(nv::vib_ramp_reg(rom, cnt) & 0x7f, full);
+				else {
+					c1 = std::min(tgt, c1 + step);
+					c2 = std::min(127, c2 + 5);
+					depth = vib_ramp_value(rom, dpt, c1, c2);
+					if (!started && dly > 0)
+						line.delay_ms = float(i / RATE * 1000.0);
+					started = true;
 				}
-				if (left == 0 && line.delay_ms == 0 && dly > 0)
-					line.delay_ms = float(i / RATE * 1000.0);
 			}
-			const float c = float(double(wave[size_t(i)]) * depth / 127.0 * unit);
+			const float c = float(double(wave[size_t(i)]) * scale(depth) * unit);
 			line.pts.push_back({ float(i / RATE * 1000.0), c });
 			peak = std::max(peak, std::fabs(c));
 		}
@@ -389,8 +413,8 @@ inline std::vector<mod_line> mod_lines(const u8 *rom, u32 rec, const u8 *part)
 		const nv::slot_regs sr = nv::build_note(rom, el, NOTE, 0, nullptr, nv::defaults(), 0, VEL, part[0x1a], part[0x1b],
 		                                        part[0x15], part[0x16], -1, NOTE, false, part[0x62], part[0x63]);
 		int own = sr.v[0x0a] & 0xff;
-		if (nv::vib_ramps(el))                   // 遅れてせり上がる音色は、行き着く先
-			own = nv::vib_depth(nv::vib_ramp_reg(rom, nv::vib_ramp_target(el)) & 0x7f, part[0x16]);
+		if (nv::vib_ramps(el))                   // 遅れてせり上がる音色は、行き着く先（vib_lines と同じ式）
+			own = vib_ramp_settled(rom, el, part[0x16]);
 		line.own_cents = lfo_depth_cents(own);
 		for (int w = 0; w < 128; w++) {
 			const int wheel = nv::pmod_reg(rom, depth * w / 128);

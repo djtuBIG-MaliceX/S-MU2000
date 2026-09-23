@@ -273,6 +273,18 @@ public:
 	int scope_part() const { return m_scope_part.load(std::memory_order_relaxed); }
 	// 直近の n サンプル（n ≤ SCOPE_N、古い順）。読み手は画面の糸。途中の値が混ざってもよい
 	void scope_read(float *out, size_t n) const;
+	// 同じパートの、インサーションを通したあとの音（MEG の出口）。そのパートにインサーションが
+	// 付いていなければ scope_read と同じ（声の和）。目盛りは声の和にそろえてある。
+	// 返り値は通しているインサーションの番号（1-4。無ければ 0）
+	int scope_read_post(float *out, size_t n) const;
+	// 見ているパートに付いているインサーション（1-4。無ければ 0）
+	int scope_insertion() const { const int s = m_scope_ins.load(std::memory_order_relaxed); return s < 0 ? 0 : s + 1; }
+	// エフェクトごとの入口（MEG への送り）と出口。見たいパートを決めているあいだだけ溜める。
+	// インサーションとインサーション接続のバリエーションは掛けたパートだけの音、
+	// システムのリバーブ・コーラス・バリエーションは全パートの送りを混ぜた音。MIX は戻りと乾いた音を混ぜた
+	// マスター EQ の前（出口のみ意味がある）。どれも左右の平均
+	enum scope_fx : int { SCOPE_INS1, SCOPE_INS2, SCOPE_INS3, SCOPE_INS4, SCOPE_VAR, SCOPE_CHO, SCOPE_REV, SCOPE_MIX, SCOPE_FX_N };
+	void scope_read_fx(int fx, bool out, float *dst, size_t n) const;
 
 	sh7043a_device &cpu()  { return *m_cpu; }
 	swp30_device   &swpm() { return m_swpm; }
@@ -448,7 +460,8 @@ private:
 	// 1 バイト（1/64 サンプル単位）。`SMU2000_RX_BYTE` で振れる（0 にすると
 	// 和音の音が全部同じ時刻に出る。相対のずれを調べる用。doc の 6.78）。
 	// **DIN は 31250 baud で 1 バイト 10 ビット ＝ 14.1 サンプル**、
-	// **USB は実機で測った 19500 byte/s ＝ 2.26 サンプル**（doc/dump/usb.md）。
+	// **USB は実機で測った 10000 byte/s ＝ 4.41 サンプル**（6.218。19500 は
+	// 実機 → PC の向きの値で、受けるほうはその半分だった）。
 	// USB の口なのに DIN の速さで並べていたので、プラグイン（USB が既定）では
 	// 音が 1 つにつき 37 サンプル遅れていた（doc/native-engine.md の 6.120）
 	static u64 rx_byte_tick()
@@ -461,7 +474,7 @@ private:
 	// DIN の 1 バイトは 10 ビット / 31250 baud ＝ 28MHz で 8960 サイクル ＝
 	// **ちょうど 14.112 サンプル**。1/64 では割り切れず（903.168）、
 	// 切り捨てていたぶんが溜まって和音の 2 音目から 1 サンプル遅れていた。
-	// 1/8000 なら 112896 でぴったり合う（USB の 2.265625 サンプルも 18125）
+	// 1/8000 なら 112896 でぴったり合う（USB の 4.40625 サンプルは 35250）
 	static constexpr u64 RX_UNIT = 8000;
 	static constexpr u64 RX_SCALE = RX_UNIT / 64;      // 1/64 → 1/8000
 	static u64 rx_byte_tick8()
@@ -550,10 +563,17 @@ private:
 		                   ? u64(std::atoi(std::getenv("SMU2000_USB_SUB"))) : 6 * 64;
 		return v;
 	}
+	// 空いている USB に 1 バイト目が渡るまで（1/8000 サンプル）。6.218
+	static u64 usb_hand8()
+	{
+		static const u64 v = std::getenv("SMU2000_USB_HAND")
+		                   ? u64(std::atoi(std::getenv("SMU2000_USB_HAND"))) : 2 * RX_UNIT;
+		return v;
+	}
 	static u64 rx_byte_tick_usb()
 	{
 		static const u64 v = std::getenv("SMU2000_RX_BYTE_USB")
-		                   ? u64(std::atoi(std::getenv("SMU2000_RX_BYTE_USB"))) : 145;
+		                   ? u64(std::atoi(std::getenv("SMU2000_RX_BYTE_USB"))) : 282;
 		return v;
 	}
 	u64 rx_advance(int port)
@@ -565,15 +585,27 @@ private:
 		// 実機より 80-94 サンプル早く出ていた
 		const bool usb = rx_usb(port);
 		u64 &at = usb ? m_rx_at_usb : m_rx_at[port];
-		if (at < now)
+		const bool idle = at < now;              // 線が空いていた
+		if (idle)
 			at = now;
+		u64 bytes = 1;
 		// **口が変わると `F5 <口>` が 2 バイト挟まる**（usb_midi_in と同じ）。
 		// 数えていないと、口をまたぐ曲でこちらだけ早く鳴る
 		if (usb && port != m_rx_usb_port) {
 			m_rx_usb_port = port;
-			at += 2 * rx_byte_tick_usb8();
+			bytes += 2;
 		}
-		at += usb ? rx_byte_tick_usb8() : rx_byte_tick8();
+		// **USB は空いていれば 1 バイト目をその場で渡す**（`usb_step` は
+		// `now >= u.next` で渡すので、間が空いていれば待ち無し）。その 1 バイトぶんを
+		// 足していたので、口の速さを実測の 10,000 byte/s にしたとき、firmware の道より
+		// 3-4 サンプル遅れるようになった（6.218。19,500 のときは 1 サンプルで隠れていた）。
+		// ただし渡すのは走らせる区切りの頭なので、まるまる 0 ではなく 2 サンプルほど遅れる
+		// （`SMU2000_USB_HAND` で振れる）
+		if (usb && idle) {
+			bytes--;
+			at += usb_hand8();
+		}
+		at += bytes * (usb ? rx_byte_tick_usb8() : rx_byte_tick8());
 		// **USB の口 B・C・D は実機のほうが 6 サンプル遅い**（6.129）。
 		// 口 A は合っている。DIN では 4 口とも同じなので、USB のときだけ。
 		// 1 口だけ使う曲を 4 通り作って測った（`SMU2000_USB_SUB` で振れる）。
@@ -743,6 +775,13 @@ private:
 	std::array<std::atomic<u32>, 2> m_scope_w{};          // チップごとの書いた数
 	u32 m_scope_tick = 0;
 	static void scope_tap_fn(void *ctx, const s32 *samples);
+	// インサーションの出口（MEG の m20-m2f。scope_meg_fn）。インサーション 1 はマスタの m28/m29、
+	// 2-4 はスレーブの m28/m29・m2a/m2b・m2c/m2d（firmware が組む MEG の割り付け。エミュで実測）
+	std::atomic<int> m_scope_ins{-1};                     // 見ているパートのインサーション（0-3、-1 は無し）
+	// チップごと、m20-m2f の 8 組 × 入口・出口の輪（[chip][pair * 2 + out][SCOPE_N]。大きいので別に取る）
+	std::vector<float> m_fx_ring = std::vector<float>(2 * 16 * SCOPE_N);
+	std::array<std::atomic<u32>, 2> m_fx_w{};
+	static void scope_meg_fn(void *ctx, const s32 *in, const s32 *out);
 	void scope_refresh_owner();
 	required_device<sci4_device> m_sci4_finder;
 	sci4_device *m_sci4 = nullptr;   // PLG ボード用 0xf00000

@@ -152,7 +152,11 @@ public:
 		// **つまみの割り当てで音程を書き直す印**（6.195）。
 		// 実機は受けた瞬間ではなく、**次の 10ms の刻み**で書く
 		bool pdirty = false;
-		int vfull = 0;         // つまみまで入れた、せり上がり切った深さ
+		int vfull = 0;         // つまみまで入れた、せり上がり切った深さ（今は使わない。6.217）
+		// **Vib Depth のぶんのせり上がり**（6.217）。0 から 20ms ごとに 5 ずつ
+		int vcnt2 = 0;
+		int vdep = 64;         // 押したときの Vib Depth（08 pp 16）
+		bool vramp = false;    // 遅れて掛かるビブラートを式で動かしている（録画の 0x0a は流さない）
 		u64 vnext = ~u64(0);   // つぎに進める時刻
 		// **音程の包絡線の段**（0 が押した直後の段。3 で終わり）。
 		// チップが行き先に着いたら次の段を張る（doc の 6.80）
@@ -552,7 +556,8 @@ public:
 					// **式で出せるときだけ録画を捨てる**。ドラムは要素を持たない
 					// ので式が動かない。捨てるとフィルタの包絡線が丸ごと消える
 					if (s.elem && ((fenv_on() && re[s.rpos].reg == 0x00)
-					               || re[s.rpos].reg == 0x04)) {
+					               || re[s.rpos].reg == 0x04
+					               || (s.vramp && re[s.rpos].reg == 0x0a))) {   // 6.217
 						s.rpos++;
 						continue;
 					}
@@ -628,9 +633,14 @@ public:
 			// 削って、なくなったら乱数を引いて音程をずらす
 			// **遅れて掛かるビブラート**（6.175）。20ms ごとに
 			// 遅れを 1 づつ削って、無くなったら深さを 1 歩ずつ上げる
-			if (s.vdly > 0 || s.vcnt < s.vtgt) {
+			// 6.217: Vib Depth のぶんも同じ刻みで別にせり上げ、大きいほうを書く（写し取りの録画は使わない。
+			// 録画は写し取った音が短いと、せり上がりの途中で切れて、そこで止まっていた）
+			auto vib_moving = [&](const slot_use &x) {
+				return x.vdly > 0 || x.vcnt < x.vtgt || (x.vramp && x.vcnt2 < nv::VIB_PART_CNT_END);
+			};
+			if (vib_moving(s)) {
 				bool movp = false, mova = false;
-				while (clock >= s.vnext && (s.vdly > 0 || s.vcnt < s.vtgt)) {
+				while (clock >= s.vnext && vib_moving(s)) {
 					if (s.vdly > 0) {
 						s.vdly--;
 						if (!s.vdly && s.vamp > 0)
@@ -644,6 +654,7 @@ public:
 						s.vcnt += s.vstep;
 						if (s.vcnt > s.vtgt)
 							s.vcnt = s.vtgt;
+						s.vcnt2 = std::min(nv::VIB_PART_CNT_END, s.vcnt2 + 5);
 						movp = true;
 					}
 					s.vnext += nv::VIB_TICK;
@@ -653,10 +664,9 @@ public:
 					       u16(0xaa00 | u16(nv::amod_reg(
 					           assign_amod(s.part, s.keynote), s.vamp / 2))));
 				if (movp) {
-					const int d = nv::vib_ramp_reg(m_rom, s.vcnt) & 0x7f;
-					// せり上がる途中でも、つまみのぶんとの大きいほう（6.215）。
-					// 今の値は s.lfo に置く（つまみが動いたときの元になる）
-					s.lfo = u16(s.vhi | u16(d < s.vfull ? d : s.vfull));
+					// 音色のぶんと Vib Depth のぶんの大きいほう（6.217）。モジュレーションとの大きいほうは
+					// lfo_reg が取る（6.215）。今の値は s.lfo に置く（つまみが動いたときの元になる）
+					s.lfo = u16(s.vhi | u16(nv::vib_ramp_value(m_rom, s.vdep, s.vcnt, s.vcnt2)));
 					m_poke(u32(i) * 64 + 0x0a, s.cal ? lfo_reg(s.lfo, *s.cal, s.part, s.keynote) : s.lfo);
 					// 実機はこの刻みでも切る高さを作り直す
 					//（6.189。位相は進めない）
@@ -667,7 +677,7 @@ public:
 						       cut_with_cc(s, s.cut));
 					}
 				}
-				if ((s.vdly > 0 || s.vcnt < s.vtgt) && s.vnext < next)
+				if (vib_moving(s) && s.vnext < next)
 					next = s.vnext;
 			}
 			// ポルタメント: 10ms ごとに残りのずれを step だけ 0 へ寄せて、
@@ -697,7 +707,8 @@ public:
 				u16 v = fe[s.tpos].v;
 				// **式で出せるときだけ録画を捨てる**（上の但し書きを見よ）
 				if (s.elem && ((fenv_on() && fe[s.tpos].reg == 0x00)
-				               || fe[s.tpos].reg == 0x04)) {
+				               || fe[s.tpos].reg == 0x04
+				               || (s.vramp && fe[s.tpos].reg == 0x0a))) {   // 6.217
 					s.tpos++;
 					continue;
 				}
@@ -2833,7 +2844,8 @@ public:
 			// **遅れて掛かるビブラート**（6.175）。遅れのあと
 			// 20ms ごとに深さをせり上げる。`0x0a` の上位（型と刻み）は
 			// 押した瞬間のまま使い回す
-			su.vcnt = su.vtgt = su.vdly = 0;
+			su.vcnt = su.vtgt = su.vdly = su.vcnt2 = 0;
+			su.vramp = false;
 			su.vnext = ~u64(0);
 			su.vamp = 0;
 			// **フィルタ側の LFO**（6.189）。鍵を押すと
@@ -2863,6 +2875,9 @@ public:
 				su.vamp  = nv::vib_amp_depth(el);
 				su.vfull = nv::vib_depth(nv::vib_ramp_reg(m_rom, su.vtgt) & 0x7f,
 				                         pc.vdep);
+				su.vdep  = pc.vdep < 0 ? 64 : pc.vdep;
+				su.vcnt2 = 0;
+				su.vramp = true;
 				su.vnext = su.fnext;     // 包絡線と同じ格子に乗せる
 				m_traj = true;
 				m_traj_next = 0;
@@ -3161,6 +3176,9 @@ public:
 			const int att0 = c.has(9) ? (c.reg[9] & 0xff) : 0x40;
 			slot_use &su = m_slot[slot];
 			su.elem = nullptr;               // ドラムは離しの速さを写しの値で済ませる
+			su.vcnt = su.vtgt = su.vdly = su.vcnt2 = 0;   // 前の音のビブラートのせり上がりを持ち越さない（6.217）
+			su.vramp = false;
+			su.vnext = ~u64(0);
 			su.wave = nullptr;
 			su.cal = &c;
 			su.tpos = 0;

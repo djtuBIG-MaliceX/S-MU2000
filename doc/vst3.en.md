@@ -97,22 +97,45 @@ is **exactly proportional to the byte count** (8 CCs + program + bend =
 
 | Channels | Bytes | USB port | DIN port |
 |---|---|---|---|
-| 1 | 42 | 4.2 ms | 12.9 ms |
-| 3 | 100 | 7.3 ms | 31.4 ms |
-| 8 | 245 | 14.8 ms | 77.8 ms |
-| 16 | 477 | 26.9 ms | 152.1 ms |
+| 1 | 42 | 5.8 ms | 12.9 ms |
+| 3 | 100 | 11.6 ms | 31.4 ms |
+| 8 | 245 | 26.1 ms | 77.8 ms |
+| 16 | 477 | 49.4 ms | 152.1 ms |
 
-* **USB**: `bytes / 19,500 + 2.1 ms` (the residual is 2.06 to 2.39 ms at all four points)
+* **USB**: `bytes / 10,000 + 1.6 ms` (the residual is 1.56 to 1.71 ms at all four points)
 * **DIN**: `bytes / 3,125 - 0.6 ms` (31,250 bps; residual -0.58 ms at all four points)
 
-19,500 bytes/s is **the value measured on the real unit's USB port**
-(`doc/dump/usb.md`), so **a real unit connected over USB is delayed by the
-same amount**. The plug-in uses the USB port by default (`usb=0` in
+10,000 bytes/s is **the value measured by recording the real unit**
+(2026-09-23; see 6.218 in `doc/native-engine.md`, where the load was swept
+from 74 to 2,072 bytes and the unit compared against the emulator), so **a
+real unit connected over USB is delayed by the same amount**. The
+19,500 bytes/s in `doc/dump/usb.md` is the **unit-to-PC** direction; the
+receiving side runs at about half that. The plug-in uses the USB port by default (`usb=0` in
 `plugin.ini` returns to DIN, the right-hand column above).
 
-The only way to shorten this delay is to **place the initial controllers
-earlier than the notes** in the DAW, and that is true of the hardware as
-well.
+The only way to shorten this delay **and still sound like the hardware** is
+to **place the initial controllers earlier than the notes** in the DAW, and
+that is true of the hardware as well.
+
+### If you do not need hardware-exact timing: `fast_midi=1`
+
+Add this line to `%LOCALAPPDATA%\S-MU2000\plugin.ini` (macOS:
+`~/Library/Application Support/S-MU2000/plugin.ini`):
+
+```
+fast_midi=1
+```
+
+The port speed (10,000 bytes/s over USB, 3,125 bytes/s over DIN) is then
+dropped: the bytes are handed over in one go, keeping only their order. The
+delays in the table above nearly vanish. It is the same switch as
+`--fast-midi` in `gui.exe` and `live`, and VST3, CLAP and AU all read it. It
+takes effect on re-insertion, and one line appears in log.txt when it does.
+
+**It no longer matches the hardware.** A real MU2000 receives one byte at a
+time at the port's speed, so controllers placed at the same position as a
+note always arrive slightly before it there. Leave the setting off (the
+default) if you want that behaviour reproduced.
 
 ## Threads
 

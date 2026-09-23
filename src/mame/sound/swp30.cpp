@@ -4191,6 +4191,9 @@ void swp30_device::run_sample(s32 &left, s32 &right)
 	}
 
 	sample_step();
+	std::array<s32, 16> meg_in;
+	if(m_meg_tap)
+		std::copy(m_meg->m_m.begin() + 0x20, m_meg->m_m.begin() + 0x30, meg_in.begin());
 	if(m_native && m_native_full) {
 		// S-MU2000: 完全な軽量モード。MEG の 384 段は回さない（doc/native-dsp.md）
 	} else if(m_dbg_meg) {
@@ -4206,6 +4209,8 @@ void swp30_device::run_sample(s32 &left, s32 &right)
 	} else if(!meg_jit_run())
 		// S-MU2000: 機械語にできていれば、そちらで回す（swp30_jit.cpp）
 		m_meg->run_program(m_meg_ops.data());
+	if(m_meg_tap)
+		m_meg_tap(m_meg_tap_ctx, meg_in.data(), &m_meg->m_m[0x20]);
 
 	// sound_stream_update() がやっていたことをここで行う。
 	// DAC は出力 0-3 の先頭 2 本。scale は 1<<17。

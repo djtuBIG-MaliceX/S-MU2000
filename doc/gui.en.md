@@ -220,7 +220,7 @@ With the USB port, **A and B go through the USB side too**. Just as the DIN
 sockets go quiet when the unit's HOST SELECT is USB, the MU2000's MIDI OUT
 also comes out on the USB side (here it is available from the same "MIDI
 OUT" port, so there is no visible difference). Byte delivery changes from
-DIN's 31,250 bps to the unit's USB speed (19,500 bytes/s).
+DIN's 31,250 bps to the unit's USB speed (10,000 bytes/s).
 
 With loopMIDI, **create one virtual cable per port** and assign each. In a
 DAW, the plug-in exposes **four MIDI input buses** (`MIDI In A (Part 1-16)`

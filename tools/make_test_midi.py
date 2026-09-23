@@ -1552,6 +1552,32 @@ def case_xgmwvib():
     return [track(seq(ev))], t + 1.0
 
 
+def case_xgvibshort():
+    """**短い音で写し取ったあとの、遅れて掛かるビブラート**（doc/native-engine.md の 6.217）。
+
+    native の口は、遅れてせり上がるビブラート（レジスタ `0x0a`）を写し取りの録画から流していた。
+    写し取った 1 音目が短いと、録画がせり上がりの途中で切れ、あとで長く伸ばした音もそこで止まって
+    いた（Violin の Vib Depth 127 で firmware は 0xad まで上がるのに 0x7f のまま）。
+    Violin・Dyna Saw（バンク 0/18）・Flute を Vib Depth 127 にして 0.1 秒だけ鳴らして写し取り、
+    Vib Depth 127・96・64・40 で 3 秒ずつ伸ばす。
+    """
+    ev = head()
+    ev += [(0.9, bytes([0xb1, 0, 0])), (0.9, bytes([0xb1, 32, 18]))]   # ch2 は Dyna Saw（0/18）
+    for ch, pg in enumerate((40, 81, 73)):                             # Violin / Dyna Saw / Flute
+        ev += [(1.0, bytes([0xc0 | ch, pg]))]
+    for ch in range(3):
+        ev += [(1.1, xg([0x08, ch, 0x16, 127]))]
+    for ch in range(3):
+        ev += note(ch, 60, 100, 1.3 + ch * 0.2, 0.1)   # 1 音目は短く。ここで写し取る
+    t = 2.2
+    for vib in (127, 96, 64, 40):
+        for ch in range(3):
+            ev += [(t, xg([0x08, ch, 0x16, vib]))]
+        for ch in range(3):
+            ev += note(ch, 62 + ch * 3, 100, t + 0.2, 3.0)
+        t += 3.6
+    return [track(seq(ev))], t + 1.0
+
 def case_xghpf():
     """**パートの HPF**（`0A pp 20`。パートの塊の番地は 08 ではなく 0A）。
 
@@ -1681,6 +1707,7 @@ CASES = {
     "xgpegatk": case_xgpegatk,
     "xgmwvib": case_xgmwvib,
     "xgsys":   case_xgsys,
+    "xgvibshort": case_xgvibshort,
 }
 
 

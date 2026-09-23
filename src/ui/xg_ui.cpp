@@ -1335,6 +1335,18 @@ std::string official_name(const char *key)
 		{ "part.hpf_cutoff", "HPF CUTOFF FREQUENCY" }, { "part.eq_bass_gain", "EQ BASS GAIN" },
 		{ "part.eq_treble_gain", "EQ TREBLE GAIN" }, { "part.eq_bass_freq", "EQ BASS FREQUENCY" },
 		{ "part.eq_treble_freq", "EQ TREBLE FREQUENCY" },
+		// エフェクト（02 01 xx・03 0n xx の表の名前）
+		{ "reverb.type", "REVERB TYPE" }, { "reverb.return", "REVERB RETURN" }, { "reverb.pan", "REVERB PAN" },
+		{ "chorus.type", "CHORUS TYPE" }, { "chorus.return", "CHORUS RETURN" }, { "chorus.pan", "CHORUS PAN" },
+		{ "chorus.to_reverb", "SEND CHORUS TO REVERB" },
+		{ "variation.type", "VARIATION TYPE" }, { "variation.return", "VARIATION RETURN" },
+		{ "variation.pan", "VARIATION PAN" }, { "variation.to_reverb", "SEND VARIATION TO REVERB" },
+		{ "variation.to_chorus", "SEND VARIATION TO CHORUS" }, { "variation.connect", "VARIATION CONNECTION" },
+		{ "variation.part", "VARIATION PART" },
+		{ "insertion1.type", "INSERTION1 TYPE" }, { "insertion2.type", "INSERTION2 TYPE" },
+		{ "insertion3.type", "INSERTION3 TYPE" }, { "insertion4.type", "INSERTION4 TYPE" },
+		{ "insertion1.part", "INSERTION1 PART" }, { "insertion2.part", "INSERTION2 PART" },
+		{ "insertion3.part", "INSERTION3 PART" }, { "insertion4.part", "INSERTION4 PART" },
 	};
 	// 操作子 × 行き先の 36 個は形がそろっている（MW LFO PMOD DEPTH など）
 	static const std::pair<const char *, const char *> SRC[] = {
@@ -1363,7 +1375,10 @@ std::string official_name(const char *key)
 	// 番地も添える（08 pp 20 のように。pp はパート）
 	if (const xg::param *p = xg::find(key)) {
 		char b[24];
-		std::snprintf(b, sizeof(b), "（%02X pp %02X）", p->hi, p->lo);
+		if (p->where == xg::area::part)
+			std::snprintf(b, sizeof(b), "（%02X pp %02X）", p->hi, p->lo);
+		else
+			std::snprintf(b, sizeof(b), "（%02X %02X %02X）", p->hi, p->mid, p->lo);
 		name += b;
 	}
 	return name;

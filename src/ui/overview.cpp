@@ -16,6 +16,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -1404,8 +1406,9 @@ void overview::vib_small(int part, xg::model &m, bridge &br, float w, float h, b
 // ミキサーのフェーダー風の絵。縦の溝と目盛り、つまみ（白い線入り）が値の高さにある。
 // 真ん中（64）の目盛りだけ明るく。上に小さく名前と値の字
 static void fader_picture(ImDrawList *dl, float x0, float x1, float top, float bottom, int value, int lo, int hi,
-                          const char *name, const char *text, bool lit, ImU32 name_col = 0)
+                          const char *name, const char *text, bool lit, ImU32 name_col = 0, bool dim = false)
 {
+	// dim は「動かせるが今は効かない」値（色を落とす）
 	const float fs = ImGui::GetFontSize();
 	const float gfs = fs * 0.6f;
 	const float cx = (x0 + x1) * 0.5f;
@@ -1426,16 +1429,18 @@ static void fader_picture(ImDrawList *dl, float x0, float x1, float top, float b
 	// つまみ
 	const float y = b - (b - a) * float(value - lo) / float(std::max(1, hi - lo));
 	const ImVec2 c0(x0 + 1.0f, y - cap_h * 0.5f), c1(x1 - 1.0f, y + cap_h * 0.5f);
-	const ImU32 top_c = lit ? IM_COL32(200, 200, 208, 255) : IM_COL32(160, 160, 168, 255);
-	const ImU32 bot_c = lit ? IM_COL32(110, 110, 118, 255) : IM_COL32(80, 80, 88, 255);
+	const ImU32 top_c = dim ? (lit ? IM_COL32(110, 110, 116, 255) : IM_COL32(88, 88, 94, 255))
+	                        : (lit ? IM_COL32(200, 200, 208, 255) : IM_COL32(160, 160, 168, 255));
+	const ImU32 bot_c = dim ? (lit ? IM_COL32(70, 70, 76, 255) : IM_COL32(56, 56, 62, 255))
+	                        : (lit ? IM_COL32(110, 110, 118, 255) : IM_COL32(80, 80, 88, 255));
 	dl->AddRectFilledMultiColor(c0, c1, top_c, top_c, bot_c, bot_c);
 	dl->AddRect(c0, c1, IM_COL32(30, 30, 34, 255), 1.5f);
-	dl->AddLine(ImVec2(c0.x + 1.0f, y), ImVec2(c1.x - 1.0f, y), IM_COL32(250, 250, 245, 255), 1.5f);
+	dl->AddLine(ImVec2(c0.x + 1.0f, y), ImVec2(c1.x - 1.0f, y), dim ? IM_COL32(140, 140, 146, 255) : IM_COL32(250, 250, 245, 255), 1.5f);
 	// 上に名前と値（2 行）
 	ImFont *font = ImGui::GetFont();
 	const ImVec2 ts = font->CalcTextSizeA(gfs, FLT_MAX, 0.0f, text);
 	const ImVec2 ns = font->CalcTextSizeA(gfs, FLT_MAX, 0.0f, name);
-	dl->AddText(font, gfs, ImVec2(cx - ts.x * 0.5f, top - ts.y - 1.0f), ImGui::GetColorU32(ImGuiCol_Text), text);
+	dl->AddText(font, gfs, ImVec2(cx - ts.x * 0.5f, top - ts.y - 1.0f), ImGui::GetColorU32(dim ? ImGuiCol_TextDisabled : ImGuiCol_Text), text);
 	dl->AddText(font, gfs, ImVec2(cx - ns.x * 0.5f, top - ts.y - ns.y - 1.0f), name_col ? name_col : ImGui::GetColorU32(ImGuiCol_TextDisabled), name);
 }
 
@@ -1537,15 +1542,23 @@ void overview::vib_cell(int part, xg::model &m, bridge &br, float w, float h, bo
 
 	// ---- 波（実際の揺れ）
 	voice_ctx v;
-	std::vector<shape::vib_line> ls;
+	std::vector<shape::vib_line> ls, own_ls;
 	if (known && voice_of(part, v)) {
 		v.blk[0x15] = u8(vals[0]); v.blk[0x16] = u8(vals[1]); v.blk[0x17] = u8(vals[2]);
 		ls = shape::vib_lines(v.rom, v.rec, v.blk, 1500.0f);
+		// 音色自身の揺れ（Depth を既定の 64 にしたもの）。背景に薄く出して、Depth で足した・引いたぶんを見せる
+		if (vals[1] != 64) {
+			u8 own_blk[XG_PART_COPY];
+			std::memcpy(own_blk, v.blk, sizeof(own_blk));
+			own_blk[0x16] = 64;
+			own_ls = shape::vib_lines(v.rom, v.rec, own_blk, 1500.0f);
+		}
 	}
 	if (!ls.empty()) {
 		const shape::vib_line &L = lead_line(ls);
+		const shape::vib_line *O = own_ls.empty() ? nullptr : &lead_line(own_ls);
 		// 縦の目盛り（片側）。最低 ±220 セント、深い音色はそれに合わせて広げる
-		const float span = std::max(220.0f, L.depth_cents * 1.15f);
+		const float span = std::max({ 220.0f, L.depth_cents * 1.15f, O ? O->depth_cents * 1.15f : 0.0f });
 		auto y_of = [&](float c) { return mid - half * c / span; };
 		dl->AddLine(ImVec2(x0, mid), ImVec2(x1, mid), col(ImGuiCol_TextDisabled, 0.35f));
 		for (float c : { 50.0f, 100.0f, 200.0f, 400.0f }) {
@@ -1562,6 +1575,15 @@ void overview::vib_cell(int part, xg::model &m, bridge &br, float w, float h, bo
 			const float xd = x0 + (x1 - x0) * std::min(1.0f, L.delay_ms / 1500.0f);
 			for (float y = top; y < bottom; y += fs * 0.5f)
 				dl->AddLine(ImVec2(xd, y), ImVec2(xd, std::min(bottom, y + fs * 0.25f)), col(ImGuiCol_TextDisabled, 0.5f));
+		}
+		// 音色自身の揺れ（Depth 64）を背景に薄く、その上に Depth 込みの実際の揺れ
+		if (O) {
+			std::vector<ImVec2> op;
+			op.reserve(O->pts.size());
+			for (const shape::pt &p : O->pts)
+				op.push_back(ImVec2(x0 + (x1 - x0) * p.ms / 1500.0f, y_of(p.cents)));
+			if (op.size() >= 2)
+				dl->AddPolyline(op.data(), int(op.size()), col(ImGuiCol_TextDisabled, 0.35f), 0, 1.0f);
 		}
 		std::vector<ImVec2> pts;
 		pts.reserve(L.pts.size());
@@ -1595,7 +1617,7 @@ namespace {
 // 戻り値は、カーソルが載っているかつまんでいるフェーダー（無ければ -1）
 int fader_row(const char *const *keys, const char *const *names, int n, int group_after, int part, xg::model &m, bridge &br,
               ImVec2 a, ImVec2 b, bool hovered, bool active, ImGuiID id, int *vals, bool *have,
-              ImU32 col_first = 0, ImU32 col_second = 0)
+              ImU32 col_first = 0, ImU32 col_second = 0, unsigned dim_mask = 0)
 {
 	ImGuiIO &io = ImGui::GetIO();
 	const float fs = ImGui::GetFontSize();
@@ -1670,7 +1692,7 @@ int fader_row(const char *const *keys, const char *const *names, int n, int grou
 		// 名前の色は組ごと（EG の組とピッチ EG の組を絵の線と同じ色にする）
 		const ImU32 nc = (group_after >= 0 && i > group_after) ? col_second : col_first;
 		fader_picture(dl, fx0[size_t(i)], fx0[size_t(i)] + fw, ftop, fbot, vals[i], ps[size_t(i)]->min, ps[size_t(i)]->max, names[i],
-		              t.c_str(), focus == i, nc);
+		              t.c_str(), focus == i, nc, ((dim_mask >> i) & 1) != 0);
 	}
 	return focus;
 }
@@ -1743,7 +1765,162 @@ void time_grid(ImDrawList *dl, float t_end, float t_off, float x0, float x1, flo
 	dl->AddText(ImGui::GetFont(), fs * 0.55f, ImVec2(xo + 2.0f, bottom - fs * 1.2f), col(ImGuiCol_TextDisabled, 0.8f), "離す");
 }
 
+// spectrum_view の線 1 本ぶんの状態。下がるときはゆっくり（1 コマ 1.5 dB）、山の高さはさらにゆっくり
+struct spec_curve {
+	int part = -1;
+	std::vector<float> sm;
+	std::vector<float> pw;        // 力（線形）の移動平均。コマごとの雑音の揺れをならす
+	float peak = -200.0f;
+	bool ok = false;
+};
+
+// 鳴っていないとみなす大きさと、目盛りの上端の下限（どちらも FFT の大きさの dB。ハン窓・2048 点では、
+// 振幅 A の正弦波の山がおよそ 20 log10(A × 512)）。MEG のリバーブは音が止まったあとも振幅 40 ほどの
+// 直流のずれと 1-2 の揺れが残り続ける（固定小数点の丸め。2026-09-22 にエミュで測った）。
+// 直流は引き、振幅 16 ほどより小さいものは鳴っていないことにし、目盛りの上端は振幅 400 ほどより下げない
+// （小さな残りかすを「いちばん大きい所から 60 dB」で画面いっぱいに引き伸ばさない）
+constexpr float SPEC_SILENT_DB = 78.0f;
+// 20Hz より下の bin は見ない（音ではなく、窓の中での音量の変わりぶん＝包絡線がここに出る）
+constexpr size_t SPEC_BIN0 = size_t(20.0 * double(bridge::SCOPE_N) / 44100.0) + 1;
+constexpr float SPEC_REF_MIN_DB = 106.0f;
+
+void spec_update(bridge &br, int part, int src, spec_curve &c)
+{
+	static std::vector<float> wave(bridge::SCOPE_N);
+	c.ok = false;
+	if (br.read_scope(wave.data(), src) != part)
+		return;
+	double mean = 0;
+	for (float v : wave)
+		mean += v;
+	mean /= double(wave.size());
+	for (float &v : wave)
+		v -= float(mean);
+	std::vector<float> db;
+	spectrum::magnitude_db(wave.data(), bridge::SCOPE_N, db);
+	if (c.part != part || c.sm.size() != db.size()) {
+		c.part = part;
+		c.sm.assign(db.size(), -200.0f);
+		c.pw.assign(db.size(), 0.0f);
+		c.peak = -200.0f;
+	}
+	// **力でならす**（雑音のコマごとの揺れを落とす。山はほとんど動かない）。
+	// 前は「下がるときは 1 コマ 1.5dB まで」と持ちこたえさせていたが、押した瞬間の立ち上がりには
+	// 低いほうまで音が入っているので、その持ちこたえが 0.8 秒ほど平たい山として居座っていた（2026-09-23）。
+	// 持ちこたえはやめて、ならしだけにする（1 コマで 5dB ほど下がる）
+	float frame_peak = -200.0f;
+	for (size_t k = SPEC_BIN0; k < db.size(); k++) {
+		const float p = float(std::pow(10.0, double(db[k]) / 10.0));
+		c.pw[k] = c.pw[k] > 0.0f ? c.pw[k] * 0.3f + p * 0.7f : p;
+		c.sm[k] = float(10.0 * std::log10(std::max(double(c.pw[k]), 1e-20)));
+		frame_peak = std::max(frame_peak, c.sm[k]);
+	}
+	c.peak = std::max(frame_peak, c.peak - 0.5f);
+	c.ok = c.peak > SPEC_SILENT_DB;
+}
+
+// 横の位置ごとに、その幅（最低でも 3 本ぶん）に入る bin を**力で平均**して折れ線に。
+// いちばん大きい値を拾うと、低いほうは 1 本の bin が画面の広い範囲に引き伸ばされて、
+// 窓のにじみや雑音（山より 40-60 dB 下）がそのまま棒になって激しく揺れた（2026-09-23）
+std::vector<ImVec2> spec_points(const spec_curve &c, float floor_db, float x0, float x1, float top, float bottom)
+{
+	const float F_LO = 20.0f, F_HI = 20000.0f;
+	const float span = x1 - x0;
+	std::vector<ImVec2> sp;
+	const float step = std::max(1.5f, ImGui::GetFontSize() * 0.12f);
+	const long last = long(c.sm.size()) - 1;
+	for (float x = x0; x <= x1; x += step) {
+		const float f0 = F_LO * std::pow(F_HI / F_LO, (x - x0) / span);
+		const float f1 = F_LO * std::pow(F_HI / F_LO, (x + step - x0) / span);
+		long k0 = long(f0 * float(bridge::SCOPE_N) / 44100.0f), k1 = long(f1 * float(bridge::SCOPE_N) / 44100.0f);
+		if (k1 - k0 < 2) {                       // 最低 3 本ぶん（低いほうの 1 本飛びをならす）
+			const long mid = (k0 + k1) / 2;
+			k0 = mid - 1;
+			k1 = mid + 1;
+		}
+		k0 = std::clamp<long>(k0, long(SPEC_BIN0), last);
+		k1 = std::clamp<long>(std::max(k1, k0), 1, last);
+		double pw = 0;
+		for (long k = k0; k <= k1; k++)
+			pw += std::pow(10.0, double(c.sm[size_t(k)]) / 10.0);
+		const float v = float(10.0 * std::log10(std::max(pw / double(k1 - k0 + 1), 1e-20)));
+		const float t = std::clamp((v - floor_db) / 60.0f, 0.0f, 1.0f);
+		sp.push_back(ImVec2(x, bottom - (bottom - top) * t));
+	}
+	return sp;
+}
+
 } // namespace
+
+int overview::fader_strip(const char *id, const char *const *keys, const char *const *names, int n, int group_after, int part,
+                          xg::model &m, bridge &br, ImVec2 size, unsigned dim_mask)
+{
+	std::vector<int> vals(static_cast<size_t>(n));
+	std::unique_ptr<bool[]> have(new bool[size_t(n)]);
+	for (int i = 0; i < n; i++) {
+		vals[size_t(i)] = P(keys[i]).def;
+		have[size_t(i)] = m.get(P(keys[i]), part, vals[size_t(i)]);
+	}
+	const ImVec2 pos = ImGui::GetCursorScreenPos();
+	ImGui::InvisibleButton(id, size, ImGuiButtonFlags_MouseButtonLeft);
+	const bool hovered = ImGui::IsItemHovered(), active = ImGui::IsItemActive();
+	return fader_row(keys, names, n, group_after, part, m, br, pos, ImVec2(pos.x + size.x, pos.y + size.y), hovered, active,
+	                 ImGui::GetItemID(), vals.data(), have.get(), 0, 0, dim_mask);
+}
+
+void overview::spectrum_view(bridge &br, int part, int src, int ghost_src, int key, ImVec2 a, ImVec2 b, const char *label,
+                             bool backdrop)
+{
+	static std::map<int, spec_curve> curves;       // key * 2 が出す線、key * 2 + 1 が重ねる線
+	const float fs = ImGui::GetFontSize();
+	ImDrawList *dl = ImGui::GetWindowDrawList();
+	const float F_LO = 20.0f, F_HI = 20000.0f;
+	const float x0 = a.x, x1 = b.x, top = a.y, bottom = b.y;
+	auto x_hz = [&](float f) { return x0 + (x1 - x0) * std::log(std::clamp(f, F_LO, F_HI) / F_LO) / std::log(F_HI / F_LO); };
+	if (!backdrop)
+		dl->AddRectFilled(a, b, IM_COL32(0, 0, 0, 60), 3.0f);
+	for (float f : { 100.0f, 1000.0f, 10000.0f }) {
+		if (backdrop)
+			break;
+		const float x = x_hz(f);
+		dl->AddLine(ImVec2(x, top), ImVec2(x, bottom), col(ImGuiCol_TextDisabled, 0.15f));
+		const char *t = f >= 10000.0f ? "10k" : f >= 1000.0f ? "1k" : "100";
+		dl->AddText(ImGui::GetFont(), fs * 0.55f, ImVec2(x + 2.0f, bottom - fs * 0.6f), col(ImGuiCol_TextDisabled, 0.7f), t);
+	}
+	spec_curve &main = curves[key * 2];
+	spec_update(br, part, src, main);
+	spec_curve *ghost = nullptr;
+	if (ghost_src >= 0) {
+		ghost = &curves[key * 2 + 1];
+		spec_update(br, part, ghost_src, *ghost);
+		if (!ghost->ok)
+			ghost = nullptr;
+	}
+	// 目盛りは 2 本のうち大きいほうにそろえる（入口と出口の大きさの違いがそのまま見える）
+	float ref = main.ok ? main.peak : -200.0f;
+	if (ghost)
+		ref = std::max(ref, ghost->peak);
+	if (ref > SPEC_SILENT_DB) {
+		const float floor_db = std::max(ref, SPEC_REF_MIN_DB) - 60.0f;
+		if (ghost) {
+			const std::vector<ImVec2> gp = spec_points(*ghost, floor_db, x0, x1, top, bottom);
+			dl->AddPolyline(gp.data(), int(gp.size()), IM_COL32(200, 200, 210, 110), 0, 1.0f);
+		}
+		if (main.ok) {
+			const std::vector<ImVec2> sp = spec_points(main, floor_db, x0, x1, top, bottom);
+			const ImU32 fill = IM_COL32(120, 220, 170, 55), edge = IM_COL32(140, 240, 190, 170);
+			for (size_t i = 1; i < sp.size(); i++)
+				dl->AddQuadFilled(ImVec2(sp[i - 1].x, bottom), sp[i - 1], sp[i], ImVec2(sp[i].x, bottom), fill);
+			dl->AddPolyline(sp.data(), int(sp.size()), edge, 0, 1.0f);
+		}
+	} else if (!backdrop) {
+		const char *t = "（鳴っていない）";
+		const ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(fs * 0.6f, FLT_MAX, 0.0f, t);
+		dl->AddText(ImGui::GetFont(), fs * 0.6f, ImVec2((x0 + x1 - ts.x) * 0.5f, (top + bottom - ts.y) * 0.5f), col(ImGuiCol_TextDisabled, 0.6f), t);
+	}
+	if (label)
+		dl->AddText(ImGui::GetFont(), fs * 0.6f, ImVec2(x0 + 3.0f, top + 2.0f), col(ImGuiCol_TextDisabled, 0.9f), label);
+}
 
 // フィルタとパートの EQ（音色の窓の中央の列。上下 2 段がつながったメゾネット）。上の段が絵、下の段が
 // Cutoff・Resonance・HPF と EQ の 4 つ（低音・高音のゲインと周波数）のフェーダー。
@@ -1807,46 +1984,17 @@ void overview::filter_cell(int part, xg::model &m, bridge &br, float w, float h,
 	}
 	dl->AddLine(ImVec2(x0, y_db(0.0f)), ImVec2(x1, y_db(0.0f)), col(ImGuiCol_TextDisabled, 0.35f));
 
-	// ---- このパートの音のスペクトラム（緑）。縦はいちばん大きい所から 60 dB 下まで。下がるときはゆっくり
+	// ---- このパートの音のスペクトラム（緑）。spectrum_view と同じ作り（直流を引き、幅ごとに力で平均、
+	// 縦はいちばん大きい所から 60 dB 下まで、下がるときはゆっくり）
 	{
-		struct scope_state { int part = -1; std::vector<float> sm; float peak = -200.0f; };
-		static scope_state ss;
-		static float wave[bridge::SCOPE_N];
-		if (br.read_scope(wave) == part) {
-			std::vector<float> db;
-			spectrum::magnitude_db(wave, bridge::SCOPE_N, db);
-			if (ss.part != part || ss.sm.size() != db.size()) {
-				ss.part = part;
-				ss.sm.assign(db.size(), -200.0f);
-				ss.peak = -200.0f;
-			}
-			float frame_peak = -200.0f;
-			for (size_t k = 1; k < db.size(); k++) {
-				ss.sm[k] = std::max(db[k], ss.sm[k] - 1.5f);
-				frame_peak = std::max(frame_peak, db[k]);
-			}
-			ss.peak = std::max(frame_peak, ss.peak - 0.5f);
-			if (ss.peak > -150.0f) {
-				const float floor_db = ss.peak - 60.0f;
-				std::vector<ImVec2> sp;
-				const float step = std::max(1.5f, fs * 0.12f);
-				for (float x = x0; x <= x1; x += step) {
-					const float f0 = F_LO * std::pow(F_HI / F_LO, (x - x0) / span);
-					const float f1 = F_LO * std::pow(F_HI / F_LO, (x + step - x0) / span);
-					size_t k0 = size_t(f0 * float(bridge::SCOPE_N) / 44100.0f), k1 = size_t(f1 * float(bridge::SCOPE_N) / 44100.0f);
-					k0 = std::clamp<size_t>(k0, 1, ss.sm.size() - 1);
-					k1 = std::clamp<size_t>(std::max(k1, k0), 1, ss.sm.size() - 1);
-					float v = -200.0f;
-					for (size_t k = k0; k <= k1; k++)
-						v = std::max(v, ss.sm[k]);
-					const float t = std::clamp((v - floor_db) / 60.0f, 0.0f, 1.0f);
-					sp.push_back(ImVec2(x, bottom - (bottom - top) * t));
-				}
-				const ImU32 fill = IM_COL32(120, 220, 170, 55), edge = IM_COL32(140, 240, 190, 140);
-				for (size_t i = 1; i < sp.size(); i++)
-					dl->AddQuadFilled(ImVec2(sp[i - 1].x, bottom), sp[i - 1], sp[i], ImVec2(sp[i].x, bottom), fill);
-				dl->AddPolyline(sp.data(), int(sp.size()), edge, 0, 1.0f);
-			}
+		static spec_curve fc;
+		spec_update(br, part, 0, fc);
+		if (fc.ok) {
+			const std::vector<ImVec2> sp = spec_points(fc, fc.peak - 60.0f, x0, x1, top, bottom);
+			const ImU32 fill = IM_COL32(120, 220, 170, 55), edge = IM_COL32(140, 240, 190, 140);
+			for (size_t i = 1; i < sp.size(); i++)
+				dl->AddQuadFilled(ImVec2(sp[i - 1].x, bottom), sp[i - 1], sp[i], ImVec2(sp[i].x, bottom), fill);
+			dl->AddPolyline(sp.data(), int(sp.size()), edge, 0, 1.0f);
 		}
 	}
 
@@ -2014,10 +2162,12 @@ void overview::env_cell(int part, xg::model &m, bridge &br, float w, float h)
 	const int focus = fader_row(KEYS, NAMES, NF, 2, part, m, br, ImVec2(pos.x + pad, split + pad), ImVec2(pos.x + w - pad, pos.y + h - pad),
 	          hovered, active, id, vals, have, IM_COL32(150, 190, 255, 255), IM_COL32(255, 170, 130, 255));
 	dl->AddLine(ImVec2(pos.x, split), ImVec2(pos.x + w, split), col(ImGuiCol_Border), 1.0f);
-	// 絵。上に実際の時間の字を 2 行置くぶん空ける
+	// 絵。上に実際の時間の字を 2 行置くぶん空け
 	const float line = fs * 0.75f;
 	const float x0 = pos.x + pad + fs * 1.6f, x1 = pos.x + w - pad - fs * 1.6f;
 	const float top = pos.y + pad + line * 2.2f, bottom = split - pad;
+	// 背景に、EG を通したあとの音（インサーションの前）のスペクトラム。フィルタの絵と同じく横は実際の周波数
+	spectrum_view(br, part, 0, -1, 1, ImVec2(pos.x + pad, top), ImVec2(pos.x + w - pad, bottom), nullptr, true);
 	const float mid = (top + bottom) * 0.5f, half = (bottom - top) * 0.46f;
 
 	voice_ctx v;

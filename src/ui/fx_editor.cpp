@@ -62,7 +62,8 @@ std::string value_text(const xg::fx_param &p, int v)
 
 // 実物のつまみ風。上下ドラッグ（Shift で細かく）、ホイール、ダブルクリックで数を打つ。
 // 戻り値は「値が変わったか」
-bool fx_editor::knob(const char *id, int &v, int lo, int hi, float size, const char *label, const char *text)
+bool fx_editor::knob(const char *id, int &v, int lo, int hi, float size, const char *label, const char *text, bool tooltip,
+                     bool dim)
 {
 	ImGuiIO &io = ImGui::GetIO();
 	const float fs = ImGui::GetFontSize();
@@ -121,28 +122,28 @@ bool fx_editor::knob(const char *id, int &v, int lo, int hi, float size, const c
 		const float a = a0 + (a1 - a0) * float(i) / 10.0f;
 		const ImVec2 d(std::cos(a), std::sin(a));
 		dl->AddLine(ImVec2(c.x + d.x * r * 1.18f, c.y + d.y * r * 1.18f), ImVec2(c.x + d.x * r * 1.34f, c.y + d.y * r * 1.34f),
-		            IM_COL32(235, 235, 225, 150), 1.5f);
+		            dim ? IM_COL32(150, 150, 155, 70) : IM_COL32(235, 235, 225, 150), 1.5f);
 	}
 	// 値のところまでの弧（光る帯）
 	dl->PathArcTo(c, r * 1.26f, a0, av, 32);
-	dl->PathStroke(IM_COL32(255, 200, 90, 200), 0, std::max(2.0f, size * 0.05f));
+	dl->PathStroke(dim ? IM_COL32(140, 140, 145, 110) : IM_COL32(255, 200, 90, 200), 0, std::max(2.0f, size * 0.05f));
 	// 本体。影、縁、面
 	dl->AddCircleFilled(ImVec2(c.x + 1.5f, c.y + 2.5f), r, IM_COL32(0, 0, 0, 100), 40);
-	dl->AddCircleFilled(c, r, IM_COL32(62, 62, 66, 255), 40);
+	dl->AddCircleFilled(c, r, dim ? IM_COL32(48, 49, 54, 255) : IM_COL32(62, 62, 66, 255), 40);
 	dl->AddCircleFilled(c, r * 0.86f, hovered || active ? IM_COL32(44, 44, 48, 255) : IM_COL32(30, 30, 33, 255), 40);
-	dl->AddCircle(c, r, IM_COL32(125, 125, 130, 255), 40, 1.5f);
+	dl->AddCircle(c, r, dim ? IM_COL32(85, 86, 92, 255) : IM_COL32(125, 125, 130, 255), 40, 1.5f);
 	// 指し
 	const ImVec2 d(std::cos(av), std::sin(av));
 	dl->AddLine(ImVec2(c.x + d.x * r * 0.2f, c.y + d.y * r * 0.2f), ImVec2(c.x + d.x * r * 0.84f, c.y + d.y * r * 0.84f),
-	            IM_COL32(250, 250, 245, 255), std::max(2.0f, size * 0.05f));
+	            dim ? IM_COL32(135, 135, 140, 255) : IM_COL32(250, 250, 245, 255), std::max(2.0f, size * 0.05f));
 	// 名前と値
 	const ImVec2 ls = ImGui::CalcTextSize(label);
-	dl->AddText(ImVec2(pos.x + (w - ls.x) * 0.5f, pos.y + size + fs * 0.1f), IM_COL32(245, 245, 235, 255), label);
+	dl->AddText(ImVec2(pos.x + (w - ls.x) * 0.5f, pos.y + size + fs * 0.1f), dim ? IM_COL32(135, 137, 145, 255) : IM_COL32(245, 245, 235, 255), label);
 	const ImVec2 ts = ImGui::CalcTextSize(text);
 	const ImVec2 t0(pos.x + (w - ts.x) * 0.5f - fs * 0.3f, pos.y + size + fs * 1.2f);
 	dl->AddRectFilled(t0, ImVec2(t0.x + ts.x + fs * 0.6f, t0.y + fs * 1.1f), IM_COL32(12, 14, 10, 200), 3.0f);
-	dl->AddText(ImVec2(t0.x + fs * 0.3f, t0.y + fs * 0.05f), IM_COL32(150, 230, 90, 255), text);
-	if (hovered && !active)
+	dl->AddText(ImVec2(t0.x + fs * 0.3f, t0.y + fs * 0.05f), dim ? IM_COL32(120, 140, 110, 255) : IM_COL32(150, 230, 90, 255), text);
+	if (tooltip && hovered && !active)
 		ImGui::SetItemTooltip("%s  %s\n上下にドラッグ（Shift で細かく）・ホイール・ダブルクリックで数を打つ", label, text);
 	ImGui::PopID();
 	const bool changed = nv != v;

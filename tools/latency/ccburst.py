@@ -82,7 +82,7 @@ def onset(path, thresh=200):
 
 def main():
     usb = '--din' not in sys.argv
-    rate = 19500.0 if usb else 3125.0        # USB は実測 19,500 byte/s、DIN は 31250 baud
+    rate = 10000.0 if usb else 3125.0        # USB は実測 10,000 byte/s（6.218）、DIN は 31250 baud
     print('口: %s' % ('USB' if usb else 'DIN'))
     print('%6s %7s %10s %10s %10s' % ('ch', 'バイト', '遅れ(ms)', '理論(ms)', '差'))
     for ch in (1, 3, 8, 16):

@@ -225,10 +225,13 @@ public:
 		if (want < 0)
 			return;
 		static_assert(bridge::SCOPE_N <= mu2000::SCOPE_N, "scope sizes");
-		mu.scope_read(m_scope, bridge::SCOPE_N);
-		br.publish_scope(m_scope, want);
+		mu.scope_read(m_scope.data(), bridge::SCOPE_N);
+		for (int fx = 0; fx < mu2000::SCOPE_FX_N; fx++)
+			for (int out = 0; out < 2; out++)
+				mu.scope_read_fx(fx, out != 0, m_scope.data() + size_t(bridge::scope_src(fx, out != 0)) * bridge::SCOPE_N, bridge::SCOPE_N);
+		br.publish_scope(m_scope.data(), want);
 	}
-	float m_scope[bridge::SCOPE_N] = {};
+	std::vector<float> m_scope = std::vector<float>(size_t(bridge::SCOPE_SRCS) * bridge::SCOPE_N);
 
 	// firmware のワーク RAM から XG の値を写す（xg/ram.h）
 	void publish_xg(mu2000 &mu, bridge &br)
