@@ -143,6 +143,13 @@ target_sources(smu2000_gui_app PRIVATE
   ${CMAKE_SOURCE_DIR}/src/ui/part_shapes.cpp
   ${CMAKE_SOURCE_DIR}/src/ui/master_editor.cpp
   ${CMAKE_SOURCE_DIR}/src/ui/fx_icons.cpp
+  # Win32 app harness (Makefile gui link line appends these two objects after PC_OBJS:
+  # "$(BUILD)/src/ui/app_win.o $(BUILD)/src/ui/window_win.o"; they define ui::g_win,
+  # ui::settings_file_path, ui::play_dropped_file, ui::make_window). The Makefile adds
+  # IMGUI_FLAGS to their compiles (Makefile:323-324) — covered here by the target-level
+  # imgui include dir + IMGUI_IMPL_WIN32_DISABLE_GAMEPAD define below.
+  ${CMAKE_SOURCE_DIR}/src/ui/app_win.cpp
+  ${CMAKE_SOURCE_DIR}/src/ui/window_win.cpp
   # IMGUI_SRCS (vendored, untouched — hard rule: third_party/ is read-only)
   ${SMU2000_IMGUI_DIR}/imgui.cpp
   ${SMU2000_IMGUI_DIR}/imgui_draw.cpp
