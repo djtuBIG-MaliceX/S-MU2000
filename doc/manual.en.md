@@ -257,6 +257,8 @@ Takes effect when the plugin is loaded again.
 |---|---|
 | `usb=0` | Start with the DIN ports (A and B, 32 parts) instead of the USB ports (A-D) |
 | `threaded=0` | Run the second tone generator chip inside the host's audio thread instead of the plugin's own thread |
+| `fast_midi=1` | Don't wait for the real serial rate (DIN 31250 bps); deliver fast, keeping only the order (same as `--fast-midi` in gui / live) |
+| `midi_filter=1` | Drop re-sends of values the machine already has (CC, pitch bend, program change) before they go on the serial line. **Turns on together with `fast_midi=1`**; `midi_filter=0` turns it off on its own. Keeps an automation flood from delaying the notes behind it (issue #18) |
 
 ## 8. Where settings are stored
 

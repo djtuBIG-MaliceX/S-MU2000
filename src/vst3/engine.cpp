@@ -340,6 +340,11 @@ void engine::boot()
 	// 再生頭の 1,000 個越えのパート設定の洪水は、Automation の種
 	// （automation_host.h の seed_values）で直列に載せる前に弾く
 	int fast_midi = 0;
+	// 同じ値の再送を口で弾くか（ui/midi_filter.h）。firmware が 1 秒に さばける
+	// のは 3kB ほど（issue #18）なので、Automation の洪水はそのまま積むと
+	// あとに控えた鍵を遅らせる。-**既定は fast_midi と一緒**- （直列の
+	// 間隔をあきらめた組みの延長）。単独でも入れられる: midi_filter=1
+	int dedup = -1;
 	if (const std::string local = smu2000::config_dir(); !local.empty())
 		if (std::FILE *f = std::fopen(smu2000::join(local, "plugin.ini").c_str(), "rb")) {
 			char line[256];
@@ -361,10 +366,16 @@ void engine::boot()
 					voicecache = std::atoi(line + 11);
 				if (!std::strncmp(line, "fast_midi=", 10))
 					fast_midi = std::atoi(line + 10);
+				if (!std::strncmp(line, "midi_filter=", 12))
+					dedup = std::atoi(line + 12);
 				m_voicecache = voicecache != 0;
 			}
 			std::fclose(f);
 		}
+	m_dedup = dedup >= 0 ? dedup != 0 : fast_midi != 0;
+	if (m_dedup)
+		logf("重複落し: 音源が同じ値をもう持っている CC・ベンド・プログラムの再送を"
+		     "直列に載せる前に落とす（やめるには plugin.ini に midi_filter=0）");
 	// 一覧やエディタで音色の名前と楽器の絵を利用者の ROM から読む（xg/voices.h）。
 	// gui.exe と同じ
 	ui::xgui::set_voice_rom(mu->program_rom());
@@ -553,6 +564,14 @@ void engine::midi(const uint8_t *bytes, size_t n, int port)
 			for (uint8_t b : m_pending[port])
 				m_drv.watch(b, m_mu->midi_in(b, port));
 			m_pending[port].clear();
+			// 重複落し: 音源がすでに持っている値の再送を、直列に載せる前に弾く
+			// （ui/midi_filter.h）。SysEx とケーブルメッセージは素通し。
+			// 弾いた分は watch にも通さない — 表の値とまったく同じなので変わらない
+			if (m_dedup && n >= 2 && bytes[0] >= 0x80 && bytes[0] < 0xf0 &&
+			    m_drv.wire().duplicate(m_mu->midi_route(port), bytes, int(n))) {
+				m_dedup_n.fetch_add(n, std::memory_order_relaxed);
+				return;
+			}
 			for (size_t i = 0; i < n; i++)
 				m_drv.watch(bytes[i], m_mu->midi_in(bytes[i], port));
 			return;
@@ -806,6 +825,9 @@ bool engine::load_state(const uint8_t *p, size_t n, const uint8_t *setup, size_t
 	std::lock_guard<std::mutex> lock(m_machine);
 	if (state() == status::failed)
 		return false;
+	// 別プロジェクトの状態に乗り換える。控制台の「今の値」は全部よその曲の
+	// 話になるので白紙に（restore が setup を流す分は watch 経由で数え戻る）
+	m_drv.wire().wipe_all();
 	const std::vector<uint8_t> fallback = setup && setup_n ? std::vector<uint8_t>(setup, setup + setup_n)
 	                                                       : std::vector<uint8_t>();
 	if (state() != status::ready || !m_mu) {

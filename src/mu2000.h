@@ -163,6 +163,11 @@ public:
 	}
 	// 溢れて捨てたバイト数（どの糸から読んでもよい）
 	u64 midi_dropped() const { return m_midi_dropped.load(std::memory_order_relaxed); }
+	// その入口から次に届くメッセージが着地する口（ケーブルメッセージ F5 のあとで動く）。
+	// 直列に載せる前の重複チェックが口を間違えないように、midi_in に渡す前に
+	// 聞けるようにしてある（ui/midi_filter.h）。**run_sample と同じ糸から**
+	//（m_machine を持っているところ）呼ぶこと
+	int midi_route(int port) const { return m_cable[port < 0 ? 0 : port]; }
 	// Bytes sitting on the wire, including the one in flight.
 	// The 31250bps throttle asks this to decide whether the line is free
 	size_t midi_queued(int port) const
