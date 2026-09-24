@@ -7,8 +7,7 @@ project(SMU2000_VST2 VERSION 0.0.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-# Non-literal printf formats are bugs (translated strings must go through "%s").
-add_compile_options(-Wformat-security)
+
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
@@ -25,6 +24,8 @@ if(MSVC)
   add_link_options(/LTCG)
 elseif(MINGW)
   set(SMU2000_TOOLCHAIN "mingw")
+  # Non-literal printf formats are bugs (translated strings must go through "%s").
+  add_compile_options(-Wformat-security)
 endif()
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")

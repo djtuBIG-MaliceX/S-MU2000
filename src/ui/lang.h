@@ -233,7 +233,7 @@ inline bool editor_ini_lang(std::string &code_out)
 	const std::string path = editor_ini_path();
 	if (path.empty())
 		return false;
-	FILE *f = std::fopen(path.c_str(), "rb");
+	FILE *f = fopen(path.c_str(), "rb");
 	if (!f)
 		return false;
 	char line[256];
