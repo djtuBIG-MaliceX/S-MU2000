@@ -140,6 +140,13 @@ struct au_instance
 
 	smu2000::vst3::engine eng;
 
+	// The render-context observer handed to hosts (kAudioUnitProperty_
+	// RenderContextObserver): the host's audio workgroup for our parallel
+	// slave thread. Copied once, released at close; the block only stores
+	// the handle, so calling it from the render thread is safe.
+	typedef void (^render_context_observer_t)(const AudioUnitRenderContext *);
+	render_context_observer_t observer = nullptr;
+
 	// ---- Settings
 	AudioStreamBasicDescription out_format{};
 	UInt32 max_frames = kMaxFramesDefault;
@@ -420,6 +427,10 @@ OSStatus au_close(void *self)
 	char b[320];
 	au->host_watch.summary_line(b, sizeof(b));
 	au->eng.log_line(b);
+	if (au->observer) {
+		Block_release(au->observer);
+		au->observer = nullptr;
+	}
 	delete au;
 	return noErr;
 }
@@ -742,6 +753,16 @@ OSStatus prop_info(au_instance *au, AudioUnitPropertyID id, AudioUnitScope scope
 		out.writable = false;
 		return noErr;
 
+	case kAudioUnitProperty_RenderContextObserver:
+		// The host's audio workgroup for our parallel slave thread (the
+		// v2 half of Apple's auxiliary-thread pattern; v3 uses
+		// AUAudioUnit.renderContextObserver). Read-only, global scope.
+		if (!want_global(scope, element, err))
+			return err;
+		out.size = sizeof(void *);
+		out.writable = false;
+		return noErr;
+
 	case kAudioUnitProperty_PresentPreset:
 		if (!want_global(scope, element, err))
 			return err;
@@ -982,6 +1003,14 @@ OSStatus prop_get(au_instance *au, AudioUnitPropertyID id, AudioUnitScope scope,
 		                                                    : smu2000::vst3::NATIVE_RATE;
 		*static_cast<Float64 *>(data) = double(au->eng.latency_samples()) / rate;
 		*size = sizeof(Float64);
+		return noErr;
+	}
+
+	case kAudioUnitProperty_RenderContextObserver: {
+		if (*size < sizeof(void *))
+			return kAudioUnitErr_InvalidPropertyValue;
+		*static_cast<au_instance::render_context_observer_t *>(data) = au->observer;
+		*size = sizeof(void *);
 		return noErr;
 	}
 
@@ -1780,6 +1809,11 @@ AudioComponentPlugInInterface *SMU2000AUFactory(const AudioComponentDescription 
 	au->iface.Close  = &au_close;
 	au->iface.Lookup = &au_lookup;
 	au->iface.reserved = nullptr;
+	// The observer outlives every GetProperty call: the host fetches and
+	// caches it at open, so it is copied once here and released at close.
+	au->observer = Block_copy(^(const AudioUnitRenderContext *ctx) {
+		au->eng.set_realtime_workgroup(ctx ? ctx->workgroup : nullptr);
+	});
 	return &au->iface;
 }
 

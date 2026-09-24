@@ -9,6 +9,7 @@
 #pragma once
 
 #include "bridge.h"
+#include "midi_filter.h"
 #include "mu2000.h"
 #include "xg/ram.h"
 
@@ -121,6 +122,11 @@ public:
 			mu.turn_encoder(step);
 	}
 
+	// 「同じ値の再送を落とす」控制台（midi_filter.h）。音源に触る口なら
+	// ここを通るなので、経路の区別なく表が揃う。プラグイン側が直列に
+	// 載せる前に duplicate() を見て、素通しと決まった分だけを watch する
+	midi_filter &wire() { return m_wire; }
+
 	// 音源へ入れた MIDI を 1 バイトずつ見せる。押さえている鍵とベロシティを写しに書く
 	// （音源の中の鍵の状態はきれいに取り出せないので、入口で数える）
 	void watch(u8 b, int port)
@@ -143,6 +149,9 @@ public:
 				return;
 			}
 			m_sysex[port] = false;                // F7 か、途中で別のものが来た
+			// SysEx は裏から値を変える（XG のパラメータ dump など）。
+			// 最後まで来たにも途中で行方不明になったにも、控制台は白紙が正しい
+			m_wire.wipe(port);
 			if (b == 0xf7) {
 				if (is_reset(m_sx[port], m_sx_len[port]))
 					for (int ch = 0; ch < 16; ch++)
@@ -166,6 +175,7 @@ public:
 		m_have[port] = 0;
 		const int slot = port * 16 + (st & 0x0f);
 		const u8 d0 = m_data[port][0], d1 = m_data[port][1];
+		m_wire.apply(port, st, d0, d1);           // 控制台の最新値（midi_filter.h）
 		u64 &bits = m_xg.notes[slot][d0 >> 6];
 		const u64 bit = u64(1) << (d0 & 63);
 		if (kind == 0x90 && d1) {
@@ -286,6 +296,7 @@ private:
 	u64 m_applied = 0;
 	u64 m_since = 0;
 	xg_snapshot m_xg;                        // 音声の糸だけが触る
+	midi_filter m_wire;                      // 重複落しの控制台（wire()）
 	u8   m_status[mu2000::MIDI_PORTS] = {}, m_data[mu2000::MIDI_PORTS][2] = {};
 	int  m_have[mu2000::MIDI_PORTS] = {};
 	bool m_sysex[mu2000::MIDI_PORTS] = {};

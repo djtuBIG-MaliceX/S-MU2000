@@ -13,12 +13,14 @@
 // 周波数の上げ下げで数 % 揺れて、小さな改善が測れない。起動の直後の状態を
 // 保存しておき、毎回そこへ戻してから流すので、どの回も中身は同じ仕事になる。
 #include "compat/platform.h"
+#include "compat/realtime.h"
 #include "mu2000.h"
 #include "smf.h"
 
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <vector>
@@ -54,6 +56,13 @@ int main(int argc, char **argv)
 	const int repeats = argc > 5 ? std::max(1, std::atoi(argv[5])) : 5;
 	const int copies = argc > 6 ? std::max(1, std::atoi(argv[6])) : 1;
 	const u32 RATE = 44100;
+
+	// Ask for performance cores (macOS; nothing elsewhere). Default-QoS
+	// processes may land on efficiency cores and migrate; real-time audio
+	// threads run elevated, so this matches production rather than
+	// flattering the numbers. The slave threads inherit it;
+	// mu2000::slave_loop raises itself the same way.
+	smu2000::realtime_raise_self();
 
 	std::vector<smf::event> events;
 	std::string err;

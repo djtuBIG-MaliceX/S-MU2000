@@ -90,6 +90,13 @@ public:
 	// not asked for, or if the device refused (something else holds it)
 	bool exclusive() const;
 
+#if defined(__APPLE__)
+	// The HAL output unit's audio workgroup, for a parallel render thread
+	// (Apple's parallel real-time threads pattern). Null when unavailable.
+	// macOS only; Linux shares this header but has no workgroups.
+	void *realtime_workgroup();
+#endif
+
 	// Keep what is handed to the audio unit, so it can be compared against a real
 	// machine. Call before start(); write_capture() writes it as a WAV. Note that
 	// on this platform CoreAudio converts to the device's own format *after* us,

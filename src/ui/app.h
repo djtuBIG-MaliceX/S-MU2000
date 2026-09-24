@@ -995,6 +995,14 @@ public:
 		// MIDI ports above, or the settings written here would carry an
 		// empty MIDI name and the next start would come up with no ports
 		audio_name = out->device_name();
+#if defined(__APPLE__)
+		// The parallel slave thread joins the output unit's audio workgroup
+		// from here (Apple's parallel real-time threads pattern; the join
+		// itself is in compat/realtime.h). Null keeps today's behavior.
+		// Only macOS has a group to hand over, so only it asks. This was
+		// gui_mac.cpp's own line before the three front ends shared a base
+		eng->mu.set_realtime_workgroup(out->realtime_workgroup());
+#endif
 		return true;
 	}
 

@@ -12,13 +12,20 @@
 #   * x86_64 under Rosetta: both JITs / MEG JIT only / SH2 JIT only / no JIT
 #
 # Usage:
-#   scripts/bench_matrix.sh [rom dir] [midi] [frames] [seconds] [repeats]
+#   scripts/bench_matrix.sh [--rosetta] [rom dir] [midi] [frames] [seconds] [repeats]
 #   defaults: roms demo.mid 256 10 3
+#   --rosetta also runs the x86_64-under-Rosetta rows (off by default: slower).
 #
 # Requires the ROMs and the MIDI file locally; neither is committed.
 
 set -euo pipefail
 export LC_ALL=C
+
+ROSETTA=0
+if [ "${1:-}" = "--rosetta" ] || [ "${1:-}" = "-r" ]; then
+	ROSETTA=1
+	shift
+fi
 
 ROM=${1:-roms}
 MID=${2:-demo.mid}
@@ -45,8 +52,10 @@ rosetta=no
 echo ">> make blocktime (arm64)" >&2
 make -j8 build/blocktime >&2
 
+if [ "$ROSETTA" = 1 ]; then
 echo ">> make blocktime (x86_64, Rosetta)" >&2
 make ARCH=x86_64 -j8 build-x86_64/blocktime >&2
+fi
 
 # ---- run one config and pick the summary lines -------------------------------
 # Blocktime prints, among others:
@@ -67,19 +76,6 @@ run_in() { # $1 = binary path, $2 = label, rest = env
 		"$label" "$avg" "$worst" "$pct" "$pctw" "$over"
 }
 
-# ---- the matrix ---------------------------------------------------------------
-rows=""
-rows+="$(run_in ./build/blocktime          "arm64 native - both JITs")"$'\n'
-rows+="$(run_in ./build/blocktime          "arm64 native - MEG JIT only" SMU2000_SH2_JIT=0)"$'\n'
-rows+="$(run_in ./build/blocktime          "arm64 native - SH2 JIT only" SMU2000_MEG_JIT=0)"$'\n'
-rows+="$(run_in ./build/blocktime          "arm64 native - interpreter" SMU2000_SH2_JIT=0 SMU2000_MEG_JIT=0)"$'\n'
-rows+="$(run_in ./build-x86_64/blocktime   "x86_64 Rosetta - both JITs")"$'\n'
-rows+="$(run_in ./build-x86_64/blocktime   "x86_64 Rosetta - MEG JIT only" SMU2000_SH2_JIT=0)"$'\n'
-rows+="$(run_in ./build-x86_64/blocktime   "x86_64 Rosetta - SH2 JIT only" SMU2000_MEG_JIT=0)"$'\n'
-rows+="$(run_in ./build-x86_64/blocktime   "x86_64 Rosetta - interpreter" SMU2000_SH2_JIT=0 SMU2000_MEG_JIT=0)"
-
-# ---- append to the doc ---------------------------------------------------------
-{
 	echo
 	echo "## $(date '+%Y-%m-%d %H:%M') -- $model ($cpu)"
 	echo
@@ -90,5 +86,14 @@ rows+="$(run_in ./build-x86_64/blocktime   "x86_64 Rosetta - interpreter" SMU200
 	echo
 	echo "| config | avg ms/block | worst ms | % of real time (avg) | % of real time (worst) | blocks overrun |"
 	echo "|---|---|---|---|---|---|"
-	printf '%s\n' "$rows"
-}
+# ---- the matrix ---------------------------------------------------------------
+run_in ./build/blocktime          "arm64 native - both JITs"
+run_in ./build/blocktime          "arm64 native - MEG JIT only" SMU2000_SH2_JIT=0
+run_in ./build/blocktime          "arm64 native - SH2 JIT only" SMU2000_MEG_JIT=0
+run_in ./build/blocktime          "arm64 native - interpreter" SMU2000_SH2_JIT=0 SMU2000_MEG_JIT=0
+if [ "$ROSETTA" = 1 ]; then
+	run_in ./build-x86_64/blocktime   "x86_64 Rosetta - both JITs"
+	run_in ./build-x86_64/blocktime   "x86_64 Rosetta - MEG JIT only" SMU2000_SH2_JIT=0
+	run_in ./build-x86_64/blocktime   "x86_64 Rosetta - SH2 JIT only" SMU2000_MEG_JIT=0
+	run_in ./build-x86_64/blocktime   "x86_64 Rosetta - interpreter" SMU2000_SH2_JIT=0 SMU2000_MEG_JIT=0
+fi

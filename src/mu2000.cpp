@@ -21,6 +21,7 @@
 #include <cstring>
 
 #include "compat/platform.h"
+#include "compat/realtime.h"
 
 
 namespace {
@@ -292,7 +293,13 @@ void mu2000::apply_threading()
 
 void mu2000::slave_loop(u64 seen)
 {
+	// The platform's real-time audio workgroup, if it has one
+	// (src/compat/realtime.h). Joins whatever the front end asked for and
+	// leaves it on the way out; null keeps today's behavior.
+	smu2000::realtime_join wg;
 	for (;;) {
+		if (wg.active())
+			wg.reset(m_rt_wg_want.load(std::memory_order_acquire));
 		// 合図を待つ。1 サンプルの中の待ちは 1 マイクロ秒に満たないので、
 		// まず回して待つ。眠っていては 44100 回/秒には間に合わない。
 		//

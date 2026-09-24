@@ -248,6 +248,23 @@ void feed_ump(smu2000::plug::engine *eng, scratch *sc, const AUMIDIEventList &ev
 	return self;
 }
 
+// The host's audio workgroup for our parallel slave thread (Apple's Audio
+// Unit auxiliary-thread pattern). The system calls the block before every
+// render, so a call that lands before boot is picked up by the next one,
+// and a null context leaves the workgroup. Overriding the readonly property
+// works on OS versions predating it: it is simply never called there.
+- (AURenderContextObserver)renderContextObserver
+{
+	__weak SMU2000AudioUnitV3 *weakSelf = self;
+	return ^(const AudioUnitRenderContext *context) {
+		SMU2000AudioUnitV3 *strong = weakSelf;
+		if (!strong)
+			return;
+		strong->_engine->set_realtime_workgroup(
+			context ? (__bridge void *)context->workgroup : nullptr);
+	};
+}
+
 - (void)dealloc
 {
 	// Free the buffers here. super's dealloc (inserted by ARC) calls

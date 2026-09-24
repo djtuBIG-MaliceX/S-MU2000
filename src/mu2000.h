@@ -163,6 +163,11 @@ public:
 	}
 	// 溢れて捨てたバイト数（どの糸から読んでもよい）
 	u64 midi_dropped() const { return m_midi_dropped.load(std::memory_order_relaxed); }
+	// その入口から次に届くメッセージが着地する口（ケーブルメッセージ F5 のあとで動く）。
+	// 直列に載せる前の重複チェックが口を間違えないように、midi_in に渡す前に
+	// 聞けるようにしてある（ui/midi_filter.h）。**run_sample と同じ糸から**
+	//（m_machine を持っているところ）呼ぶこと
+	int midi_route(int port) const { return m_cable[port < 0 ? 0 : port]; }
 	// Bytes sitting on the wire, including the one in flight.
 	// The 31250bps throttle asks this to decide whether the line is free
 	size_t midi_queued(int port) const
@@ -860,7 +865,17 @@ private:
 	s32 m_slave_l = 0, m_slave_r = 0;
 	void slave_loop(u64 seen);
 
+	// Parallel real-time audio workgroup (macOS) for the slave thread below,
+	// as an os_workgroup_t. Plain void* so this header stays platform-free;
+	// only macOS front ends set it. The slave joins whatever is set (null
+	// keeps today's behavior); see slave_loop for the join itself.
+	std::atomic<void *> m_rt_wg_want{nullptr};
+
 public:
+	// Parallel real-time audio workgroup (macOS) for the slave thread: an
+	// os_workgroup_t, kept as void* so this header stays platform-free.
+	void set_realtime_workgroup(void *wg) { m_rt_wg_want.store(wg, std::memory_order_release); }
+
 	// 速さの手掛かり。1 サンプルあたり実行ループを何周したか
 	u64 m_loops = 0, m_timer_fires = 0, m_event_fires = 0;
 	// 区間ごとの所要時間（QueryPerformanceCounter の刻み）。

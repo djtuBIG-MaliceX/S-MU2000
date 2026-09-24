@@ -12,6 +12,7 @@
 #include <AudioToolbox/AudioToolbox.h>
 #include <CoreAudio/CoreAudio.h>
 #include <mach/mach_time.h>
+#include <os/workgroup.h>
 #include <unistd.h>          // getpid(), for hog mode
 
 #include <algorithm>
@@ -493,6 +494,23 @@ void audio_out::stop()
 std::string audio_out::device_name() const
 {
 	return m_impl ? name_of(m_impl->dev) : std::string();
+}
+
+// The HAL output unit's audio workgroup, for a parallel render thread to
+// join (Apple's parallel real-time threads pattern). Null when the unit is
+// down or the property is unavailable.
+void *audio_out::realtime_workgroup()
+{
+	if (!m_impl || !m_impl->unit)
+		return nullptr;
+	if (__builtin_available(macOS 11.0, *)) {
+		os_workgroup_t wg = nullptr;
+		UInt32 size = sizeof(wg);
+		if (AudioUnitGetProperty(m_impl->unit, kAudioOutputUnitProperty_OSWorkgroup,
+		                         kAudioUnitScope_Global, 0, &wg, &size) == noErr)
+			return wg;
+	}
+	return nullptr;
 }
 
 bool audio_out::exclusive() const
