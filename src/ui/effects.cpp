@@ -232,7 +232,7 @@ void panel::paint_effects(HDC dc, const char *status) const
 	fill(dc, top, BODY_TOP);
 
 	text_in(dc, scale(20, 6, 460, 16),
-	        texts().effects_title, TEXT_DIM,
+	        UI_TEXT(effects_title, "Effects (sending XG parameter changes)"), TEXT_DIM,
 	        m_font_small, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
 	for (const fx_row &row : ROWS) {
@@ -259,10 +259,11 @@ void panel::paint_effects(HDC dc, const char *status) const
 	}
 
 	text_in(dc, scale(150, 356, 830, 20),
-	        texts().effects_values_note,
+	        UI_TEXT(effects_values_note, "Values are read back from the MU2000. Changes from the panel or songs appear here too."),
 	        RGB(104, 109, 116), m_font_small, DT_LEFT | DT_TOP | DT_SINGLELINE);
 	text_in(dc, scale(150, 324, 830, 34),
-	        texts().effects_insertion_note,
+	        UI_TEXT(effects_insertion_note, "Insertion works on the selected part. Variation can be used as insertion\n"
+                 "by setting CONNECT to INSERTION."),
 	        RGB(104, 109, 116), m_font_small, DT_LEFT | DT_TOP | DT_WORDBREAK);
 
 	if (status && status[0])

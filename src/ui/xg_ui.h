@@ -9,11 +9,14 @@
 
 #include "bridge.h"
 #include "snapshot.h"
+#include "ui/lang.h"
+#include "ui/texts.h"
 #include "xg/fx_types.h"
 #include "xg/model.h"
 #include "xg/voices.h"
 
 #include <string>
+#include <vector>
 
 namespace ui {
 
@@ -111,26 +114,38 @@ void set_file_note(std::string text);               // 結果のひとこと（�
 const std::string &file_note();
 
 // ---- パートのパラメータの組。エディタのパートの面と、音色の窓の「すべて」が同じ表を使う
-// （片方だけに項目が増えないように）。keys は nullptr まで
+// （片方だけに項目が増えないように）。keys は nullptr まで。見出しは UI 言語で
+// 付けるので、表は言語が替わると作り直す（part_groups() が覚えておく）。
 struct part_group { const char *title; const char *const keys[12]; };
-inline constexpr part_group PART_GROUPS[] = {
-	{ "音色",             { "part.bank_msb", "part.bank_lsb", "part.program", "part.mode", "part.element_reserve" } },
-	{ "音量と送り",       { "part.volume", "part.pan", "part.dry_level", "part.reverb_send", "part.chorus_send", "part.variation_send" } },
-	{ "受信と発音",       { "part.rcv_channel", "part.mono_poly", "part.key_assign", "part.note_low", "part.note_high",
-	                        "part.note_shift", "part.detune", "part.vel_depth", "part.vel_offset",
-	                        "part.vel_limit_low", "part.vel_limit_high" } },
-	{ "フィルタと EG",    { "part.cutoff", "part.resonance", "part.hpf_cutoff", "part.attack", "part.decay", "part.release" } },
-	{ "ピッチ EG",        { "part.peg_init_level", "part.peg_attack_time", "part.peg_rel_level", "part.peg_rel_time" } },
-	{ "ポルタメント",     { "part.porta_switch", "part.porta_time" } },
-	{ "ビブラート",       { "part.vib_rate", "part.vib_depth", "part.vib_delay" } },
-	{ "パートの EQ",      { "part.eq_bass_gain", "part.eq_bass_freq", "part.eq_treble_gain", "part.eq_treble_freq" } },
-	{ "モジュレーション", { "part.mw_pitch", "part.mw_filter", "part.mw_amp", "part.mw_lfo_pmod", "part.mw_lfo_fmod", "part.mw_lfo_amod" } },
-	{ "ピッチベンド",     { "part.bend_pitch", "part.bend_filter", "part.bend_amp", "part.bend_lfo_pmod", "part.bend_lfo_fmod", "part.bend_lfo_amod" } },
-	{ "チャンネルアフタータッチ", { "part.cat_pitch", "part.cat_filter", "part.cat_amp", "part.cat_lfo_pmod", "part.cat_lfo_fmod", "part.cat_lfo_amod" } },
-	{ "ポリアフタータッチ", { "part.pat_pitch", "part.pat_filter", "part.pat_amp", "part.pat_lfo_pmod", "part.pat_lfo_fmod", "part.pat_lfo_amod" } },
-	{ "AC1",              { "part.ac1_cc", "part.ac1_pitch", "part.ac1_filter", "part.ac1_amp", "part.ac1_lfo_pmod", "part.ac1_lfo_fmod", "part.ac1_lfo_amod" } },
-	{ "AC2",              { "part.ac2_cc", "part.ac2_pitch", "part.ac2_filter", "part.ac2_amp", "part.ac2_lfo_pmod", "part.ac2_lfo_fmod", "part.ac2_lfo_amod" } },
-};
+inline const std::vector<part_group> &part_groups()
+{
+	static std::vector<part_group> g;
+	static int built = -1;
+	if (built != int(get_lang())) {
+		const ui_texts &t = texts();
+		std::vector<part_group> fresh = {
+			{ t.xgui_group_voice,  { "part.bank_msb", "part.bank_lsb", "part.program", "part.mode", "part.element_reserve" } },
+			{ t.xgui_group_vol,    { "part.volume", "part.pan", "part.dry_level", "part.reverb_send", "part.chorus_send", "part.variation_send" } },
+			{ t.xgui_group_rcv,    { "part.rcv_channel", "part.mono_poly", "part.key_assign", "part.note_low", "part.note_high",
+			                         "part.note_shift", "part.detune", "part.vel_depth", "part.vel_offset",
+			                         "part.vel_limit_low", "part.vel_limit_high" } },
+			{ t.xgui_group_filter, { "part.cutoff", "part.resonance", "part.hpf_cutoff", "part.attack", "part.decay", "part.release" } },
+			{ t.xgui_group_peg,    { "part.peg_init_level", "part.peg_attack_time", "part.peg_rel_level", "part.peg_rel_time" } },
+			{ t.xgui_group_porta,  { "part.porta_switch", "part.porta_time" } },
+			{ t.xgui_group_vib,    { "part.vib_rate", "part.vib_depth", "part.vib_delay" } },
+			{ t.xgui_group_eq,     { "part.eq_bass_gain", "part.eq_bass_freq", "part.eq_treble_gain", "part.eq_treble_freq" } },
+			{ t.xgui_group_mod,    { "part.mw_pitch", "part.mw_filter", "part.mw_amp", "part.mw_lfo_pmod", "part.mw_lfo_fmod", "part.mw_lfo_amod" } },
+			{ t.xgui_group_bend,   { "part.bend_pitch", "part.bend_filter", "part.bend_amp", "part.bend_lfo_pmod", "part.bend_lfo_fmod", "part.bend_lfo_amod" } },
+			{ t.xgui_group_cat,    { "part.cat_pitch", "part.cat_filter", "part.cat_amp", "part.cat_lfo_pmod", "part.cat_lfo_fmod", "part.cat_lfo_amod" } },
+			{ t.xgui_group_pat,    { "part.pat_pitch", "part.pat_filter", "part.pat_amp", "part.pat_lfo_pmod", "part.pat_lfo_fmod", "part.pat_lfo_amod" } },
+			{ "AC1",               { "part.ac1_cc", "part.ac1_pitch", "part.ac1_filter", "part.ac1_amp", "part.ac1_lfo_pmod", "part.ac1_lfo_fmod", "part.ac1_lfo_amod" } },
+			{ "AC2",               { "part.ac2_cc", "part.ac2_pitch", "part.ac2_filter", "part.ac2_amp", "part.ac2_lfo_pmod", "part.ac2_lfo_fmod", "part.ac2_lfo_amod" } },
+		};
+		g.swap(fresh);
+		built = int(get_lang());
+	}
+	return g;
+}
 
 // 値の棒 1 本。表示は層の書式（xg::format）で、ダブルクリックか Ctrl+クリックで数を打てる。
 // EQ の周波数は表の番号でなく Hz、マスター EQ の Q は 10 分の 1 で出す。戻り値は「値を変えたか」。
@@ -170,9 +185,11 @@ void set_audition_note(int note);
 // ---- 説明（ヘルプ）。見出しや名前にカーソルを当てると、何に効くのかを出す（日本語・英語）。
 // 邪魔な人もいるので、窓の上のチェックボックスで消せる。選んだ状態は
 // %LOCALAPPDATA%\S-MU2000\editor.ini に覚えておく（窓どうしで共通）
+// 言語は ui::lang が持つひとつ（--lang・editor.ini・ロケールの順）。texts() の
+// パネル文言と同じ言語になる
 bool &help_on();
-int help_lang();                        // 0 が日本語、1 が English
-// 言語を選ぶ。editor.ini に lang= があれば、次に読んだときにそちらが勝つ
+int help_lang();                        // 0 が日本語、1 が English (ui::lang と同じ番号)
+// 言語を選ぶ。editor.ini に書き戻すので、次もその言語になる（--lang があればそちらが勝つ）
 void set_help_lang(int lang);
 // 直前の部品にカーソルが載っていれば、説明を出す。name は列の見出しかパラメータのキー
 void help_tip(const char *name);
@@ -182,8 +199,9 @@ const char *help_for(const char *name);
 std::string official_name(const char *key);
 // 「説明を出す」のチェックボックスと、言語の選択
 void help_checkbox();
-// 表の見出しの行を、説明つきで出す（ImGui::TableHeadersRow の代わり）
-void headers_with_help(int columns);
+// 表の見出しの行を、説明つきで出す（ImGui::TableHeadersRow の代わり）。
+// keys は列ごとの HELP キーで、見出しの表示文言とは別（訳すと変わるため）
+void headers_with_help(int columns, const char *const *keys);
 
 } // namespace xgui
 } // namespace ui

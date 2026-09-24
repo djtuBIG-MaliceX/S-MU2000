@@ -653,6 +653,9 @@ int main(int argc, char **argv)
 		if (const u32 dirty = mu.native_learn_dirty())
 			std::printf("  **写し取りが汚れた %u 回**（窓の中で別の音が同じ"
 			            "スロットに鳴り始めた）\n", dirty);
+		if (const u32 miss = mu.native_cal_missing())
+			std::printf("  写し取りの記録が足りないまま組んだ音 %u 回"
+			            "（要素の数より写し取った数が少ない。式で組む）\n", miss);
 		if (const u32 clash = mu.native_slot_clash())
 			std::printf("  **スロットの奪い合い %u 回**（写し取りのとき firmware がこちらの鳴っているスロットを取った）\n", clash);
 		const mu2000::native_stats st = mu.native_counts();

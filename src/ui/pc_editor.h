@@ -19,7 +19,10 @@ namespace ui {
 class pc_editor : public imgui_view
 {
 public:
-	const wchar_t *title() const override { return L"S-MU2000 エディタ"; }
+	const wchar_t *title() const override
+	{
+		return get_lang() == lang::ja ? L"S-MU2000 エディタ" : L"S-MU2000 Editor";
+	}
 	int default_width() const override  { return 1280; }
 	int default_height() const override { return 800; }
 

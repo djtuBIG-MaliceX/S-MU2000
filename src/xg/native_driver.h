@@ -291,6 +291,8 @@ public:
 	const std::unordered_map<u64, std::vector<nv::voice_cal>> &drum_map() const { return m_drum; }
 	size_t cal_count() const { return m_cal.size() + m_drum.size(); }
 	int peak_slots() const { return m_peak; }
+	// 写し取りの記録が足りないまま組んだ音の数（6.219）
+	u32 cal_missing() const { return m_cal_missing; }
 
 	// **firmware が最近触ったスロット**を覚える。firmware はこちらの使用中を
 	// 知らないので、避けないと「firmware が自分の音の続きを書く」ときに
@@ -301,6 +303,39 @@ public:
 		for (int i = 0; i < SLOTS; i++)
 			if ((mask >> i) & 1)
 				m_fw_touch[i] = m_clock + 1;   // 0 は「触っていない」
+	}
+
+	// **firmware が声のレジスタに書いたスロットも、その firmware のものとみなす**
+	//（6.220）。鍵を押した瞬間の印だけだと、firmware の音が 2 秒より長く伸びる
+	// ときに印が切れ、こちらがそのスロットを取ってしまう。すると firmware は
+	// 自分の音の続き（フィルタの包絡線 0x00・0x01・0x04 など）を書き続けるので、
+	// こちらの音が途中で化ける。書いている間は避け続ければ、それが起きない。
+	// **毎サンプル書き替わる MEG の戻り（0x0e・0x0f・0x38-0x3f）は除く**こと。
+	// それを含めると全スロットが firmware のものになってしまう（呼ぶ側で除く）
+	void mark_fw_slot(u32 slot)
+	{
+		if (slot < SLOTS)
+			m_fw_touch[slot] = m_clock + 1;
+	}
+
+	// **踏まれたスロットは諦める**（6.220）。firmware が、こちらが鳴らしている
+	// スロットに自分の音を置いてしまったときに呼ばれる。そこはもう firmware の
+	// 包絡線が走っているので、こちらが書き続けても**二重に書いた音**にしかならない。
+	// こちらの音は手放して（キーオフは送らない。送ると firmware の音が切れる）、
+	// 以後そのスロットは firmware のものとして避ける。
+	// `SMU2000_NO_YIELD=1` で、この譲りを止めて前のままにできる
+	void yield_slot(u32 slot)
+	{
+		static const bool off = std::getenv("SMU2000_NO_YIELD") != nullptr;
+		if (off || slot >= SLOTS)
+			return;
+		slot_use &u = m_slot[slot];
+		if (!u.on && !u.rel)
+			return;
+		u.on = u.held = u.sost = u.rel = false;
+		u.cal = nullptr;
+		u.elem = nullptr;
+		m_fw_touch[slot] = m_clock + 1;
 	}
 
 	// **包絡線の格子の位相**。実機の包絡線は 441 サンプルの全体共通の格子で
@@ -2649,16 +2684,21 @@ public:
 
 	// その音を native で鳴らせるか（実際に鳴らす前に決める必要がある。
 	// 鳴らせないなら firmware に回すので、遅らせてはいけない）
-	// **写し取りを 1 音もしない道**（段 4。`SMU2000_NOCAL=1`）。
-	// 式だけでレジスタを組み、つまみの基準は既定の位置に置く
-	// （`nv::default_cal`）。まだ式で出せない所（パート EQ・ミキサ）は
-	// 実測の定数のままなので、そこを詰めるための足場でもある
-	// 環境変数のほかに、プラグインからも入れられる
-	// （`plugin.ini` の `nocal=1`。鳴らし始める前に呼ぶこと）
+	// **写し取りを 1 音もしない道が既定**（段 4。2026-09-24 に切り替えた。6.223）。
+	// 式だけでレジスタを組み、つまみの基準は既定の位置に置く（`nv::default_cal`）。
+	//
+	// 写し取りの道（firmware に 1 音鳴らさせてレジスタを写す）に戻すには
+	// **`SMU2000_CAL=1`**（プラグインは `plugin.ini` の `cal=1`。鳴らし始める前に呼ぶこと）。
+	// 前からある `SMU2000_NOCAL=1` は既定と同じなので、そのままでも動く。
+	//
+	// 切り替えた理由（6.223）: 実機の曲で式だけの道のほうが近く（帯域のずれ 0.50dB 対
+	// 0.61dB）、firmware に 1 音も鳴らさせないのでスロットの取り合い（6.219・6.220）が
+	// そもそも起きない。速さも落ちない。まだ式で出せない所（パート EQ・ミキサ）は
+	// `nv::defaults` の実測の定数のまま
 	static void set_nocal(bool on) { nocal_flag() = on ? 1 : 0; }
 	static int &nocal_flag()
 	{
-		static int v = std::getenv("SMU2000_NOCAL") ? 1 : 0;
+		static int v = std::getenv("SMU2000_CAL") ? 0 : 1;
 		return v;
 	}
 	static bool nocal_mode() { return nocal_flag() != 0; }
@@ -2689,6 +2729,10 @@ public:
 		const u32 rec = record_of(part);
 		if (!rec)
 			return false;
+		// **写し取りが要素の数だけ揃っていなくても native で鳴らす**（6.219）。
+		// 足りないぶんは「合成の写し」で組む（note_on）。firmware に戻す道も
+		// 試したが、鳴る時刻がずれてスロットの取り合いも変わるので、
+		// 実機との差はかえって開いた（パンのずれ 0.41dB 対 0.65dB）
 		return nocal_mode() || m_cal.find(cal_key(rec, part)) != m_cal.end();
 	}
 
@@ -2752,6 +2796,23 @@ public:
 			if (!c && size_t(used) < cals.size()) {
 				c = &cals[used];
 				taken |= u32(1) << used;
+			}
+			// **写し取りが足りないときは「合成の写し」に落とす**（6.219）。
+			// 要素の数より写し取った数が少ないことがある（写し取りの音の最中に
+			// firmware がこちらのスロットを取り返すと、その要素は記録が残らない）。
+			// ここを null のままにしていたので、**パン・送り・フィルタ・共振を
+			// 丸ごと書かずに鳴らしていた**（音が大きく外れる）。nocal の道と同じ
+			// 合成の写しを渡せば、式の道としてひと通り組まれる。
+			// **使い回しの器**を指すこと（スロットが指したまま残るので、
+			// 一時物を指すと宙に浮く）
+			if (!c) {
+				const std::vector<nv::voice_cal> &sc = synth_cals();
+				c = &sc[size_t(used) % sc.size()];
+				m_cal_missing++;
+				if (debug_on())
+					std::fprintf(stderr, "cal 足りない part=%d note=%d vel=%d 要素 %d 個目/%d"
+					                     " 写し取り %d 個 → 合成の写しで組む\n",
+					             part + 1, note, vel, k + 1, nelem, int(cals.size()));
 			}
 			used++;
 			const int slot = take_slot(part, note);
@@ -3616,6 +3677,7 @@ private:
 	u64 m_clock = 0;
 	u64 m_alt_kill_next = ~u64(0);  // つぎに止めを刺す時刻（6.151）
 	int m_peak = 0;
+	u32 m_cal_missing = 0;
 	bool m_traj = false;
 	bool m_rec = false;            // 写し取りの最中（段が後から増える）
 	u64 m_traj_next = 0;           // つぎに段を書く時刻

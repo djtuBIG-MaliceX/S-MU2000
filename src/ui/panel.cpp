@@ -244,11 +244,11 @@ void panel::build_spots()
 
 	// 面を選ぶつまみ。本体の外（下の帯）
 	m_spots.push_back({ spot_kind::tab, mu2000::button::count, CTL_TAB_FRONT,
-	                    scale(700, 386, 94, 13), texts().tab_panel, "" });
+	                    scale(700, 386, 94, 13), UI_TEXT(tab_panel, "Panel"), "" });
 	m_spots.push_back({ spot_kind::tab, mu2000::button::count, CTL_TAB_EDIT,
-	                    scale(800, 386, 94, 13), texts().tab_editor, "" });
+	                    scale(800, 386, 94, 13), UI_TEXT(tab_editor, "Editor"), "" });
 	m_spots.push_back({ spot_kind::tab, mu2000::button::count, CTL_TAB_FX,
-	                    scale(898, 386, 94, 13), texts().tab_effects, "" });
+	                    scale(898, 386, 94, 13), UI_TEXT(tab_effects, "Effects"), "" });
 
 	if (m_page == page::editor) { build_editor_spots(); return; }
 	if (m_page == page::effects) { build_effect_spots(); return; }
@@ -885,7 +885,8 @@ void panel::paint_front(HDC dc, const snapshot &s, u64 pressed, double volume,
 	if (status && status[0])
 		text_in(dc, m_status, status, PANEL_INK, m_font_small,
 		        DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-	text_in(dc, m_hint, texts().hint_front,
+	text_in(dc, m_hint, UI_TEXT(hint_front, "Turn the big dial with the wheel / click buttons / "
+                             "keys: A=PLAY E=EDIT U=UTIL F=EFFECT [ ]=PART"),
 	        RGB(120, 124, 130), m_font_small, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
 	draw_tabs(dc);

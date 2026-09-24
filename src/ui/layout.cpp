@@ -258,7 +258,7 @@ bool layout::load(const std::string &path, std::string &err)
 	int lineno = 0;
 	auto bad = [&](const char *why) {
 		char m[256];
-		std::snprintf(m, sizeof(m), texts().layout_line_error, lineno, why);
+		std::snprintf(m, sizeof(m), UI_TEXT(layout_line_error, "line %d: %s\n"), lineno, why);
 		err += m;
 	};
 

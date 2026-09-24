@@ -3,9 +3,9 @@
 // The probe's host window on macOS: an NSWindow the plugin's editor is attached
 // to, and the run loop that serves it.
 //
-// Objective-C++ for the same reason as the other .mm files here: Cocoa and the
-// GDI shim cannot be in one translation unit, and this one deliberately sees
-// neither the panel nor gdi.h. It only knows a window and a view to put in it.
+// Objective-C++ only because it holds Cocoa classes. This file deliberately
+// sees neither the panel nor gdi.h; it only knows a window and a view to put
+// in it.
 //
 // The run loop is the real one ([NSApp run]) rather than a hand-rolled event
 // pump. That matters here: the plugin's view installs a repaint timer on the

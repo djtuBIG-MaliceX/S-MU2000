@@ -2,25 +2,24 @@
 //
 // The Cocoa half of the macOS front end.
 //
-// This is the only file compiled as Objective-C++, and on purpose it does not
-// include compat/gdi.h: Cocoa's headers define BOOL and Quickdraw's define
-// Polygon, both of which that header has to declare so panel.cpp can stay
-// unchanged. Keeping the two apart is cheaper than renaming GDI.
-//
-// So this file knows about windows, events, menus and file panels and nothing
-// about the synth. Everything it needs from the app it asks for through
-// ui::mac_app in window_mac.h.
-
-#include "window_mac.h"
+// This is the only file compiled as Objective-C++. Apart from that this file
+// is the twin of window_win.cpp / window_sdl.cpp: windows, events, menus and
+// file panels, with what the events mean decided in ui::app.
 
 #import <Cocoa/Cocoa.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+
+#include "window_mac.h"
+#include "app.h"
 
 #include <string>
 
 // Carbon's virtual key code for F5. Not worth pulling in <Carbon/Carbon.h>
 // for one constant; the app is told about function keys through the sentinel
 // in window_mac.h
+static const unsigned short kKeyCodeF2 = 0x78;
+static const unsigned short kKeyCodeF3 = 0x63;
+static const unsigned short kKeyCodeF4 = 0x76;
 static const unsigned short kKeyCodeF5 = 0x60;
 
 // ---------------------------------------------------------------------------
@@ -31,12 +30,12 @@ static const unsigned short kKeyCodeF5 = 0x60;
 @interface SMUView : NSView
 {
 @public
-	ui::mac_app *_app;
+	ui::app *_app;
 @private
 	NSTimer *_timer;
 	CGFloat  _scroll_accum;
 }
-- (instancetype)initWithFrame:(NSRect)frame app:(ui::mac_app *)app;
+- (instancetype)initWithFrame:(NSRect)frame app:(ui::app *)app;
 - (void)tick:(NSTimer *)timer;
 - (void)showMenu:(NSEvent *)event;
 - (int)codeForEvent:(NSEvent *)event;
@@ -44,7 +43,7 @@ static const unsigned short kKeyCodeF5 = 0x60;
 
 @implementation SMUView
 
-- (instancetype)initWithFrame:(NSRect)frame app:(ui::mac_app *)app
+- (instancetype)initWithFrame:(NSRect)frame app:(ui::app *)app
 {
 	self = [super initWithFrame:frame];
 	if (self) {
@@ -72,7 +71,7 @@ static const unsigned short kKeyCodeF5 = 0x60;
 //
 // The Windows side gets a MIDI file dropped on it through WM_DROPFILES; this is
 // the same thing, asked for by registering the file URL type. What to do with
-// the path is the app's business (ui::mac_app::file_dropped)
+// the path is the app's business (ui::app::file_dropped)
 
 - (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender
 {
@@ -133,7 +132,11 @@ static const unsigned short kKeyCodeF5 = 0x60;
 	if (!ctx || !_app)
 		return;
 	const NSRect b = [self bounds];
-	_app->draw((void *)ctx, (int)b.size.width, (int)b.size.height);
+	// The view's context is already top-left, y down: wrap it for the shared
+	// painter (the GDI-space call ui::app::paint_main expects)
+	HDC dc = static_cast<HDC>(smu_gdi_wrap_view_context(ctx, (int)b.size.width, (int)b.size.height));
+	_app->paint_main(dc, (int)b.size.width);
+	DeleteDC(dc);
 }
 
 // ---- repainting
@@ -153,7 +156,7 @@ static const unsigned short kKeyCodeF5 = 0x60;
 	[super viewDidMoveToWindow];
 	if ([self window]) {
 		if (!_timer) {
-			_timer = [NSTimer timerWithTimeInterval:(_app ? _app->frame_ms() : 33) / 1000.0
+			_timer = [NSTimer timerWithTimeInterval:33 / 1000.0
 			                                 target:self
 			                               selector:@selector(tick:)
 			                               userInfo:nil
@@ -173,7 +176,7 @@ static const unsigned short kKeyCodeF5 = 0x60;
 	if (!_app)
 		return;
 	NSPoint p = [self convertPoint:[event locationInWindow] fromView:nil];
-	if (_app->mouse_down((int)p.x, (int)p.y, false))
+	if (_app->mouse_down((int)p.x, (int)p.y, false).show_menu)
 		[self showMenu:event];
 }
 
@@ -182,7 +185,7 @@ static const unsigned short kKeyCodeF5 = 0x60;
 	if (!_app)
 		return;
 	NSPoint p = [self convertPoint:[event locationInWindow] fromView:nil];
-	if (_app->mouse_down((int)p.x, (int)p.y, true))
+	if (_app->mouse_down((int)p.x, (int)p.y, true).show_menu)
 		[self showMenu:event];
 }
 
@@ -191,7 +194,8 @@ static const unsigned short kKeyCodeF5 = 0x60;
 	if (!_app)
 		return;
 	NSPoint p = [self convertPoint:[event locationInWindow] fromView:nil];
-	_app->mouse_drag((int)p.x, (int)p.y);
+	if (_app->mouse_drag((int)p.x, (int)p.y))
+		[self setNeedsDisplay:YES];
 }
 
 - (void)rightMouseDragged:(NSEvent *)event
@@ -255,12 +259,16 @@ static const unsigned short kKeyCodeF5 = 0x60;
 // ---- keys
 
 // The app maps keys to panel buttons, so it is given a character where there
-// is one and the sentinel from window_mac.h where there is not. F5 is called
-// out by name because it is the layout reload and has no character at all.
+// is one, one of the shared F-key codes (ui/keymap.h) for the four keys it
+// acts on, and the sentinel from window_mac.h for everything else.
 - (int)codeForEvent:(NSEvent *)event
 {
-	if ([event keyCode] == kKeyCodeF5)
-		return ui::MAC_KEY_FUNCTION_BASE + kKeyCodeF5;
+	switch ([event keyCode]) {
+	case kKeyCodeF2: return ui::KEY_F2;
+	case kKeyCodeF3: return ui::KEY_F3;
+	case kKeyCodeF4: return ui::KEY_F4;
+	case kKeyCodeF5: return ui::KEY_F5;
+	}
 
 	NSString *chars = [[event charactersIgnoringModifiers] lowercaseString];
 	if ([chars length] >= 1) {
@@ -367,7 +375,7 @@ static const unsigned short kKeyCodeF5 = 0x60;
 @interface SMUDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate>
 {
 @public
-	ui::mac_app *_app;
+	ui::app *_app;
 	NSWindow    *_window;
 	SMUView     *_view;
 	int          _w, _h;
@@ -377,7 +385,7 @@ static const unsigned short kKeyCodeF5 = 0x60;
 
 @implementation SMUDelegate
 
-- (instancetype)initWithApp:(ui::mac_app *)app title:(const char *)title w:(int)w h:(int)h
+- (instancetype)initWithApp:(ui::app *)app title:(const char *)title w:(int)w h:(int)h
 {
 	self = [super init];
 	if (self) {
@@ -471,7 +479,7 @@ std::string open_midi_file_panel()
 	[panel setCanChooseFiles:YES];
 	[panel setCanChooseDirectories:NO];
 	[panel setAllowsMultipleSelection:NO];
-	[panel setMessage:@"流す MIDI ファイル"];
+	[panel setMessage:[NSString stringWithUTF8String:UI_TEXT(dlg_midi_open, "MIDI file to play")]];
 	if (@available(macOS 11.0, *)) {
 		UTType *mid  = [UTType typeWithFilenameExtension:@"mid"];
 		UTType *midi = [UTType typeWithFilenameExtension:@"midi"];
@@ -551,7 +559,7 @@ bool confirm_modal(const char *title, const char *message, const char *ok_label)
 		[alert setInformativeText:[NSString stringWithUTF8String:message]];
 		// The accepting button is added second so it is not the default one:
 		// Return picks Cancel, and the machine only reboots on a deliberate click
-		[alert addButtonWithTitle:@"キャンセル"];
+		[alert addButtonWithTitle:[NSString stringWithUTF8String:UI_TEXT(dlg_cancel, "Cancel")]];
 		[alert addButtonWithTitle:[NSString stringWithUTF8String:ok_label]];
 		return [alert runModal] == NSAlertSecondButtonReturn;
 	}
@@ -569,7 +577,7 @@ void alert_modal(const char *title, const char *message)
 	}
 }
 
-void run_window(mac_app &app, const char *title, int w, int h)
+void run_window(app &app, const char *title, int w, int h)
 {
 	@autoreleasepool {
 		NSApplication *nsapp = [NSApplication sharedApplication];

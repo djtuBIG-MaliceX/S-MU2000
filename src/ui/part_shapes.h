@@ -6,7 +6,7 @@
 // 続けて音色を替えながら絵の変わり方を見られる。一覧で行を選ぶと、この窓もそのパートに替わる。
 // 上のペインには、掛かっているエフェクト（種類の名前まで）、VOL〜HOLD と VAR〜REV の棒（触れる）、鍵盤。
 // 右はタブ。「形」は 3 × 2 の区画（VIB・FILTER（HPF も）・EG・ピッチ EG・EQ・ポルタメント）、「すべて」はパートのパラメータ全部の棒
-// （エディタのパートの面と同じ組。xgui::PART_GROUPS）。パートの細かい設定はこの窓だけで全部触れる
+// （エディタのパートの面と同じ組。xgui::part_groups()）。パートの細かい設定はこの窓だけで全部触れる
 //
 // 表示の大きさは xgui::shapes_zoom（既定 0.6）。窓の大きさもその分だけ小さくしてある
 
@@ -23,7 +23,10 @@ namespace ui {
 class part_shapes : public imgui_view
 {
 public:
-	const wchar_t *title() const override { return L"S-MU2000 パートの音色"; }
+	const wchar_t *title() const override
+	{
+		return get_lang() == lang::ja ? L"S-MU2000 パートの音色" : L"S-MU2000 Part Voice";
+	}
 	// 900 × 640 の 6 割（540 × 384）に、右の音色の面（左に分類、右に音色とバンク違いの 2 列）のぶんを足し、
 	// 分類の 18 行が収まる高さにした大きさ
 	// 上のペイン（エフェクト・棒・鍵盤）のぶん高くした

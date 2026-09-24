@@ -151,7 +151,7 @@ inline bool load(mu2000 &mu, u64 k)
 	}
 	std::string err;
 	if (!mu.load_state(buf.data() + kEnvSize, buf.size() - kEnvSize, err)) {
-		std::fprintf(stderr, ui::texts().bootcache_read_error_fmt, err.c_str());
+		std::fprintf(stderr, UI_TEXT(bootcache_read_error_fmt, "Cannot read boot snapshot: %s\n"), err.c_str());
 		std::remove(p.c_str());
 		return false;
 	}

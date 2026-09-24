@@ -4,11 +4,6 @@
 // hands over in IPlugView::attached(). The VST3 interface, the panel and the
 // input semantics all live in view.cpp; this is only the window.
 //
-// Objective-C++ on purpose, and the only VST3 file that is. Cocoa's headers
-// define BOOL and Quickdraw's define Polygon, while compat/gdi.h has to declare
-// both so panel.cpp can stay untouched. view.h mentions no window system at
-// all, so this file includes that and never includes gdi.h -- the panel is
-// reached through the void* entry points on plug_view.
 
 #include "plug_window.h"
 #include "view.h"
@@ -23,7 +18,7 @@
 #include "ui/part_shapes.h"
 #include "ui/pc_editor.h"
 #include "ui/pc_host.h"
-#include "ui/pc_window_mac.h"
+#include "ui/pc_window.h"
 #include "ui/xg_ui.h"
 
 #include <algorithm>
@@ -388,13 +383,7 @@ public:
 	void open_pc(ui::pc_window &w);
 	void open_pc_window(int kind) override
 	{
-		switch (kind) {
-		case PC_EDITOR: open_pc(m_editor); break;
-		case PC_FX:     open_pc(m_fx);     break;
-		case PC_SHAPES: open_pc(m_shapes); break;
-		case PC_MASTER: open_pc(m_master); break;
-		default:        open_pc(m_list);   break;
-		}
+		open_pc(*pc_window_for_kind(kind, m_list, m_editor, m_fx, m_shapes, m_master));
 	}
 
 private:
@@ -424,7 +413,7 @@ private:
 
 	if (tag >= ui::ID_PLUG_CARD_NEW16 && tag <= ui::ID_PLUG_CARD_NEW128) {
 		NSSavePanel *panel = [NSSavePanel savePanel];
-		[panel setTitle:@"新しい SmartMedia の保存先"];
+		[panel setTitle:[NSString stringWithUTF8String:UI_TEXT(dlg_card_save, "Where to save the new SmartMedia image")]];
 		[panel setNameFieldStringValue:@"smartmedia.img"];
 		[panel setAllowedFileTypes:@[ @"img" ]];
 		if ([panel runModal] != NSModalResponseOK)
@@ -437,7 +426,7 @@ private:
 
 	if (tag == ui::ID_PLUG_CARD_OPEN) {                          // 差す
 		NSOpenPanel *panel = [NSOpenPanel openPanel];
-		[panel setTitle:@"差す SmartMedia"];
+		[panel setTitle:[NSString stringWithUTF8String:UI_TEXT(dlg_card_open, "Insert a SmartMedia image")]];
 		[panel setCanChooseFiles:YES];
 		[panel setCanChooseDirectories:NO];
 		[panel setAllowsMultipleSelection:NO];

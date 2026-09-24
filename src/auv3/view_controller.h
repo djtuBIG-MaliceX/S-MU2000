@@ -32,8 +32,8 @@ class engine;
 } // namespace vst3
 } // namespace smu2000
 
-// パネル 1 枚（view_controller.mm）。中身は AUv2・VST3 と同じ
-// smu2000::vst3::plug_view で、絵の二重持ちはしない
+// パネル 1 枚。中身は src/vst3/panel_nsview.mm が作る NSView そのもので、
+// AUv2・VST3 が出すのと同じ 1 枚。絵の二重持ちはしない
 @interface SMU2000ViewControllerV3 : AUViewController
 - (instancetype)initWithEngine:(smu2000::vst3::engine *)eng audioUnit:(AUAudioUnit *)au;
 @end

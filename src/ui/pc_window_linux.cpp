@@ -43,16 +43,10 @@ std::vector<pc_window *> &registry()
 
 // The title comes from imgui_view as UTF-32 (wchar_t is 32 bits here, unlike
 // Windows). SDL wants UTF-8, so convert plainly (same helper as macOS).
-// The five known Japanese titles render in English on Linux; anything else
-// converts as-is, so a future title still shows something.
+// The view already picks the language (get_lang in each title()), so this
+// converts whatever comes back.
 std::string title_of(const imgui_view &view)
 {
-	const std::wstring t = view.title() ? view.title() : L"";
-	if (t == L"S-MU2000 エディタ") return "S-MU2000 Editor";
-	if (t == L"S-MU2000 一覧") return "S-MU2000 List";
-	if (t == L"S-MU2000 インサーションエフェクト") return "S-MU2000 Insertion Effect";
-	if (t == L"S-MU2000 パートの音色") return "S-MU2000 Part Voice";
-	if (t == L"S-MU2000 マスター") return "S-MU2000 Master";
 	std::string utf8;
 	for (const wchar_t *w = view.title(); w && *w; w++) {
 		const unsigned int c = unsigned(*w);

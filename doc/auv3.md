@@ -33,7 +33,8 @@ build/autest        .appex を通さずその場で試す道具
 |---|---|
 | `src/auv3/audio_unit.mm` | `AUAudioUnit` の中身。口・描き出し・状態の持ち帰り |
 | `src/auv3/factory.mm` | `.appex` の入口（`NSExtensionPrincipalClass`） |
-| `src/auv3/view_controller.mm` | 画面。VST3・AUv2 と同じ `plug_view` を貼る |
+| `src/auv3/view_controller.mm` | 画面の口。貼るのは `panel_nsview.mm` の 1 枚 |
+| `src/vst3/panel_nsview.mm` | パネルを貼った `NSView`。VST3・AUv2・AUv3 で共通 |
 | `src/auv3/main_app.mm` | 器のアプリ。音は出さない |
 | `src/auv3/autotest.mm` | その場で登録して口と音と画面を確かめる |
 | `src/ui/midi_split.h` | MIDI OUT のバイト列を 1 メッセージずつに切る |
@@ -92,14 +93,16 @@ libc++abi: terminating due to uncaught exception of type std::__1::system_error:
 サービスなので、ホストから見ると「画面を頼んだのに何も出ない」になる -- 種類を
 直しただけでは足りなかった理由がこれ。
 
-だから **画面（`SMU2000PanelViewV3`）が AU を掴む**。掴んでいれば ARC が AU を
+だから **画面（`SMU2000PanelView`）が AU を掴む**。掴んでいれば ARC が AU を
 手放すのはこの view の `dealloc` が終わった後になり、`plug_view` → engine の順が
-保証される。`build/autest --view` がこの順序をそのまま試す道具で、直す前は上の
-`mutex lock failed` で落ちていた（`画面  SMU2000ViewControllerV3  1400 x 360` が
-出るようになった）。
+保証される。`make_panel_view` の `owner` がその掴む先で、AUv3 は自分の
+`AUAudioUnit` を渡す。`build/autest --view` がこの順序をそのまま試す道具で、
+直す前は上の `mutex lock failed` で落ちていた
+（`画面  SMU2000ViewControllerV3  1400 x 360` が出るようになった）。
 
 AUv2 の画面（`au/editor_mac.mm`）は engine を AU のハンドル越しに取るので同じ手が
-使えない。AUv2 ではホストが AU のハンドルを持っているので、ここは手を入れていない。
+使えない。AUv2 ではホストが AU のハンドルを持っているので、`owner` には `nil` を
+渡す -- 同じ 1 枚を使いながら、掴む先だけが形ごとに違う。
 
 ## 気をつけるところ
 

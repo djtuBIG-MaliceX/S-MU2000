@@ -27,7 +27,10 @@ public:
 			m_playing[i] = m_saved_rcv[i] = -1;
 	}
 
-	const wchar_t *title() const override { return L"S-MU2000 一覧"; }
+	const wchar_t *title() const override
+	{
+		return get_lang() == lang::ja ? L"S-MU2000 一覧" : L"S-MU2000 List";
+	}
 	// 表示の大きさ（xgui::overview_zoom、既定 0.625）で描くので、窓もその分だけ小さく出す
 	int default_width() const override  { return 1200; }
 	int default_height() const override { return 700; }   // 64 パートぶん並ぶので高めに

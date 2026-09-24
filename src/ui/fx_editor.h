@@ -21,7 +21,10 @@ namespace ui {
 class fx_editor : public imgui_view
 {
 public:
-	const wchar_t *title() const override { return L"S-MU2000 エフェクト"; }
+	const wchar_t *title() const override
+	{
+		return get_lang() == lang::ja ? L"S-MU2000 エフェクト" : L"S-MU2000 Effects";
+	}
 	int default_width() const override  { return 1000; }
 	int default_height() const override { return 720; }
 	void draw(xg::model &m, const xg_snapshot &ram, bridge &br) override;

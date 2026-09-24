@@ -166,10 +166,10 @@ that was left behind. Most of what comes out of it is platform:
 Four things were real gaps and are ported now:
 
 * **Dropping a MIDI file on the window.** Windows catches it with
-  `WM_DROPFILES`; the macOS window registers `NSPasteboardTypeFileURL` and hands
-  the path to a new `ui::mac_app::file_dropped()`, which plays it exactly as
-  `--play` does. The hook is on the `mac_app` interface rather than in the app, so
-  a front end with nothing to do with a drop does not have to say anything.
+  `WM_DROPFILES`; the macOS window registers `NSPasteboardTypeFileURL` and
+  hands the path to `ui::app::file_dropped()`, which plays it exactly as
+  `--play` does. The hook is virtual with a playing default, so a front end
+  with nothing to do with a drop does not have to say anything.
 * **Ports 3 and 4 of a MIDI file.** `ui::player` already had `ports_used()` and
   `fold_extra_ports()`; the macOS GUI was not using either. The card menu now
   carries the same two items as `gui.cpp` (`口 3・4 を A・B に重ねて鳴らす` /
@@ -198,9 +198,9 @@ last merge introduced:
   answered nothing for `kAudioUnitProperty_TailTime`, so a host stopped at the
   last note and clipped the tail. It answers 4.0 seconds now.
 
-The AU **view** cannot diverge from the VST3 one: `editor_mac.mm` builds a
-`vst3::plug_view`, and `src/vst3/view.cpp` and `view_mac.mm` are the same files
-in both bundles (see `AU_SRCS` in the Makefile). What the AU has of its own is
+The AU **view** cannot diverge from the VST3 one: `src/vst3/panel_nsview.mm`
+builds a `vst3::plug_view`, and it, `src/vst3/view.cpp` and `view_mac.mm` are the
+same files in both bundles (see `AU_SRCS` in the Makefile). What the AU has of its own is
 `au/plugin.cpp` and `au/probe.cpp`, and those were compared against
 `vst3/plugin.cpp` and `vst3/probe.cpp` instead.
 
@@ -360,7 +360,7 @@ Shared logic stays in one place; only the OS edge is split.
 | MIDI output | `src/ui/midi_out.cpp` (WinMM) | `src/ui/midi_out_mac.cpp` (CoreMIDI) |
 | GDI subset | `compat/gdi.h` → `<windows.h>` | `compat/gdi.h` + `compat/gdi_mac.cpp` (CoreGraphics) |
 | Panel / editor / effects drawing | `src/ui/{panel,editor,effects,layout,svg}.cpp` — **the same files** | ditto |
-| Window, events, menus | `src/gui.cpp` (Win32) | `src/gui_mac.cpp` + `src/ui/window_mac.mm` (AppKit) |
+| Window, events, menus | `src/ui/window_win.h/.cpp` + `src/gui.cpp` (Win32) | `src/ui/window_mac.mm` + `src/ui/app_mac.h/.cpp` + `src/gui_mac.cpp` (AppKit) |
 | Real-time MIDI file playback | `src/ui/player.cpp` (Win32 timers) | `src/ui/player.cpp` (`std::chrono`) |
 | Settings and file lookup | `src/compat/paths.h` (`%LOCALAPPDATA%`) | `src/compat/paths.h` (`~/Library/Application Support`) |
 | VST3 | `src/vst3/*` (`x86_64-win`) | `src/vst3/view_mac.mm` + `Contents/MacOS` |
@@ -495,25 +495,43 @@ system UI font. Glyph metrics differ slightly from the Windows build, which
 means layout tuned around text via `panel.txt` may want a nudge. Everything else
 — colours, geometry, line weight — is identical.
 
-### Why Cocoa lives in a separate file
+### The macOS window, and how it talks to the app
 
-Cocoa's headers define `BOOL` and Quickdraw's (pulled in through AppKit) define
-`Polygon`. `compat/gdi.h` has to declare both to keep `panel.cpp` unchanged, so
-the two cannot be in one translation unit. `src/ui/window_mac.mm` is therefore
-the only Objective-C++ file in the project and never includes `gdi.h`; it talks
-to the app through the plain-C++ `ui::mac_app` interface in
-`src/ui/window_mac.h`. That split is also just tidier: one file knows about
-windows, menus and file panels, and knows nothing about a synthesizer.
+The three platforms have the same file layout — a window-system file, an app
+class, and a main — and the macOS column is `src/ui/window_mac.mm` (the only
+Objective-C++ file in the project), `src/ui/app_mac.h/.cpp` (`gui_app : public
+ui::app`), and `src/gui_mac.cpp`. The app class carries the same per-platform
+hooks as `win_app` and `linux_app` (dialogs, audio say-lines, window opening);
+everything the events *mean* — what a press does, what a key opens, what a
+drop plays — lives once in `ui::app`, and all three pumps call those verbs
+directly (`mouse_down`, `key`, `context_menu`, `paint_main`, …).
+
+There is one piece of machinery this platform needs and the others do not.
+Cocoa defines `BOOL` and Quickdraw (pulled in through AppKit) typedefs the
+name `Polygon` — the two names `compat/gdi.h` exists to declare. The shim
+resolves it itself: `BOOL` is spelled `bool`, agreeing with `objc/objc.h`'s
+typedef, and its own `Polygon` is renamed out of Quickdraw's way:
+
+```
+// So we don't collide with the old Quickdraw Polygon
+#define Polygon GdiPolygon
+```
+
+The drawing code keeps writing `Polygon` — the macro rewrites the token —
+and `window_mac.mm` imports Cocoa before the shim's headers, the same order
+any Cocoa file uses, so one translation unit holds both.
 
 The window is an `NSWindow` with a flipped `NSView`. Painting goes straight into
-the view's `CGContext` wrapped by `smu_gdi_wrap_view_context()`; AppKit already
+the view's `CGContext` wrapped by `smu_gdi_wrap_view_context()` and handed to
+`ui::app::paint_main()`; AppKit already
 double-buffers, so `gui.cpp`'s memory DC has no counterpart. A 33 ms timer drives
 repaints, in common run loop modes so it keeps ticking while a menu is open.
 
-The port picker is an `NSMenu` built from a plain description the app returns,
+The port picker is an `NSMenu` built from `ui::app::context_menu()` — the same
+description the Windows and Linux popups render —
 and choosing a MIDI file is an `NSOpenPanel`; the app asks for the latter by
 name (`ui::open_midi_file_panel()`), so it never needs AppKit itself. The same
-seam carries the one confirmation there is — `ui::confirm_modal()` — which is
+window services carry the one confirmation there is — `ui::confirm_modal()` — which is
 used before the machine's settings are thrown away.
 
 ### Ports, settings and factory reset
@@ -583,11 +601,10 @@ window itself moves behind `src/vst3/plug_window.h` — `view_win.cpp` for the
 child `HWND`, `view_mac.mm` for an `NSView` added to whatever view the host hands
 over in `attached()`.
 
-`view.h` mentions no window system at all and holds the panel behind a pimpl, so
-`view_mac.mm` can include it next to Cocoa. That is the same `BOOL`/`Polygon`
-collision that forced `window_mac.mm` apart from `compat/gdi.h`, and it is also
-why `view.cpp` can include `gdi.h` and CoreGraphics together: it is Cocoa, not
-CoreGraphics, that clashes.
+`view.h` mentions no window system at all and holds the panel behind a pimpl,
+so `view_mac.mm` can include it next to Cocoa; the shim's `BOOL`/`Polygon`
+handling (see the window section) is what makes the two coexist in one
+translation unit.
 
 The subview is flipped, so the context AppKit hands to `drawRect` is already
 top-left with y down and goes straight into `smu_gdi_wrap_view_context()`. No
@@ -692,15 +709,25 @@ which answers with a bundle URL and the name of a class inside implementing
 `AUCocoaUIBase`; the host then calls that class's
 `uiViewForAudioUnit:withSize:`. `src/au/editor.h` is the seam between the two
 halves — plugin.cpp is plain C++ and answers the property, `editor_mac.mm` is
-Objective-C++ and holds the class. That is the same split, for the same reason,
-as `src/ui/window_mac.mm`: Cocoa's `BOOL` and Quickdraw's `Polygon` cannot share
-a translation unit with `compat/gdi.h`.
+Objective-C++ and holds the class. That is the same two-half shape as
+`src/ui/window_mac.mm`.
 
-The view built there is an `SMUAUEditorView` holding a
-`smu2000::vst3::plug_view` — the panel the VST3 build already shows, not a second
-one. What is shared is the panel, not the host interface around it: the AU needs
-an `NSView` and the VST3 wants an `IPlugView`, so each format keeps its own
-wrapper and both draw the same thing.
+The view itself is not built here. `editor_mac.mm` asks
+`smu2000::vst3::make_panel_view` (`src/vst3/panel_nsview.mm`) for it, and what
+comes back is an `SMU2000PanelView` holding a `smu2000::vst3::plug_view` — the
+panel the VST3 build already shows, not a second one. The AUv3 asks the same
+function for the same view (`src/auv3/view_controller.mm`), so the three formats
+have one editor between them rather than three that look alike. What is not
+shared is the host interface around it: the AU needs an `NSView` and the VST3
+wants an `IPlugView`, so each format keeps its own way of being asked and all
+draw the same thing.
+
+`make_panel_view`'s `owner` argument is the one thing that differs. The view
+holds a strong reference to it for as long as it lives, because a host may let go
+of the plug-in before the view it was handed (`auval` does) and the panel's
+teardown reaches back into the engine. The AUv3 passes its `AUAudioUnit`; the
+AUv2's engine is owned by an instance the host tears down after the view, so it
+passes `nil`.
 
 One detail is worth knowing before touching this. The `AudioUnit` a host passes
 to the view factory is **not** the pointer the plug-in was given as `self` — the
@@ -885,7 +912,7 @@ Run again from a clean build on arm64, with the ROMs in `roms/`:
 | `--shot` regression | face `#c4bdaa` and the art-only `#404040` still where they were |
 | `make probe` | factory found, 1 class, 4194 parameters |
 | `make au-probe` | opens, 2 parameters, latency 0 |
-| `make check-au` | `OK: エディタ SMUAUEditorView が画面を作った（下位ビュー 1 枚）`, **0 problems** |
+| `make check-au` | `OK: エディタ SMU2000PanelView が画面を作った（下位ビュー 1 枚）`, **0 problems** |
 | `auval -v aumu SMU2 Trbh` | `VERIFYING CUSTOM UI / Cocoa Views Available: 1` … **AU VALIDATION SUCCEEDED** |
 
 ## Plug-ins

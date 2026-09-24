@@ -23,7 +23,10 @@
 // side presents the swap chain with no wait, and so does this: the gui timer
 // decides the pace.
 
-#include "pc_window_mac.h"
+#include "ui/pc_window.h"
+
+#include "ui/lang.h"
+#include "ui/texts.h"
 
 #import <Cocoa/Cocoa.h>
 #import <Metal/Metal.h>
@@ -40,24 +43,36 @@
 
 namespace ui {
 
-using drop_fn = void (*)(const std::string &);
-
-static drop_fn &drop_handler()
-{
-	static drop_fn fn = nullptr;
-	return fn;
-}
-
-void pc_window::set_drop_handler(drop_fn fn)
-{
-	drop_handler() = fn;
-}
-
 void pc_window_drop_file(const std::string &path)
 {
-	if (drop_handler())
-		drop_handler()(path);
+	if (pc_window::s_drop)
+		pc_window::s_drop(path);
 }
+
+namespace lang_detail {
+
+// The OS default locale for ui::locale_default_lang (ui/lang.h): reporting
+// the tag is all this backend does (CoreFoundation comes with Cocoa above).
+// Finder-launched apps have no LANG, so Japanese Macs would otherwise come
+// up English.
+namespace {
+std::string query_os_locale()
+{
+	CFLocaleRef loc = CFLocaleCopyCurrent();
+	if (!loc)
+		return {};
+	const CFTypeRef v = CFLocaleGetValue(loc, kCFLocaleLanguageCode);
+	char tag[16] = {};
+	const bool known = v && CFGetTypeID(v) == CFStringGetTypeID() &&
+	    CFStringGetCString((CFStringRef)v, tag, sizeof(tag),
+	                       kCFStringEncodingUTF8);
+	CFRelease(loc);
+	return known ? tag : "";
+}
+const os_locale_registrar os_locale_reg(query_os_locale);
+} // namespace
+
+} // namespace lang_detail
 
 } // namespace ui
 
@@ -598,7 +613,7 @@ bool pc_window::create(std::string &err)
 	if (!h->dev) {
 		delete h;
 		m_ns = nullptr;
-		err = "Metal を使えない";   // user-facing, matches the rest of gui's messages
+		err = UI_TEXT(dlg_metal_fail, "Cannot use Metal");   // user-facing, matches the rest of gui's messages
 		return false;
 	}
 	h->queue = [h->dev newCommandQueue];

@@ -6,8 +6,7 @@
 // only the window.
 //
 // Extracted from view.cpp when the macOS port arrived, so that view.cpp could
-// stop including windows.h -- view_mac.mm has to include view.h next to Cocoa,
-// and the two cannot see the same BOOL.
+// stop including windows.h -- view_mac.mm includes view.h next to Cocoa.
 
 #include "plug_window.h"
 #include "view.h"
@@ -102,13 +101,7 @@ public:
 	void pc_frame(::xg::model &m, const ::ui::xg_snapshot &ram, ::ui::bridge &br) override;
 	void open_pc_window(int kind) override
 	{
-		switch (kind) {
-		case PC_EDITOR: open_pc(m_editor); break;
-		case PC_FX:     open_pc(m_fx);     break;
-		case PC_SHAPES: open_pc(m_shapes); break;
-		case PC_MASTER: open_pc(m_master); break;
-		default:        open_pc(m_list);   break;
-		}
+		open_pc(*pc_window_for_kind(kind, m_list, m_editor, m_fx, m_shapes, m_master));
 	}
 
 private:
@@ -183,20 +176,24 @@ std::string ask_card_path(HWND h, bool create)
 	wchar_t file[MAX_PATH] = {};
 	if (create)
 		wcscpy(file, L"smartmedia.img");
+	const std::wstring title = ui::to_wide(create
+	    ? UI_TEXT(dlg_card_save, "Where to save the new SmartMedia image")
+	    : UI_TEXT(dlg_card_open, "Insert a SmartMedia image"));
+	const std::wstring filter = ui::dlg_filter(UI_TEXT(dlg_smartmedia_desc, "SmartMedia image"), "*.img",
+	                                           UI_TEXT(dlg_all_files, "All files"), "*.*");
 	OPENFILENAMEW o{};
 	o.lStructSize = sizeof(o);
 	o.hwndOwner = h;
-	o.lpstrFilter = L"SmartMedia の中身 (*.img)\0*.img\0すべて (*.*)\0*.*\0";
+	o.lpstrFilter = filter.c_str();
 	o.lpstrFile = file;
 	o.nMaxFile = MAX_PATH;
 	o.lpstrDefExt = L"img";
+	o.lpstrTitle = title.c_str();
 	if (create) {
-		o.lpstrTitle = L"新しい SmartMedia の保存先";
 		o.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
 		if (!GetSaveFileNameW(&o))
 			return {};
 	} else {
-		o.lpstrTitle = L"差す SmartMedia";
 		o.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
 		if (!GetOpenFileNameW(&o))
 			return {};
@@ -258,7 +255,7 @@ void win_window::open_pc(ui::pc_window &w)
 {
 	std::string err;
 	if (!w.show(this_module(), err))
-		alert(err.empty() ? std::string("窓を出せない") : err);
+		alert(err.empty() ? UI_TEXT(dlg_window_fail, "Cannot open the window") : err);
 }
 
 // パネルを描き直すのと同じ周期で呼ばれる。見えていない窓は何もしない

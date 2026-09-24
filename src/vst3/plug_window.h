@@ -7,10 +7,6 @@
 // its mouse and key events. Everything else about the view -- the VST3
 // interface itself, the panel, the input handling -- is shared, so only the
 // window part is per platform.
-//
-// Same constraint as the GUI: this header is included by view_mac.mm, so it
-// must not mention a single Windows type, and must not pull in compat/gdi.h
-// (Cocoa's headers define BOOL and Quickdraw's define Polygon).
 
 #ifndef S_MU2000_VST3_PLUG_WINDOW_H
 #define S_MU2000_VST3_PLUG_WINDOW_H
@@ -21,7 +17,7 @@
 
 // PC で触る窓（一覧・エディタ）に渡すもの。型の中身はここでは要らない
 namespace xg { class model; }
-namespace ui { class bridge; struct xg_snapshot; }
+namespace ui { class bridge; struct xg_snapshot; class pc_window; }
 
 namespace smu2000 {
 namespace vst3 {
@@ -72,6 +68,22 @@ enum pc_kind {
 	PC_MASTER,        // マスター
 };
 
+
+// Which PC window a kind (pc_kind, same values as the toolbar bar_window
+// ids) names. One place so the two platform windows cannot map one button
+// to different windows. Defaults to the overview, as both did before.
+inline ui::pc_window *pc_window_for_kind(int kind, ui::pc_window &list,
+                                         ui::pc_window &editor, ui::pc_window &fx,
+                                         ui::pc_window &shapes, ui::pc_window &master)
+{
+	switch (kind) {
+	case PC_EDITOR: return &editor;
+	case PC_FX:     return &fx;
+	case PC_SHAPES: return &shapes;
+	case PC_MASTER: return &master;
+	default:        return &list;
+	}
+}
 
 // A real window on the host's platform, holding the panel
 class plug_window

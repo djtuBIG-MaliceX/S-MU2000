@@ -36,12 +36,18 @@
 
 // ---- Base types
 
+// So we don't collide with the old Quickdraw Polygon
+#define Polygon GdiPolygon
+
 using BYTE  = uint8_t;
 using WORD  = uint16_t;
 using DWORD = uint32_t;
 using UINT  = uint32_t;
 using INT   = int32_t;
-using BOOL  = int;
+// bool, agreeing with objc/objc.h's BOOL, so this header can share a
+// translation unit with Cocoa. Nothing here depends on int-ness: the
+// functions return TRUE/FALSE and callers ignore the result.
+using BOOL  = bool;
 using UINT_PTR = uintptr_t;
 
 // LONG is `long`, as it is in the Windows headers, rather than a fixed

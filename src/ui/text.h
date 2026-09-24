@@ -43,6 +43,29 @@ inline std::string to_utf8(const wchar_t *w)
 	return out;
 }
 
+// A file dialog filter from translated descriptions: "desc (pat)" NUL
+// "pat" NUL, ending double NUL. Patterns (*.img) stay untranslated;
+// to_wide counts bytes explicitly, so the embedded NULs survive.
+inline std::wstring dlg_filter(const char *desc1, const char *pat1,
+                               const char *desc2 = nullptr, const char *pat2 = nullptr)
+{
+	std::string n;
+	const auto one = [&](const char *d, const char *p) {
+		n += d;
+		n += " (";
+		n += p;
+		n += ')';
+		n += '\0';
+		n += p;
+		n += '\0';
+	};
+	one(desc1, pat1);
+	if (desc2 && pat2)
+		one(desc2, pat2);
+	n += '\0';
+	return to_wide(n);
+}
+
 } // namespace ui
 
 #endif // S_MU2000_UI_TEXT_H

@@ -463,11 +463,24 @@ inline int vib_rate(int base, int cc)
 	return v < 0 ? 0 : (v > 63 ? 63 : v);
 }
 
+// **足さずに、すぐ上の `vib_rate` と同じ「大小で選ぶ」形**（6.221）。
+// 音色自身が深さを持つもの（ChiffLead は 6）で、つまみを 64 から動かすと
+// 実機は音色自身のぶんを**捨てて**つまみの表の値にする。足していたので
+// 6 段ぶん深すぎた。実機で測った値（ChiffLead・自身 6）:
+//
+//   つまみ 0-63 → 00（表が 0。小さいほう）   64 → 06（音色自身）
+//   65 → 1D、70 → 56、80 → 96、96 → A0、127 → AD（どれも表の値。大きいほう）
+//
+// 表の 0-64 は 0 なので、下側は「つまみが勝って 0」になる。
+// 自身が 0 の音色（GrandPno）はどちらの式でも同じ値になるため、
+// **自身が 0 でない音色でしか出ない**差だった
 inline int vib_depth(int base, int cc)
 {
 	if (cc < 0 || cc == 64)
 		return base;
-	const int v = base + int(VIB_DEPTH_TAB[cc > 127 ? 127 : cc]);
+	const int c = cc > 127 ? 127 : cc;
+	const int t = int(VIB_DEPTH_TAB[c]);
+	const int v = c < 64 ? (t < base ? t : base) : (t > base ? t : base);
 	return v < 0 ? 0 : (v > 255 ? 255 : v);
 }
 

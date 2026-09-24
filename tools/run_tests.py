@@ -146,6 +146,25 @@ class Buffered(Report):
         self.lines.append(line)
 
 
+def step_texts(rep):
+    """ROM 不要。画面の言葉（src/ui/texts*.h）に抜けや書式の食い違いが無いか。
+    tools/check_texts.py の中身そのまま。訳の %s が %d になっていると落ちる"""
+    script = ROOT / "tools" / "check_texts.py"
+    if not script.exists():
+        rep.add("画面の言葉", False, "tools/check_texts.py が無い")
+        return
+    got = subprocess.run([sys.executable, str(script)], capture_output=True,
+                         text=True, encoding="utf-8")
+    last = [l for l in (got.stdout or "").splitlines() if l.strip()]
+    if got.returncode == 0:
+        rep.add("画面の言葉", True, last[-1] if last else "")
+        return
+    rep.add("画面の言葉", False, "食い違いがある")
+    for line in last:
+        if line.startswith("FAIL"):
+            print("    %s" % line)
+
+
 def step_verify(rep, update):
     """ROM 不要。swp30 を素で叩いて、レジスタと乱数が動いているか"""
     exe = tool("verify")
@@ -332,6 +351,15 @@ SHAPE_LOW = {
     # 同じくドラムの雑音。**1 サンプルずらすだけで残差 0.1%**なのに
     # 相関は 42% まで落ちる（打鍵の ±1 は利用者が妥協してよいと決めた範囲）
     "drumrcv": 0.35,
+    # 式だけの道が既定になってから（6.223）。こちらもドラムの雑音で、
+    # **-1 サンプルずらすと 100.0%**（音量差 0.00dB・左右も一致）。
+    # 5・6・7 秒目が 28.8/28.2/49.6% → 100.0/100.0/99.6%
+    "drumnrpn": 0.25,
+    # **写し取りが足りないまま鳴らす**のが狙いの試験（6.219）。2 つ目の要素は
+    # 記録が無く式だけで組むので、重なった 2 枚のうなりの位相が合わず、
+    # 最後の 2 秒だけ相関が負になる（測値 -20%）。**大きさは合っている**
+    #（rms 1556/1433・1146/1119 で 1dB 以内。`native の口` が見ている）
+    "calshort": -0.30,
 }
 
 SHAPE_MIN = {
@@ -373,7 +401,37 @@ SHAPE_MIN = {
     # ばらつき（6.90）が相関に出やすい。**音量のほうは `native の口` が見る**。
     # 音 1 つずつは tools/native/notelevel.py で見られる
     "keylevel": 0.95,
+    # 写し取りが足りない道（6.219）。式だけで組むので形は緩く見る。
+    # **ここが落ちる（＝鳴らせない）ことのほうが大事**な試験
+    "calshort": 0.55,
 }
+
+
+def step_cal_path(rep, roms, cases):
+    """**写し取りの道**（`--cal`）がまだ鳴るか（6.223 で既定から外れた）。
+    既定が式だけの道になったので、こちらは選んだときだけ通る。無試験に
+    しないための見張りで、音量だけを見る（波形は 6.220 の共存のぶんずれる）"""
+    import math
+    env = {"SMU2000_NO_VOICECACHE": "1", "SMU2000_CAL": "1"}
+    bad, notes = [], []
+    todo = [(n, cases[n]) for n in ("piano", "dense") if n in cases
+            and (BASE / ("%s.json" % n)).exists()]
+    done = pmap(lambda kv: render(roms, kv[0] + "_cal", kv[1][0], kv[1][1],
+                                  extra=["--native-engine"], env=env), todo)
+    for (name, _), (fp, _) in zip(todo, done):
+        ref = json.loads((BASE / ("%s.json" % name)).read_text(encoding="utf-8"))
+        if fp is None:
+            bad.append("%s: 鳴らせなかった" % name)
+            continue
+        a, b = max(ref["rms"]), max(fp["rms"])
+        if a <= 1.0 or b <= 1.0:
+            bad.append("%s: 音が無い" % name)
+            continue
+        d = 20.0 * math.log10(b / a)
+        notes.append("%s %+.2f dB" % (name, d))
+        if abs(d) > 1.5:
+            bad.append("%s %+.2f dB" % (name, d))
+    rep.add("写し取りの道", not bad, "、".join(bad or notes) + ("（下限を割った）" if bad else ""))
 
 
 def step_native_engine(rep, roms, cases):
@@ -833,6 +891,10 @@ def main():
     print("== 1. verify（ROM 不要）")
     step_verify(rep, a.update)
 
+    print()
+    print("== 1b. 画面の言葉（ROM 不要）")
+    step_texts(rep)
+
     roms = find_roms(a.roms)
     if roms is None:
         print()
@@ -880,6 +942,7 @@ def main():
              lambda r: (step_panel(r, roms), step_meter(r, roms), step_screen(r, roms),
                         step_dial(r, roms, cases))),
             ("== 9. USB の口（プラグインの既定）", lambda r: step_usb(r, roms, cases)),
+            ("== 9b. 写し取りの道（--cal）", lambda r: step_cal_path(r, roms, cases)),
             ("== 10. 2 回目の音（写し取りが済んだ状態）", lambda r: step_warm(r, roms, cases)),
         ]
     subs = [Buffered() for _ in steps]

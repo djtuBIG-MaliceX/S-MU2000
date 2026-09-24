@@ -5,12 +5,12 @@
 cmake_minimum_required(VERSION 3.25)
 project(SMU2000_VST2 VERSION 0.0.1 LANGUAGES C CXX)
 
-if(NOT WIN32 OR NOT (MSVC OR MINGW))
-  message(FATAL_ERROR
-    "The SMU2000_VST2 CMake build targets Windows with either the Visual Studio generator "
-    "(e.g. 'Visual Studio 18 2026', -A Win32|x64) or the MinGW-w64 (MSYS2 MINGW64, x86_64) "
-    "GCC/Clang toolchain via the 'Ninja' generator. Use the legacy Makefile (MSYS2 g++) "
-    "for the native emulator tools on other platforms/toolchains.")
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+# Non-literal printf formats are bugs (translated strings must go through "%s").
+add_compile_options(-Wformat-security)
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release)
 endif()
 
 if(MSVC)
@@ -103,6 +103,35 @@ if(MINGW)
   set(SMU2000_ARCH "${SMU2000_ARCH}-mingw")
   if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     string(APPEND SMU2000_ARCH "-clang")
+  endif()
+
+  # gui (Phase 4: SDL3 window + PC editor windows, doc/porting-linux-gui.md)
+  if(CAIRO_FOUND AND SDL3_FOUND)
+    add_executable(gui src/gui_linux.cpp
+      src/compat/gdi_linux.cpp
+      src/ui/panel.cpp src/ui/layout.cpp src/ui/svg.cpp
+      src/ui/editor.cpp src/ui/effects.cpp src/ui/png.cpp
+      src/ui/player.cpp src/xg/model.cpp
+      src/ui/xg_ui.cpp src/ui/fx_help.cpp src/ui/fx_icons.cpp
+      src/ui/sdl_popup.cpp
+      src/ui/window_sdl.cpp
+      src/ui/app_linux.cpp
+      src/ui/pc_window_linux.cpp
+      src/ui/pc_editor.cpp src/ui/overview.cpp src/ui/fx_editor.cpp
+      src/ui/part_shapes.cpp src/ui/master_editor.cpp
+      ${IMGUI_CORE}
+      third_party/imgui/backends/imgui_impl_sdl3.cpp
+      third_party/imgui/backends/imgui_impl_sdlrenderer3.cpp
+      src/ui/audio_out_linux.cpp
+      src/ui/audio_in_linux.cpp
+      src/ui/midi_in_linux.cpp
+      src/ui/midi_out_linux.cpp)
+    target_include_directories(gui PRIVATE src src/compat
+      third_party/imgui ${ALSA_INCLUDE_DIRS} ${CAIRO_INCLUDE_DIRS} ${SDL3_INCLUDE_DIRS})
+    target_link_libraries(gui PRIVATE smu2000_core
+      ${ALSA_LIBRARIES} ${CAIRO_LIBRARIES} ${SDL3_LIBRARIES} pthread dl)
+  else()
+    message(STATUS "Cairo/SDL3 not found: skipping gui (needs libcairo2-dev libsdl3-dev)")
   endif()
 endif()
 set(SMU2000_OUTPUT_ROOT "${CMAKE_SOURCE_DIR}/build-cmake" CACHE PATH

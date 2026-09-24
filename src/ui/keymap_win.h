@@ -13,16 +13,22 @@
 
 #include <windows.h>
 
+#include "menu.h"      // KEY_F2..F5: the shared key space above ASCII
+
 namespace ui {
 
-// A virtual-key code translated to the character the shared keymap wants:
-// letters lowercased, punctuation from its OEM code, 0 when it is no panel
-// key. Stays within ASCII, so button_for_char() takes it as-is.
-inline char key_char_of_vk(int vk)
+// A virtual-key code translated to the shared key space (keymap.h): the
+// panel characters, the four F-keys the app acts on, or 0 for no panel key.
+// Letters lowercased, punctuation from its OEM code.
+inline int key_char_of_vk(int vk)
 {
 	if (vk >= 'A' && vk <= 'Z')
 		return char(vk - 'A' + 'a');
 	switch (vk) {
+	case VK_F2: return KEY_F2;
+	case VK_F3: return KEY_F3;
+	case VK_F4: return KEY_F4;
+	case VK_F5: return KEY_F5;
 	case VK_OEM_6: return ']';
 	case VK_OEM_4: return '[';
 	case VK_OEM_PLUS: return '=';

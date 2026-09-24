@@ -8,6 +8,7 @@
 
 #include "fx_help.h"
 
+#include "ui/lang.h"
 #include "xg_ui.h"
 
 #include <cstring>
@@ -333,7 +334,7 @@ const param_text PARAMS[] = {
 
 const char *fx_type_help(int msb, int lsb)
 {
-	const bool en = help_lang() == 1;
+	const bool en = ui::show_english();
 	for (const type_text &t : TYPES)
 		if (t.msb == msb && t.lsb == lsb)
 			return en ? t.en : t.ja;
@@ -345,7 +346,7 @@ const char *fx_type_help(int msb, int lsb)
 
 const char *fx_param_help(const char *label)
 {
-	const bool en = help_lang() == 1;
+	const bool en = ui::show_english();
 	for (const param_text &p : PARAMS)
 		if (!std::strcmp(p.label, label))
 			return en ? p.en : p.ja;

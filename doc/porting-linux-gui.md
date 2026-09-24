@@ -1,5 +1,16 @@
 # Linux GUI porting plan (SDL3 + Cairo)
 
+> **Refactored onto the shared base (2026-09-21).** The contributed monolith
+> was reworked into the same three-file layout the Windows and macOS front
+> ends use — `gui_linux.cpp` (main only), `ui/app_linux.h/.cpp`
+> (`linux_app : public ui::app`), `ui/window_sdl.cpp` (the SDL3 pump, usable
+> by any front end answering `ui::app`) — and `--audio-in` joined the shared
+> parser (`ui/options.h`). Menus and status are Japanese like the other
+> platforms; the contributed English texts (`ui/texts.h`) and the ImGui help
+> language default (`ui::xgui::set_help_lang`) are available but no longer
+> installed at startup. See [Architecture](#architecture) and
+> [English on Linux](#english-on-linux).
+>
 > **Not maintained by the repository owner.** The Linux GUI and plug-ins were contributed by
 > spessasus in PR #33. The maintainer does not use Linux and **cannot test, support, or take
 > responsibility for them**. Use at your own risk; reports and fixes from Linux users are welcome.
@@ -55,16 +66,28 @@ loop and C++ ABI to reconcile with `-fPIC` plug-ins), OpenGL renderers
 
 ## Architecture
 
-Unlike macOS there is no language split to work around (no Objective-C++),
-so no `window_mac.h`-style seam file is needed: `gui_linux.cpp` uses SDL3
-directly. Two small isolations, both for testability:
+Since the 2026-09-21 refactor the Linux front end has the same shape as the
+Windows and macOS ones — a window-system file, an app class, and a main —
+with everything the events mean decided once in `ui::app`:
 
-* `src/ui/menu.h` (new, shared): move `menu_item`/`menu_group` out of
-  `src/ui/window_mac.h` (which keeps including it — macOS behavior
-  unchanged). The Linux popup renderer and any future port consume the same
-  description the mac menus already build.
-* Dialog/message-box calls stay in named functions (`ask_*`, like the mac
-  `open_*_panel` seam) so headless tests can stub them.
+| role | Windows | macOS | Linux |
+|---|---|---|---|
+| main | `src/gui.cpp` | `src/gui_mac.cpp` | `src/gui_linux.cpp` |
+| app class | `src/ui/app_win.h/.cpp` (`win_app`) | `src/ui/app_mac.h/.cpp` (`gui_app`) | `src/ui/app_linux.h/.cpp` (`linux_app`) |
+| window system | `src/ui/window_win.h/.cpp` (Win32) | `src/ui/window_mac.mm` (AppKit) | `src/ui/window_sdl.h/.cpp` (SDL3 + Cairo) |
+
+The pump (`ui::window_sdl.cpp`) drives the shared event verbs directly
+(`mouse_down` → `ui::mouse_out`, `key` in the shared key space of
+`ui/menu.h`, `context_menu`, `resized`, `file_dropped`, …), exactly like
+`wnd_proc` and `window_mac.mm`. The SDL window state sits behind `run_window
+(ui::app &, …)`, so a future front end on another platform can reuse the pump
+by answering `ui::app` — it is not Linux's.
+
+Linux-specifics that remain: `linux_app` keeps the SDL handles the pump
+feeds, the `sdl_popup` menu renderer (`ui/menu.h`'s `menu_group` description,
+shared with the other platforms' menus), SDL3 file dialogs and message boxes
+in named functions (so headless tests can stub them), and `--selftest` /
+`--seconds` as pre-scan Linux-only flags.
 
 ## Phases
 
@@ -252,14 +275,19 @@ sandbox (`blocktime` on `dense`: 14% average, 0 overruns — the synth is
 fine, the virtual ALSA device is not).
 
 ### English on Linux
-Everything the Linux GUI can show is English. Shared sources keep their
-Japanese defaults (what Windows/macOS show), and the Linux front end
-installs `ui::english_texts()` first thing in `main()` (`src/ui/texts.h`,
-header-only so no build file changes anywhere). Covered: bottom tabs, hint
-line, editor/effects pages, layout errors, engine boot log, and all of
-`gui_linux.cpp` (usage, `--list`, status line, errors). Still Japanese (later
-phases): the ImGui PC views (no Linux window yet) and `tools/run_tests.py`
-(the shared test harness, not the GUI).
+
+As contributed, everything the Linux GUI showed was English: the front end
+installed `ui::english_texts()` at startup (`src/ui/texts.h`, header-only)
+and defaulted the ImGui help language with `ui::xgui::set_help_lang(1)`.
+
+Since the refactor onto the shared base, menus and status are **Japanese**
+like Windows and macOS — the shared base has one set of texts, and a
+per-platform override would be a new mechanism, not a port. Both English
+hooks survive and are one call each if wanted: `ui::english_texts()` from
+`ui/texts.h` (bottom tabs, hint line, editor/effects pages, layout errors,
+boot log) and `ui::xgui::set_help_lang(1)` (ImGui view help); `lang=` in
+`editor.ini` still wins for the views. Making the shared texts translatable
+per platform is future work (`ui/texts.h` is the seam for it).
 
 ### Phase 5 — plug-in editor views (DEFERRED at the author's request)
 Was attempted and reverted: SDL-embed via X11 child + wrapped window painted

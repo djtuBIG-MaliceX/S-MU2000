@@ -38,6 +38,9 @@ inline bool consume_engine_option(const char *arg, engine_options &o)
 	if (!std::strcmp(arg, "--native-fx")) { o.native_fx = 1; return true; }
 	if (!std::strcmp(arg, "--native-fx-full")) { o.native_fx = 2; return true; }
 	if (!std::strcmp(arg, "--native-engine")) { o.native_engine = 1; return true; }
+	// **写し取りの道に戻す**（既定は式だけ。doc/native-engine.md の 6.223）
+	if (!std::strcmp(arg, "--cal")) { xg::native_driver::set_nocal(false); return true; }
+	if (!std::strcmp(arg, "--nocal")) { xg::native_driver::set_nocal(true); return true; }
 	if (!std::strcmp(arg, "--voicecache")) { o.voicecache = 1; return true; }
 	if (!std::strcmp(arg, "--no-voicecache")) { o.voicecache = 0; return true; }
 	return false;
@@ -56,8 +59,9 @@ inline void apply_engine_options(mu2000 &mu, const engine_options &o)
 // applying stays per tool.
 struct output_options {
 	bool        exclusive = false;
-	const char *audio_dev = nullptr;  // substring match, null = remembered/default
-	bool        factory = false;      // drop stored settings, boot clean
+	const char *audio_dev = nullptr;     // substring match, null = remembered/default
+	const char *audio_in_dev = nullptr;  // exact name, null = remembered/--audio-in off
+	bool        factory = false;         // drop stored settings, boot clean
 };
 
 // Takes argv[i], advancing i past a taken value. True when consumed.
@@ -67,6 +71,8 @@ inline bool consume_output_option(char **argv, int argc, int &i, output_options 
 	if (!std::strcmp(arg, "--exclusive")) { o.exclusive = true; return true; }
 	if (!std::strcmp(arg, "--factory")) { o.factory = true; return true; }
 	if (!std::strcmp(arg, "--audio") && i + 1 < argc) { o.audio_dev = argv[++i]; return true; }
+	// live has no A/D INPUT, so it takes the flag and ignores it
+	if (!std::strcmp(arg, "--audio-in") && i + 1 < argc) { o.audio_in_dev = argv[++i]; return true; }
 	return false;
 }
 

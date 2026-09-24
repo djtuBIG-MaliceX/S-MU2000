@@ -567,6 +567,7 @@ void engine::boot()
 	// **写し取りを 1 音もしない道**（段 4）。式だけでレジスタを組む。
 	// 試験はこの道で回していて、押鍵のレジスタは 48/49 で一致する
 	int nocal = 0;
+	int cal = 0;          // cal=1 で写し取りの道に戻す（既定は式だけ。6.223）
 	// 写し取りをファイルに残す（voicecache.h）。経路の印が付いているので
 	// 別の曲の写しが混ざっても安全。plugin.ini の voicecache=0 で切る
 	int voicecache = 0;
@@ -591,6 +592,9 @@ void engine::boot()
 					native_engine = std::atoi(line + 14);
 				if (!std::strncmp(line, "nocal=", 6))
 					nocal = std::atoi(line + 6);
+				// **写し取りの道に戻す**（既定は式だけの道。6.223）
+				if (!std::strncmp(line, "cal=", 4))
+					cal = std::atoi(line + 4);
 				if (!std::strncmp(line, "voicecache=", 11))
 					voicecache = std::atoi(line + 11);
 				if (!std::strncmp(line, "fast_midi=", 10))
@@ -640,7 +644,11 @@ void engine::boot()
 		}
 		if (nocal) {
 			xg::native_driver::set_nocal(true);
-			logf("plugin.ini: nocal=1（写し取りを 1 音もしない）");
+			logf("plugin.ini: nocal=1（写し取りを 1 音もしない。いまの既定）");
+		}
+		if (cal) {
+			xg::native_driver::set_nocal(false);
+			logf("plugin.ini: cal=1（写し取りの道に戻す）");
 		}
 		m_mu = std::move(mu);
 		m_message = warn.empty() ? std::string("ROM: ") + dir

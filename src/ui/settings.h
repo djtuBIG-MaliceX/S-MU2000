@@ -13,7 +13,9 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <utility>
 #include <vector>
@@ -75,6 +77,63 @@ inline const std::string *find_setting(const settings_map &m, const char *key)
 		if (it->first == key)
 			return &it->second;
 	return nullptr;
+}
+
+// Everything gui.ini remembers, both directions. The two front ends keep
+// these in different shapes (globals vs members, partial vs full loads),
+// so each fills or reads one of these and collect()/apply() below do the
+// file mapping once. in[] has 4 entries, like SET_IN_KEYS (both front ends
+// run 4 MIDI ports).
+struct remembered {
+	std::string in[4];
+	std::string out, out_b, out_mu;
+	std::string audio_out;
+	std::string audio_in;
+	std::string card;
+	float volume = 1.0f;  // the panel's VOLUME knob
+	bool fold34 = true;   // ports34=fold (MIDI file ports 3+4 onto A+B)
+	bool analog = false;  // output=analog (DC removed)
+};
+
+// Struct to file rows, in file order
+inline settings_map collect_settings(const remembered &r)
+{
+	settings_map kv;
+	for (int p = 0; p < 4; p++)
+		kv.emplace_back(SET_IN_KEYS[p], r.in[p]);
+	kv.emplace_back(SET_OUT, r.out);
+	kv.emplace_back(SET_OUT_B, r.out_b);
+	kv.emplace_back(SET_OUT_MU, r.out_mu);
+	kv.emplace_back(SET_AUDIO_OUT, r.audio_out);
+	kv.emplace_back(SET_AUDIO_IN, r.audio_in);
+	kv.emplace_back(SET_CARD, r.card);
+	char vol[32];
+	std::snprintf(vol, sizeof(vol), "%.3f", r.volume);
+	kv.emplace_back(SET_VOLUME, vol);
+	kv.emplace_back(SET_PORTS34, r.fold34 ? "fold" : "drop");
+	kv.emplace_back(SET_OUTPUT, r.analog ? "analog" : "digital");
+	return kv;
+}
+
+// File rows to struct. Missing keys leave the struct's defaults, so callers
+// can start from what they already have.
+inline void apply_settings(const settings_map &kv, remembered &r)
+{
+	for (int p = 0; p < 4; p++)
+		if (const std::string *v = find_setting(kv, SET_IN_KEYS[p]))
+			r.in[p] = *v;
+	if (const std::string *v = find_setting(kv, SET_OUT))     r.out     = *v;
+	if (const std::string *v = find_setting(kv, SET_OUT_B))   r.out_b   = *v;
+	if (const std::string *v = find_setting(kv, SET_OUT_MU))  r.out_mu  = *v;
+	if (const std::string *v = find_setting(kv, SET_AUDIO_OUT)) r.audio_out = *v;
+	if (const std::string *v = find_setting(kv, SET_AUDIO_IN))  r.audio_in  = *v;
+	if (const std::string *v = find_setting(kv, SET_CARD))    r.card    = *v;
+	if (const std::string *v = find_setting(kv, SET_PORTS34)) r.fold34  = *v != "drop";
+	if (const std::string *v = find_setting(kv, SET_OUTPUT))  r.analog  = *v == "analog";
+	if (const std::string *v = find_setting(kv, SET_VOLUME)) {
+		if (!v->empty())
+			r.volume = std::clamp(float(std::atof(v->c_str())), 0.0f, 1.0f);
+	}
 }
 
 // A device index looked up by name, or -1 when it is not there.

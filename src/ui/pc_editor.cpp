@@ -1,6 +1,7 @@
 // license:BSD-3-Clause
 
 #include "pc_editor.h"
+#include "ui/texts.h"
 #include "xg_ui.h"
 
 #include "imgui.h"
@@ -29,7 +30,6 @@ std::string shown(const xg::param &p, int v)
 
 // パートの面に並べる組（音色の窓の「すべて」と同じ表。xg_ui.h）
 using group = part_group;
-const auto &GROUPS = PART_GROUPS;
 
 ImU32 col(ImGuiCol c, float alpha = 1.0f) { return ImGui::GetColorU32(c, alpha); }
 
@@ -157,7 +157,7 @@ bool pc_editor::knob(const xg::param &p, int part, int &v, bool known, float wid
 	}
 
 	if (hovered && !active)
-		ImGui::SetItemTooltip("%s  %s\nドラッグ・ホイール（Ctrl で 10）・ダブルクリックで打つ",
+		ImGui::SetItemTooltip(UI_TEXT(ed_slider_tip_fmt, "%s  %s\nDrag, wheel (Ctrl for 10), or double-click to type a value"),
 		                      p.label, text.c_str());
 
 	ImGui::PopID();
@@ -209,10 +209,10 @@ void pc_editor::part_list(xg::model &m, bridge &br)
 	if (!ImGui::BeginTable("parts", 4, flags))
 		return;
 	ImGui::TableSetupScrollFreeze(0, 1);
-	ImGui::TableSetupColumn("パート");
-	ImGui::TableSetupColumn("受信");
-	ImGui::TableSetupColumn("音色（右クリックで選ぶ）", ImGuiTableColumnFlags_WidthStretch);
-	ImGui::TableSetupColumn("音量");
+	ImGui::TableSetupColumn(UI_TEXT(ed_col_part, "Part"));
+	ImGui::TableSetupColumn(UI_TEXT(ed_col_rcv, "Ch"));
+	ImGui::TableSetupColumn(UI_TEXT(ed_col_voice, "Voice (right-click)"), ImGuiTableColumnFlags_WidthStretch);
+	ImGui::TableSetupColumn(UI_TEXT(ed_col_vol, "Vol"));
 	ImGui::TableHeadersRow();
 
 	for (int i = 0; i < PARTS; i++) {
@@ -260,7 +260,7 @@ void pc_editor::mixer(xg::model &m, bridge &br)
 	if (!ImGui::BeginTable("mixer", ncols + 1, flags))
 		return;
 	ImGui::TableSetupScrollFreeze(1, 1);
-	ImGui::TableSetupColumn("パート", ImGuiTableColumnFlags_WidthFixed);
+	ImGui::TableSetupColumn(UI_TEXT(ed_col_part, "Part"), ImGuiTableColumnFlags_WidthFixed);
 	for (const char *t : TITLES)
 		ImGui::TableSetupColumn(t, ImGuiTableColumnFlags_WidthStretch);
 	ImGui::TableNextRow(ImGuiTableRowFlags_Headers);
@@ -302,7 +302,7 @@ void pc_editor::part_page(xg::model &m, bridge &br)
 		const float label_w = fs * 7;
 		if (ImGui::BeginTable("groups", 2, ImGuiTableFlags_SizingStretchSame)) {
 			int n = 0;
-			for (const group &g : GROUPS) {
+			for (const group &g : part_groups()) {
 				if (n++ % 2 == 0)
 					ImGui::TableNextRow();
 				ImGui::TableNextColumn();
@@ -324,7 +324,7 @@ void pc_editor::part_page(xg::model &m, bridge &br)
 	} else {
 		// つまみの形。組ごとに横へ流す
 		const float cell = fs * 5.2f;
-		for (const group &g : GROUPS) {
+		for (const group &g : part_groups()) {
 			ImGui::SeparatorText(g.title);
 			const float right = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
 			bool first = true;
@@ -374,19 +374,19 @@ void pc_editor::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 	ImGui::PopStyleVar();
 
 	// 上の帯
-	if (ImGui::Button("XG リセット")) {
+	if (ImGui::Button(UI_TEXT(editor_xg_reset, "XG reset"))) {
 		static const u8 XG_ON[] = { 0xf0, 0x43, 0x10, 0x4c, 0x00, 0x00, 0x7e, 0x00, 0xf7 };
 		br.send(XG_ON, sizeof(XG_ON));
 	}
 	ImGui::SameLine();
-	if (ImGui::Button("オールノートオフ")) {
+	if (ImGui::Button(UI_TEXT(editor_all_off, "All notes off"))) {
 		for (int ch = 0; ch < 16; ch++) {
 			const u8 msg[3] = { u8(0xb0 | ch), 123, 0 };
 			br.send(msg, 3);
 		}
 	}
 	ImGui::SameLine();
-	if (ImGui::Button(m_knobs ? "▲ 数だけにする" : "▼ つまみを出す"))
+	if (ImGui::Button(m_knobs ? UI_TEXT(ed_knobs_on, "▲ Numbers only") : UI_TEXT(ed_knobs_off, "▼ Show knobs")))
 		m_knobs = !m_knobs;
 	ImGui::SameLine();
 	help_checkbox();
@@ -399,12 +399,12 @@ void pc_editor::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 	ImGui::SameLine();
 	ImGui::BeginChild("page", ImVec2(0, 0));
 	if (ImGui::BeginTabBar("tabs")) {
-		if (ImGui::BeginTabItem("ミキサー")) {
+		if (ImGui::BeginTabItem(UI_TEXT(ed_tab_mixer, "Mixer"))) {
 			mixer(m, br);
 			ImGui::EndTabItem();
 		}
-		if (ImGui::BeginTabItem("パート")) {
-			ImGui::Text("パート %s", part_name(m_part).c_str());
+		if (ImGui::BeginTabItem(UI_TEXT(ed_tab_part, "Part"))) {
+			ImGui::Text(UI_TEXT(xgui_part_fmt, "Part %s"), part_name(m_part).c_str());
 			part_page(m, br);
 			ImGui::EndTabItem();
 		}

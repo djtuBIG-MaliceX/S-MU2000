@@ -22,7 +22,10 @@ namespace ui {
 class master_editor : public imgui_view
 {
 public:
-	const wchar_t *title() const override { return L"S-MU2000 マスター"; }
+	const wchar_t *title() const override
+	{
+		return get_lang() == lang::ja ? L"S-MU2000 マスター" : L"S-MU2000 Master";
+	}
 	int default_width() const override  { return 900; }
 	int default_height() const override { return 560; }
 	void draw(xg::model &m, const xg_snapshot &ram, bridge &br) override;

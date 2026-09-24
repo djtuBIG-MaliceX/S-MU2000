@@ -24,6 +24,7 @@
 
 #include "compat/gdi.h"
 #include "ui/draw.h"
+#include "ui/texts.h"
 
 namespace ui {
 
@@ -45,12 +46,32 @@ enum bar_window {
 	BAR_MASTER = 4, // マスター
 };
 
-// The strip every window shows, in the same order with the same ids
+// The strip every window shows, in the same order with the same ids.
+// Labels come from the texts table (bar_list and friends), so --lang
+// reaches the strip too.
 inline std::vector<tool_item> window_bar_items()
 {
-	return { { "一覧", BAR_LIST }, { "エディタ", BAR_EDITOR },
-	         { "音色", BAR_SHAPES }, { "エフェクト", BAR_FX },
-	         { "マスター", BAR_MASTER } };
+	return { { UI_TEXT(bar_list, "List"), BAR_LIST },
+	         { UI_TEXT(bar_editor, "Editor"), BAR_EDITOR },
+	         { UI_TEXT(bar_shapes, "Voices"), BAR_SHAPES },
+	         { UI_TEXT(bar_fx, "Effects"), BAR_FX },
+	         { UI_TEXT(bar_master, "Master"), BAR_MASTER } };
+}
+
+class pc_window;   // ui/pc_window.h (one class, two hosts)
+
+// Which PC window a toolbar id names. One place so no front end maps one
+// button to a different window
+inline pc_window *window_for_kind(int kind, pc_window &list, pc_window &editor,
+                                  pc_window &fx, pc_window &shapes, pc_window &master)
+{
+	switch (kind) {
+	case BAR_EDITOR: return &editor;
+	case BAR_FX:     return &fx;
+	case BAR_SHAPES: return &shapes;
+	case BAR_MASTER: return &master;
+	default:         return &list;
+	}
 }
 
 class toolbar

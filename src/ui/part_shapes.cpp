@@ -7,6 +7,7 @@
 #include "fx_help.h"
 #include "fx_icons.h"
 #include "eq_curve.h"
+#include "ui/texts.h"
 
 #include "imgui.h"
 #include "xg/fx_params.h"
@@ -37,7 +38,7 @@ constexpr int FOLD_BIT = 16;         // 音色を選ぶ面を畳んでいるか�
 bool title_toggle(const char *title, const char *id, bool knobs, bool &toggle_hovered)
 {
 	const float fs = ImGui::GetFontSize();
-	const char *l = "グラフ", *r = "つまみ";
+	const char *l = UI_TEXT(ps_graph, "Graph"), *r = UI_TEXT(ps_knobs, "Knobs");
 	const float lw = ImGui::CalcTextSize(l).x, rw = ImGui::CalcTextSize(r).x;
 	const float th = fs * 0.9f, tw = th * 1.8f, gap = fs * 0.3f;
 	const float room = ImGui::GetContentRegionAvail().x;
@@ -61,8 +62,8 @@ bool title_toggle(const char *title, const char *id, bool knobs, bool &toggle_ho
 	const bool pressed = ImGui::InvisibleButton(id, ImVec2(total, line_h));
 	toggle_hovered = ImGui::IsItemHovered();
 	if (toggle_hovered)
-		hint(knobs ? "いまは「つまみ」（値の棒で触る）。クリックで「グラフ」（絵で触る）に切り替える"
-		           : "いまは「グラフ」（絵で触る）。クリックで「つまみ」（値の棒で触る）に切り替える");
+		hint(knobs ? UI_TEXT(ps_hint_knobs, "Showing knobs (drag the value bars). Click to switch to the graph.")
+		           : UI_TEXT(ps_hint_graph, "Showing the graph (drag the picture). Click to switch to knobs."));
 	const ImU32 on = ImGui::GetColorU32(ImGuiCol_Text), off = ImGui::GetColorU32(ImGuiCol_TextDisabled);
 	float sx = p.x;
 	if (words) {
@@ -130,22 +131,22 @@ void panel(const char *id, const char *title, float w, float h, int part, xg::mo
 void mod_matrix(int part, xg::model &m, bridge &br, float w, float h)
 {
 	struct src { const char *key, *name, *about; };
-	static const src SRCS[6] = {
-		{ "mw",   "モジュレーション",   "モジュレーションホイール（CC1）" },
-		{ "bend", "ピッチベンド",       "ピッチベンド（中央から離した量。向きは問わない）" },
-		{ "cat",  "チャンネル AT",      "チャンネルアフタータッチ（鍵盤を押し込む強さ。チャンネルに 1 つ）" },
-		{ "pat",  "ポリ AT",            "ポリアフタータッチ（鍵ごとの押し込む強さ）" },
-		{ "ac1",  "AC1",                "AC1（AC1 CC No で選んだコントロールチェンジ）" },
-		{ "ac2",  "AC2",                "AC2（AC2 CC No で選んだコントロールチェンジ）" },
+	const src SRCS[6] = {
+		{ "mw",   UI_TEXT(mx_src_mw_name, "Modulation"),   UI_TEXT(mx_src_mw_about, "Modulation wheel (CC1)") },
+		{ "bend", UI_TEXT(mx_src_bend_name, "Pitch bend"), UI_TEXT(mx_src_bend_about, "Pitch bend (amount from center, either direction)") },
+		{ "cat",  UI_TEXT(mx_src_cat_name, "Channel AT"),  UI_TEXT(mx_src_cat_about, "Channel aftertouch (key pressure, one per channel)") },
+		{ "pat",  UI_TEXT(mx_src_pat_name, "Poly AT"),     UI_TEXT(mx_src_pat_about, "Polyphonic aftertouch (pressure per key)") },
+		{ "ac1",  UI_TEXT(mx_src_ac1_name, "AC1"),         UI_TEXT(mx_src_ac1_about, "AC1 (control change set by AC1 CC No)") },
+		{ "ac2",  UI_TEXT(mx_src_ac2_name, "AC2"),         UI_TEXT(mx_src_ac2_about, "AC2 (control change set by AC2 CC No)") },
 	};
 	struct dst { const char *key, *name, *sub; };
-	static const dst DSTS[6] = {
-		{ "pitch",    "音程",     "Pitch" },
-		{ "filter",   "音色",     "Filter" },
-		{ "amp",      "音量",     "Amp" },
-		{ "lfo_pmod", "LFO 音程", "ビブラート" },
-		{ "lfo_fmod", "LFO 音色", "ワウ" },
-		{ "lfo_amod", "LFO 音量", "トレモロ" },
+	const dst DSTS[6] = {
+		{ "pitch",    UI_TEXT(mx_dst_pitch_name, "Pitch"),       UI_TEXT(mx_dst_pitch_sub, "Pitch") },
+		{ "filter",   UI_TEXT(mx_dst_filter_name, "Filter"),     UI_TEXT(mx_dst_filter_sub, "Filter") },
+		{ "amp",      UI_TEXT(mx_dst_amp_name, "Volume"),        UI_TEXT(mx_dst_amp_sub, "Amp") },
+		{ "lfo_pmod", UI_TEXT(mx_dst_lfo_pmod_name, "LFO pitch"),  UI_TEXT(mx_dst_lfo_pmod_sub, "Vibrato") },
+		{ "lfo_fmod", UI_TEXT(mx_dst_lfo_fmod_name, "LFO filter"), UI_TEXT(mx_dst_lfo_fmod_sub, "Wah") },
+		{ "lfo_amod", UI_TEXT(mx_dst_lfo_amod_name, "LFO volume"), UI_TEXT(mx_dst_lfo_amod_sub, "Tremolo") },
 	};
 	ImGuiIO &io = ImGui::GetIO();
 	const float fs = ImGui::GetFontSize();
@@ -200,10 +201,10 @@ void mod_matrix(int part, xg::model &m, bridge &br, float w, float h)
 		dl->AddText(ImVec2(org.x + fs * 0.3f, y + (ch - gap - ls.y) * 0.5f), ImGui::GetColorU32(ImGuiCol_Text), label.c_str());
 		if (row_hover) {
 			if (r >= 4)
-				hint("%s\n%s。この行の 6 つのマスが、この操作子で動かす量。見出しの上でマウスホイールを回すと CC の番号が変わる",
+				hint(UI_TEXT(mx_hint_cc_fmt, "%s\n%s. The 6 cells in this row are what this source moves. Wheel over a header changes the CC number"),
 				     official_name((std::string("part.") + SRCS[r].key + "_cc").c_str()).c_str(), SRCS[r].about);
 			else
-				hint("%s\nこの行の 6 つのマスが、この操作子で動かす量", SRCS[r].about);
+				hint(UI_TEXT(mx_hint_row_fmt, "%s\nThe 6 cells in this row are what this source moves"), SRCS[r].about);
 		}
 
 		for (int c = 0; c < 6; c++) {
@@ -265,9 +266,13 @@ void mod_matrix(int part, xg::model &m, bridge &br, float w, float h)
 			            text.c_str());
 			if (hov || act) {
 				const char *help = help_for(key.c_str());
-				const std::string to = c >= 3 ? std::string(DSTS[c].name) + "（" + DSTS[c].sub + "）" : std::string(DSTS[c].name);
-				hint("%s  %s\n%s → %s。%s（上下にドラッグ・マウスホイール・ダブルクリックで既定の %s）",
-				     official_name(key.c_str()).c_str(), text.c_str(), SRCS[r].name, to.c_str(), help ? help : "",
+				char to[64];
+				if (c >= 3)
+					std::snprintf(to, sizeof(to), UI_TEXT(mx_dst_sub_fmt, "%s (%s)"), DSTS[c].name, DSTS[c].sub);
+				else
+					std::snprintf(to, sizeof(to), "%s", DSTS[c].name);
+				hint(UI_TEXT(mx_hint_cell_fmt, "%s  %s\n%s → %s. %s (drag up/down, wheel, double-click for default %s)"),
+				     official_name(key.c_str()).c_str(), text.c_str(), SRCS[r].name, to, help ? help : "",
 				     xg::format(p, p.def).c_str());
 			}
 			ImGui::PopID();
@@ -557,8 +562,12 @@ void fx_response_overlay(int slot, const xg::fx_def &def, xg::model &m, ImVec2 a
 		dl->AddRectFilled(ImVec2(xa, top), ImVec2(xb, bottom), IM_COL32(255, 200, 90, lit ? a0 + 20 : a0));
 		for (float y = top; y < bottom; y += fs * 0.4f)
 			dl->AddLine(ImVec2(xb, y), ImVec2(xb, std::min(bottom, y + fs * 0.2f)), IM_COL32(255, 200, 90, lit ? 200 : 120), 1.0f);
+		char wah_label[64];
+		std::snprintf(wah_label, sizeof(wah_label),
+		    touch ? UI_TEXT(ps_fx_wah_touch_fmt, "Stronger hit goes to %s") : UI_TEXT(ps_fx_wah_lfo_fmt, "LFO to %s"),
+		    khz(wah_top).c_str());
 		tag(ImVec2((xa + xb) * 0.5f, top + fs * 0.1f),
-		    touch ? "強く弾くと → " + khz(wah_top) : "LFO → " + khz(wah_top), IM_COL32(255, 200, 90, 220), lit);
+		    wah_label, IM_COL32(255, 200, 90, 220), lit);
 	}
 	if (has_wah) {
 		const bool lit = is_focus(wah_i) || is_focus(wq_i);
@@ -570,7 +579,7 @@ void fx_response_overlay(int slot, const xg::fx_def &def, xg::model &m, ImVec2 a
 	}
 	// 目盛りと断り（右上）
 	{
-		const char *t = "EQ・フィルタ（目安）  ±18 dB";
+		const char *t = UI_TEXT(ps_fx_eq_title, "EQ/filter (guide)  +/-18 dB");
 		const ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(tfs, FLT_MAX, 0.0f, t);
 		dl->AddText(ImGui::GetFont(), tfs, ImVec2(x0 + 2.0f, b.y - ts.y * 2.3f), IM_COL32(255, 200, 90, 200), t);
 	}
@@ -638,21 +647,18 @@ void fx_cell(int slot, bool part_only, int part, xg::model &m, bridge &br, float
 		if (part_sw.first)
 			br.send(m.set(P("variation.part"), 0, var_part == part ? 127 : part));
 		if (part_sw.second)
-			hint("%s\nオンでバリエーションをこのパートに掛ける（切るとどのパートにも掛けない）。インサーション接続（INS）のときだけ"
-			     "意味があり、触れる。INS と PART の両方が入っていれば、この区画で種類とパラメータを触れる",
+			hint(UI_TEXT(ps_var_part_hint, "%s\nOn puts the variation on this part (off: on no part). Only applies in insertion (INS) connection; with both INS and PART on, type and parameters are editable here"),
 			     official_name("variation.part").c_str());
 		const auto ins_sw = toggle("##vins", "INS", !var_sys, true);
 		if (ins_sw.first)
 			br.send(m.set(P("variation.connect"), 0, var_sys ? 0 : 1));
 		if (ins_sw.second)
-			hint("%s\nオンでインサーション接続（掛けたパートの音を丸ごと通してから、乾いた音とリバーブ・コーラスへの送りに"
-			     "分かれる）、オフでシステム接続（全パートの Var Send を集めて掛け、戻りで混ぜる）。バリエーションは 1 つしか"
-			     "無いので、ほかのパートとは取り合いになる。INS と PART の両方が入っていない間は、この区画ではこのパートの "
-			     "Send だけを触れる", official_name("variation.connect").c_str());
+			hint(UI_TEXT(ps_var_ins_hint, "%s\nOn: insertion connection (whole sound of the played part passes through, splitting into dry plus reverb/chorus sends); off: system connection (collects all parts' Var Send, mixes at return). Only one variation exists, shared with other parts. While INS and PART are not both on, only this part's Send is editable here"),
+			     official_name("variation.connect").c_str());
 		// 掛かっているパート
 		std::string cap;
 		if (var_sys)
-			cap = "SYSTEM（全パートの Send）";
+			cap = UI_TEXT(ps_var_cap_sys, "SYSTEM (all parts' Send)");
 		else if (var_part < XG_PARTS + 2)
 			cap = "→ " + part_name(var_part);
 		else
@@ -664,10 +670,15 @@ void fx_cell(int slot, bool part_only, int part, xg::model &m, bridge &br, float
 	}
 	y += line * 1.25f;
 	const int fx = scope_fx_of(slot);
-	std::string label = part_only ? "緑: 通したあと  灰: 通す前（このパートだけ）" : "緑: 出口  灰: 入口（全パートの送りを混ぜた音）";
-	if (is_var && !var_sys && !var_mine)
-		label = var_part < XG_PARTS + 2 ? "ほかのパート（" + part_name(var_part) + "）のインサーション。このパートの Var Send は効かない"
-		                                : std::string("インサーション接続で、どのパートにも掛かっていない。このパートの Var Send は効かない");
+	std::string label = part_only ? UI_TEXT(ps_fx_legend_part, "Green: processed  Gray: unprocessed (this part only)") : UI_TEXT(ps_fx_legend_sys, "Green: out  Gray: in (all parts' sends mixed)");
+	if (is_var && !var_sys && !var_mine) {
+		char other[160];
+		if (var_part < XG_PARTS + 2)
+			std::snprintf(other, sizeof(other), UI_TEXT(ps_fx_other_part_fmt, "Another part's (%s) insertion. This part's Var Send does nothing"), part_name(var_part).c_str());
+		else
+			std::snprintf(other, sizeof(other), "%s", UI_TEXT(ps_fx_other_none, "Insertion-connected but on no part. This part's Var Send does nothing"));
+		label = other;
+	}
 	const ImVec2 spec_a(pos.x + pad, y), spec_b(pos.x + w - pad, split - pad);
 	overview::spectrum_view(br, part, bridge::scope_src(fx, true), bridge::scope_src(fx, false), 10 + slot,
 	                        spec_a, spec_b, label.c_str());
@@ -689,13 +700,13 @@ void fx_cell(int slot, bool part_only, int part, xg::model &m, bridge &br, float
 	}
 	if (ImGui::IsItemHovered()) {
 		const char *th = type >= 0 ? fx_type_help(msb, type & 0x7f) : nullptr;
-		hint("%s  %s\n%s", official_name((prefix + ".type").c_str()).c_str(), name.c_str(), th ? th : "エフェクトの種類");
+		hint("%s  %s\n%s", official_name((prefix + ".type").c_str()).c_str(), name.c_str(), th ? th : UI_TEXT(ps_fx_type_fallback, "Effect type"));
 	}
 	ImGui::SameLine();
-	if (ImGui::SmallButton("詳しく"))
+	if (ImGui::SmallButton(UI_TEXT(ps_fx_details, "Details")))
 		request_fx(slot);
 	if (ImGui::IsItemHovered())
-		hint("エフェクトの設定の窓\nこのエフェクトを大きなつまみと説明で触る窓を開く");
+		hint(UI_TEXT(ps_fx_details_hint, "Effect settings window\nA window with big knobs and explanations for this effect"));
 	ImGui::EndDisabled();
 	// このパートのインサーションにしていないバリエーションで触れるのは、このパートの送り（Var Send）だけ。
 	// つまみの並びに足すと段が増えて全部が縮むので、種類の欄の右に横長の棒で置く
@@ -719,10 +730,9 @@ void fx_cell(int slot, bool part_only, int part, xg::model &m, bridge &br, float
 		if (idle)
 			ImGui::PopStyleColor(3);
 		if (ImGui::IsItemHovered() || ImGui::IsItemActive())
-			hint(idle ? "%s  %d（効いていない）\nバリエーションがインサーション接続なので、パートからの送りは効かない。"
-			            "値は動かせて、システム接続（INS を切る）に戻すとこの値で送る"
-			          : "%s  %d\nこのパートからバリエーションへの送り。ドラッグで変える",
-			     official_name("part.variation_send").c_str(), sv);
+		if (ImGui::IsItemHovered() || ImGui::IsItemActive())
+			hint(idle ? UI_TEXT(ps_var_send_idle_fmt, "%s  %d (ineffective)\nVariation is insertion-connected, so part sends do nothing. Values stay movable; switching back to system connection (INS off) sends at this value")
+			              : UI_TEXT(ps_var_send_hint, "%s  %d\nThis part's send to variation (works in system connection). Drag to change"), official_name("part.variation_send").c_str(), sv);
 	}
 
 	// ---- つまみ。入る大きさまで縮める
@@ -781,11 +791,11 @@ void fx_cell(int slot, bool part_only, int part, xg::model &m, bridge &br, float
 			if (fx_editor::knob(id, v, it.mp->min, it.mp->max, ksize, it.label, text.c_str(), false, it.lock) && known)
 				drag_send(br, m.set(*it.mp, pp, v));
 			if (it.lock && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-				hint("%s  %s\nこのパートのインサーションにしていないので、ここでは見るだけ（上の INS と PART を両方入れると触れる）",
+				hint(UI_TEXT(ps_fx_viewonly_fmt, "%s  %s\nNot this part's insertion, so view-only here (turn on INS and PART above to edit)"),
 				     official_name(it.mp->key).c_str(), text.c_str());
 			else if (ImGui::IsItemHovered() || ImGui::IsItemActive()) {
 				const char *help = help_for(it.mp->key);
-				hint("%s  %s\n%s（上下にドラッグ・ホイール・ダブルクリックで数を打つ）", official_name(it.mp->key).c_str(), text.c_str(),
+				hint(UI_TEXT(ps_fx_param_fmt, "%s  %s\n%s (drag up/down, wheel, double-click to type a value)"), official_name(it.mp->key).c_str(), text.c_str(),
 				     help ? help : "");
 			}
 		} else {
@@ -801,20 +811,20 @@ void fx_cell(int slot, bool part_only, int part, xg::model &m, bridge &br, float
 			if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) || ImGui::IsItemActive())
 				focus_fp = it.fp;
 			if (it.lock && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-				hint("%s  %s\nこのパートのインサーションにしていないので、ここでは見るだけ（上の INS と PART を両方入れると触れる）",
+				hint(UI_TEXT(ps_fx_viewonly_fmt, "%s  %s\nNot this part's insertion, so view-only here (turn on INS and PART above to edit)"),
 				     it.fp->label, text.c_str());
 			else if (ImGui::IsItemHovered() || ImGui::IsItemActive()) {
 				const char *help = fx_param_help(it.fp->label);
-				hint("%s  %s\n%s（上下にドラッグ・ホイール・ダブルクリックで数を打つ）", it.fp->label, text.c_str(),
-				     help ? help : "（まだ説明が無い）");
+				hint(UI_TEXT(ps_fx_param_fmt, "%s  %s\n%s (drag up/down, wheel, double-click to type a value)"), it.fp->label, text.c_str(),
+				     help ? help : UI_TEXT(fxe_no_desc, "(no description yet)"));
 			}
 		}
 		ImGui::EndDisabled();
 	}
 	if (!def || def->count == 0) {
 		ImGui::SetCursorScreenPos(ImVec2(kx0, ky0 + (n ? float((n + per_row - 1) / per_row) * ch : 0.0f)));
-		ImGui::TextDisabled("%s", msb == 0 ? "NO EFFECT（種類を選ぶと、ここにつまみが並ぶ）"
-		                          : msb == 0x40 ? "THRU（パラメータは無い）" : "この種類のパラメータの表はまだ無い");
+		ImGui::TextDisabled("%s", msb == 0 ? UI_TEXT(fxe_noeffect, "NO EFFECT (pick a type to list its knobs here)")
+		                          : msb == 0x40 ? UI_TEXT(fxe_thru, "THRU (no parameters)") : UI_TEXT(fxe_no_table, "No parameter table for this type yet"));
 	}
 	ImGui::PopFont();
 	// 上の段のスペクトラムに、EQ・フィルタの特性（目安）を重ねる
@@ -827,7 +837,7 @@ void fx_cell(int slot, bool part_only, int part, xg::model &m, bridge &br, float
 // ---- つなぎの区画（メゾネット）。上の段に流れの絵、下の段に送りのフェーダーと、つなぎ方の型。
 //
 // XG のシステムエフェクトは、並びが「バリエーション → コーラス → リバーブ」に決まっていて、
-// 前から後ろへの送り（VAR→CHO・VAR→REV・CHO→REV）の量だけを変えられる（後ろから前へは送れない）。
+// 前から後ろへの送り（VAR→CHO・V-R・C-R）の量だけを変えられる（後ろから前へは送れない）。
 // だから「順序」は、この 3 本を開けるか閉じるかで選ぶ（並列・直列など）
 void route_cell(int part, xg::model &m, bridge &br, float w, float h)
 {
@@ -1002,7 +1012,16 @@ void route_cell(int part, xg::model &m, bridge &br, float w, float h)
 		dl->AddRect(a, b, on ? with_alpha(c, 0.95f) : IM_COL32(110, 112, 124, 200), round, 0, 1.5f);
 	};
 	static const char *const NODE[5] = { "P", "V", "C", "R", "O" };
-	static const char *const NODE_NAME[5] = { "パート", "バリエーション", "コーラス", "リバーブ", "出力" };
+	// Flow node display names in the UI language (P/V/C/R/O initials stay).
+	auto node_name = [](int i) -> const char * {
+		switch (i) {
+		case 0: return UI_TEXT(ps_node_part, "Part");
+		case 1: return UI_TEXT(ps_node_var, "Variation");
+		case 2: return UI_TEXT(ps_node_cho, "Chorus");
+		case 3: return UI_TEXT(ps_node_rev, "Reverb");
+		default: return UI_TEXT(ps_node_out, "Out");
+		}
+	};
 	const int TYPES[5] = { -1, vtype, ctype, rtype, -1 };
 	const box *const NODES[5] = { &NP, &NV, &NC, &NR, &NO };
 	const ImU32 COLS[5] = { COL_P, COL_V, COL_C, COL_R, COL_O };
@@ -1024,14 +1043,18 @@ void route_cell(int part, xg::model &m, bridge &br, float w, float h)
 		std::string sub;
 		if (TYPES[i] >= 0) {
 			sub = on ? xg::fx_name(TYPES[i]) : std::string("NO EFFECT");
-			if (i == 1 && !var_sys)
-				sub += "（インサーション接続。" + (var_part < XG_PARTS + 2 ? part_name(var_part) : std::string("OFF")) + "）";
+			if (i == 1 && !var_sys) {
+				char ins[64];
+				std::snprintf(ins, sizeof(ins), UI_TEXT(ps_node_ins_fmt, "(insertion: %s)"),
+				              var_part < XG_PARTS + 2 ? part_name(var_part).c_str() : "OFF");
+				sub += ins;
+			}
 		}
 		ImGui::SetCursorScreenPos(ImVec2(bx.x0, bx.y0));
 		ImGui::PushID(100 + i);
 		ImGui::InvisibleButton("##node", ImVec2(bx.x1 - bx.x0, bx.y1 - bx.y0));
 		if (ImGui::IsItemHovered())
-			hint("%s\n%s", NODE_NAME[i], sub.empty() ? (i == 0 ? "このパートの音（インサーションを通したあと）" : "乾いた音と戻りを混ぜて、マスター EQ へ")
+			hint("%s\n%s", node_name(i), sub.empty() ? (i == 0 ? UI_TEXT(ps_node_part_hint, "This part's sound (after insertion)") : UI_TEXT(ps_node_dry_hint, "Dry plus returns mixed, to master EQ"))
 			                                         : sub.c_str());
 		ImGui::PopID();
 	}
@@ -1079,21 +1102,20 @@ void route_cell(int part, xg::model &m, bridge &br, float w, float h)
 				const bool mine = var_part == part;
 				const char *why = "";
 				switch (bd.e) {
-				case 0: why = mine ? "このパートの音は丸ごとバリエーションを通る（Var Send の値は使わない）"
-				                   : "バリエーションはほかのパートに掛かっていて（または OFF）、このパートの音は通らない"; break;
-				case 3: why = mine ? "このパートの音は丸ごとバリエーションを通るので、横を通る乾いた音は無い（Dry Level の値は使わない）"
-				                   : "インサーション接続の間は、どのパートも Dry Level が効かず、乾いた音はいつも最大"; break;
-				case 4: case 5: why = "インサーション接続の間は、バリエーションからコーラス・リバーブへの送りは効かない。"
-				                      "バリエーションを通した音は、パートの Cho Send・Rev Send で送られる"; break;
-				case 7: why = mine ? "バリエーションを通した音がそのまま出力へ行く（Var Return の値は使わない）"
-				                   : "バリエーションはこのパートの音を通していない"; break;
+				case 0: why = mine ? UI_TEXT(ps_why_0_mine, "This part's sound fully passes through variation (Var Send unused)")
+				                   : UI_TEXT(ps_why_0_other, "Variation is on another part (or OFF); this part's sound does not pass through"); break;
+				case 3: why = mine ? UI_TEXT(ps_why_3_mine, "This part's sound fully passes through variation, so there is no dry sound passing by (Dry Level unused)")
+				                   : UI_TEXT(ps_why_3_other, "During insertion connection, Dry Level works on no part; dry sound is always max"); break;
+				case 4: case 5: why = UI_TEXT(ps_why_45, "During insertion connection, sends from variation to chorus/reverb do nothing. Sound through variation is sent by the part's Cho Send and Rev Send"); break;
+				case 7: why = mine ? UI_TEXT(ps_why_7_mine, "Sound through variation goes straight to output (Var Return unused)")
+				                   : UI_TEXT(ps_why_7_other, "Variation does not pass this part's sound"); break;
 				}
-				hint("%s（インサーション接続で固定）\n%s。値は%sで動かせて、システム接続に戻すと効く。バリエーションの区画の [INS] で切り替える",
-				     official_name(EDGES[bd.e].key).c_str(), why, bd.e == 7 ? "設定の窓（バリエーションの「詳しく」）" : "下のフェーダー");
+				hint(UI_TEXT(ps_badge_fixed_fmt, "%s (pinned by insertion connection)\n%s. Adjustable via %s; takes effect when back in system connection. Switch with [INS] in the variation panel"),
+				     official_name(EDGES[bd.e].key).c_str(), why, bd.e == 7 ? UI_TEXT(ps_where_dialog, "the settings window (variation Details)") : UI_TEXT(ps_where_fader, "the fader below"));
 			}
 			else {
 				const char *help = help_for(E.key);
-				hint("%s  %d\n%s（上下にドラッグ・ホイール・ダブルクリックで 0 と既定を行き来）", official_name(E.key).c_str(), v, help ? help : "");
+				hint(UI_TEXT(ps_badge_fmt, "%s  %d\n%s (drag up/down, wheel, double-click to alternate 0 and default)"), official_name(E.key).c_str(), v, help ? help : "");
 			}
 		}
 		ImGui::PopID();
@@ -1104,14 +1126,14 @@ void route_cell(int part, xg::model &m, bridge &br, float w, float h)
 	ImGui::SetCursorScreenPos(ImVec2(pos.x + pad, split + pad));
 	const int vc = get_value(m, "variation.to_chorus"), vr = get_value(m, "variation.to_reverb"), cr = get_value(m, "chorus.to_reverb");
 	struct preset { const char *name, *about; int vc, vr, cr; };
-	static const preset PRESETS[] = {
-		{ "並列", "3 つを別々に鳴らす（前から後ろへの送りを全部 0）", 0, 0, 0 },
-		{ "V-C-R", "バリエーションの出口をコーラスへ、コーラスの出口をリバーブへ（直列）", 127, 0, 127 },
-		{ "V-R", "バリエーションの出口だけをリバーブへ", 0, 127, 0 },
-		{ "C-R", "コーラスの出口だけをリバーブへ", 0, 0, 127 },
+	const preset PRESETS[] = {
+		{ UI_TEXT(ps_pre_parallel, "Parallel"), UI_TEXT(ps_pre_parallel_about, "Play the 3 separately (all front-to-back sends at 0)"), 0, 0, 0 },
+		{ UI_TEXT(ps_pre_vcr, "V-C-R"), UI_TEXT(ps_pre_vcr_about, "Variation out to chorus, chorus out to reverb (series)"), 127, 0, 127 },
+		{ UI_TEXT(ps_pre_vr, "V-R"), UI_TEXT(ps_pre_vr_about, "Variation out to reverb only"), 0, 127, 0 },
+		{ UI_TEXT(ps_pre_cr, "C-R"), UI_TEXT(ps_pre_cr_about, "Chorus out to reverb only"), 0, 0, 127 },
 	};
 	ImGui::PushFont(nullptr, fs * 0.8f);
-	ImGui::TextDisabled("つなぎ方");
+	ImGui::TextDisabled("%s", UI_TEXT(ps_flow_ways, "Flow"));
 	for (const preset &pr : PRESETS) {
 		// 入らなければ次の行へ
 		const float bw = ImGui::CalcTextSize(pr.name).x + ImGui::GetStyle().FramePadding.x * 2.0f;
@@ -1129,8 +1151,7 @@ void route_cell(int part, xg::model &m, bridge &br, float w, float h)
 		if (cur)
 			ImGui::PopStyleColor();
 		if (ImGui::IsItemHovered())
-			hint("つなぎ方: %s\n%s。XG の並びは VAR → CHO → REV に決まっていて、後ろから前へは送れない。"
-			     "パートからの送りと戻りはそのまま", pr.name, pr.about);
+			hint(UI_TEXT(ps_flow_ways_hint, "Flow: %s\n%s. XG order is fixed VAR to CHO to REV, never back to front. Part sends and returns stay as they are"), pr.name, pr.about);
 	}
 	ImGui::PopFont();
 	// 送りのフェーダー。左の 4 本がこのパートから、右の 3 本がエフェクトからエフェクトへ
@@ -1262,8 +1283,8 @@ void part_shapes::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 		if (pressed)
 			set_shapes_knobs(FOLD_BIT, !folded);
 		if (hov)
-			hint(folded ? "音色を選ぶ面を開く\n分類・音色・バンク違いの列を左に出す"
-			            : "音色を選ぶ面を畳む\n分類・音色・バンク違いの列を左端に畳んで、その幅を右のタブに回す");
+			hint(folded ? UI_TEXT(ps_fold_open_hint, "Open the voice panel\nShow category, voice and bank columns on the left")
+			            : UI_TEXT(ps_fold_close_hint, "Fold the voice panel\nFold category, voice and bank columns to the left edge, giving the width to the right tabs"));
 		ImDrawList *dl = ImGui::GetWindowDrawList();
 		const ImVec2 b(a.x + hw, a.y + body_h);
 		dl->AddRectFilled(a, b, ImGui::GetColorU32(hov ? ImGuiCol_ButtonHovered : ImGuiCol_FrameBg), fs * 0.25f);
@@ -1276,7 +1297,7 @@ void part_shapes::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 			dl->AddTriangleFilled(ImVec2(cx + t * 0.6f, cy - t), ImVec2(cx + t * 0.6f, cy + t), ImVec2(cx - t * 0.7f, cy), tc);
 		// 畳んでいるときは、縦書きで「音色」と今の音色の番号
 		if (folded) {
-			const char *const chars[] = { "音", "色" };
+			const char *const chars[] = { UI_TEXT(ps_fold_char1, "V"), UI_TEXT(ps_fold_char2, "o") };
 			float y = cy + fs * 1.0f;
 			for (const char *c : chars) {
 				const ImVec2 ts = ImGui::CalcTextSize(c);
@@ -1290,7 +1311,8 @@ void part_shapes::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 	ImGui::BeginGroup();
 	const float top_y = ImGui::GetCursorScreenPos().y;
 	if (ImGui::BeginTabBar("right")) {
-		if (ImGui::BeginTabItem("形")) {
+		if (ImGui::BeginTabItem(UI_TEXT(ps_tab_shape, "Shape"))) {
+			scope = part;
 			scope = part;
 			// 列を横へ並べ、画面に入るのは 3 列ぶん（残りは横に送って見る）。
 			// 左に VIB（上）とモジュレーション（下）。フィルタと EQ、EG とピッチ EG、エフェクトは上下 2 段が
@@ -1317,72 +1339,58 @@ void part_shapes::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 			const float tall = h * 2.0f + st.ItemSpacing.y;
 			ImGui::BeginChild("flow", ImVec2(0, room_h), ImGuiChildFlags_None, ImGuiWindowFlags_HorizontalScrollbar);
 			ImGui::BeginGroup();
-			panel("vib", "ビブラート（VIB）", w, h, part, m, br, { "part.vib_rate", "part.vib_depth", "part.vib_delay" }, 0,
+			panel("vib", UI_TEXT(ps_title_vib, "Vibrato (VIB)"), w, h, part, m, br, { "part.vib_rate", "part.vib_depth", "part.vib_delay" }, 0,
 			      [](int p, xg::model &mm, bridge &b, float pw, float ph) { overview::vib_cell(p, mm, b, pw, ph, false); },
-			      "音色の揺れ（ビブラート）。絵は Depth 込みの実際の揺れ（薄い灰色の線は Depth を既定の 64 にしたときの"
-			      "音色自身の揺れ）。右のフェーダーで速さ（Rate）・深さ（Depth）・掛かり始めるまでの時間（Delay）を変える");
-			panel("mod", "モジュレーション（MW）", w, h, part, m, br,
+			      UI_TEXT(ps_about_vib, "Voice wobble (vibrato). The picture is the actual wobble including Depth (the thin gray line is the voice's own wobble at the default Depth 64). The faders change speed (Rate), depth (Depth) and delay (Delay)"));
+			panel("mod", UI_TEXT(ps_title_mod, "Modulation (MW)"), w, h, part, m, br,
 			      { "part.mw_lfo_pmod", "part.mw_pitch", "part.mw_filter", "part.mw_amp", "part.mw_lfo_fmod", "part.mw_lfo_amod" }, 5,
 			      [](int p, xg::model &mm, bridge &b, float pw, float ph) { overview::mod_cell(p, mm, b, pw, ph, false); },
-			      "モジュレーションホイールを上げたときに足すビブラート。横がホイールの位置、縦が揺れの深さ。"
-			      "左のホイールが CC1、右のホイールが MW LFO PM。音色自身の揺れ（背景の帯）とは足さず、深いほうが効く");
+			      UI_TEXT(ps_about_mod, "Extra vibrato from raising the modulation wheel. Sideways is wheel position, up/down is depth. The left wheel is CC1, the right is MW LFO PM. Louder of the two wins over the voice's own wobble (the background band)"));
 			ImGui::EndGroup();
 			ImGui::SameLine();
-			panel("filter", "フィルタと EQ（FILTER・EQ）", w, tall, part, m, br,
+			panel("filter", UI_TEXT(ps_title_filterenv, "Filter and EQ (FILTER/EQ)"), w, tall, part, m, br,
 			      { "part.cutoff", "part.resonance", "part.hpf_cutoff",
 			        "part.eq_bass_gain", "part.eq_bass_freq", "part.eq_treble_gain", "part.eq_treble_freq" }, 1,
 			      [](int p, xg::model &mm, bridge &b, float pw, float ph) { overview::filter_cell(p, mm, b, pw, ph, false); },
-			      "音の明るさ。横は実際の周波数で、緑がこのパートの今の音のスペクトラム。太線がフィルタとパートの EQ を"
-			      "合わせた実際の特性（細線がフィルタだけ、点線が EQ だけ）。どちらも声ごとに掛かり、EQ はフィルタのすぐ後ろ"
-			      "（インサーションより前）。下のフェーダーで Cutoff・Resonance・HPF と、EQ の低音・高音のゲインと周波数を変える");
+			      UI_TEXT(ps_about_filterenv, "Brightness. Sideways is real frequency; green is this part's spectrum now. Thick is filter plus part EQ (thin is filter alone, dotted EQ alone). Per voice, EQ right after the filter (before insertion). Faders change Cutoff, Resonance, HPF and the EQ bass/treble gains and frequencies"));
 			ImGui::SameLine();
-			panel("env", "EG とピッチ EG（EG・PEG）", w, tall, part, m, br,
+			panel("env", UI_TEXT(ps_title_env, "EG and pitch EG (EG/PEG)"), w, tall, part, m, br,
 			      { "part.attack", "part.decay", "part.release",
 			        "part.peg_init_level", "part.peg_attack_time", "part.peg_rel_level", "part.peg_rel_time" }, 2,
 			      [](int p, xg::model &mm, bridge &b, float pw, float ph) { overview::env_cell(p, mm, b, pw, ph); },
-			      "音量の形（青。立ち上がり → 落ち着き → 伸ばし → 離して消える）と音程の動き（橙）を、同じ実際の時間の目盛り・"
-			      "同じ離す時刻で 1 枚に。縦は左が音量（dB）、右が音程（セント）。下のフェーダーで EG の Attack・Decay・Release と"
-			      "ピッチ EG の Init・Attack・Rel Lv・Rel Tm を変える。緑の背景は EG を通したあとの音のスペクトラム（横は周波数。"
-			      "インサーションの前）");
+			      UI_TEXT(ps_about_env, "Volume shape (blue: attack, decay, sustain, release) and pitch movement (orange) on one real-time axis with one release time. Left is volume (dB), right is pitch (cents). Faders change EG Attack, Decay, Release and pitch EG Init, Attack, Rel Lv, Rel Tm. Green background is the spectrum after the EG (horizontal is frequency, before insertion)."));
 			// エフェクトの列
 			auto fx_panel = [&](const fx_col &c) {
 				ImGui::SameLine();
 				char id[16], title[64];
 				std::snprintf(id, sizeof(id), "fx%d", c.slot);
 				if (c.slot <= 4)
-					std::snprintf(title, sizeof(title), "インサーション %d（INS %d）", c.slot, c.slot);
+					std::snprintf(title, sizeof(title), UI_TEXT(ps_fx_ins_fmt, "Insertion %d (INS %d)"), c.slot, c.slot);
 				else if (c.slot == 7)
-					std::snprintf(title, sizeof(title), "%s", c.part_only ? "バリエーション（VAR・インサーション接続）" : "バリエーション（VAR）");
+					std::snprintf(title, sizeof(title), "%s", c.part_only ? UI_TEXT(ps_fx_var_ins, "Variation (VAR, as insertion)") : UI_TEXT(ps_fx_var, "Variation (VAR)"));
 				else
-					std::snprintf(title, sizeof(title), "%s", c.slot == 6 ? "コーラス（CHO）" : "リバーブ（REV）");
+					std::snprintf(title, sizeof(title), "%s", c.slot == 6 ? UI_TEXT(ps_fx_cho, "Chorus (CHO)") : UI_TEXT(ps_fx_rev, "Reverb (REV)"));
 				const int slot = c.slot;
 				const bool only = c.part_only;
 				panel(id, title, w, tall, part, m, br, {}, PANEL_FIXED,
 				      [slot, only](int p, xg::model &mm, bridge &b, float pw, float ph) { fx_cell(slot, only, p, mm, b, pw, ph); },
-				      only ? "このパートに掛かっているエフェクト。上の段は、通したあと（緑）と通す前（灰）のこのパートの音の"
-				             "スペクトラム（同じ目盛り）。下の段で種類とパラメータを変える。「詳しく」で設定の窓"
-				      : slot == 7
-				           ? "バリエーション。見出しの行の [INS] [PART] を両方入れると、このパートに掛けて種類とパラメータを触れる。"
-				             "そうでない間は、種類の欄の右の棒でこのパートの送り（Var Send）だけを変える（つまみは見るだけ）。"
-				             "上の段は出口（緑）と入口（灰）のスペクトラム"
-				           : "このパートが送っているシステムエフェクト。上の段は、出口（緑）と入口（灰）のスペクトラムで、"
-				             "全パートの送りを混ぜた音。下の段で種類・戻り（Return）・パン・パラメータを変える。「詳しく」で設定の窓");
+				      only ? UI_TEXT(ps_about_fx_part, "The effect on this part. Top: this part's spectrum after (green) and before (gray) at the same scale. Bottom: change type and parameters. Details opens the settings window.")
+				            : (slot == 7 ? UI_TEXT(ps_about_fx_var, "Variation. With both [INS] and [PART] on in the header row, it plays on this part and type and parameters are editable here. Otherwise, only this part's send (Var Send) changes at the bar right of the type row (knobs are view-only). Top is output (green) and input (gray) spectra.")
+			                             : UI_TEXT(ps_about_fx_sys, "A system effect this part sends to. Top: output (green) and input (gray) spectra mixing all parts' sends. Bottom: change type, return, pan and parameters. Details opens the settings window.")));
 			};
 			for (const fx_col &c : inline_fx)
 				fx_panel(c);
 			fx_panel(var_col);
 			ImGui::SameLine();
-			panel("route", "つなぎ（送りと順序）", w, tall, part, m, br, {}, PANEL_FIXED,
+			panel("route", UI_TEXT(ps_title_route, "Routing (sends and order)"), w, tall, part, m, br, {}, PANEL_FIXED,
 			      [](int p, xg::model &mm, bridge &b, float pw, float ph) { route_cell(p, mm, b, pw, ph); },
-			      "このパートの音がどのエフェクトを通って出ていくか。上の絵の数字（送りの量）を上下にドラッグ・ホイール・"
-			      "ダブルクリックで変える。XG の並びは VAR → CHO → REV に決まっていて、「つなぎ方」で前から後ろへの送りを"
-			      "開け閉めして順序（並列・直列）を選ぶ。横に送るのは Shift + ホイール");
+			      UI_TEXT(ps_about_route, "Which effects this part's sound goes through. Drag the send amounts up/down, wheel, or double-click to change. XG order is fixed VAR to CHO to REV; Flow opens and closes front-to-back sends to pick parallel or series order. Shift plus wheel scrolls sideways."));
 			for (const fx_col &c : sys_fx)
 				fx_panel(c);
 			ImGui::EndChild();
 			ImGui::EndTabItem();
 		}
-		if (ImGui::BeginTabItem("マトリクス")) {
+		if (ImGui::BeginTabItem(UI_TEXT(ps_tab_matrix, "Matrix"))) {
 			// 操作子 6 つ × 行き先 6 つ（モジュレーションのマトリクス）
 			const float room_h = body_h - (ImGui::GetCursorScreenPos().y - top_y);
 			if (ImGui::BeginChild("matrix", ImVec2(0, room_h), ImGuiChildFlags_None, ImGuiWindowFlags_NoScrollbar)) {
@@ -1392,13 +1400,13 @@ void part_shapes::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 			ImGui::EndChild();
 			ImGui::EndTabItem();
 		}
-		if (ImGui::BeginTabItem("すべて")) {
+		if (ImGui::BeginTabItem(UI_TEXT(ps_tab_all, "All"))) {
 			// エディタのパートの面と同じ組（xgui::PART_GROUPS）を、幅に合わせた列数で並べる
 			if (ImGui::BeginChild("all", ImVec2(0, body_h - (ImGui::GetCursorScreenPos().y - top_y)))) {
 				const int columns = std::clamp(int(ImGui::GetContentRegionAvail().x / (fs * 16.0f)), 1, 3);
 				if (ImGui::BeginTable("groups", columns, ImGuiTableFlags_SizingStretchSame)) {
 					int n = 0;
-					for (const part_group &g : PART_GROUPS) {
+					for (const part_group &g : part_groups()) {
 						if (n++ % columns == 0)
 							ImGui::TableNextRow();
 						ImGui::TableNextColumn();
@@ -1428,7 +1436,7 @@ void part_shapes::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 		ImGui::PushFont(nullptr, fs * BAR_SCALE);
 		const std::string &t = hint_text();
 		if (t.empty()) {
-			ImGui::TextDisabled("項目にカーソルを載せると、ここに説明が出る（「説明を出す」を切るとこの欄は消える）");
+			ImGui::TextDisabled("%s", UI_TEXT(ps_hint_bar, "Hover over an item for an explanation here (uncheck Show help to hide this bar)"));
 		} else {
 			// 1 行目（区画や項目の名前）は色を変える
 			const size_t nl = t.find('\n');

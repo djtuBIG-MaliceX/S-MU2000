@@ -5,6 +5,7 @@
 #include "driver.h"
 #include "fx_icons.h"
 #include "overview.h"
+#include "ui/texts.h"
 #include "xg_state.h"
 
 #include "imgui.h"
@@ -120,14 +121,14 @@ void master_editor::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 	// ---- 上の左: システム
 	const float sys_w = std::min(fs * 22.0f, avail.x * 0.35f);
 	if (ImGui::BeginChild("system", ImVec2(sys_w, top_h), ImGuiChildFlags_Borders)) {
-		heading("システム");
+		heading(UI_TEXT(me_sys, "System"));
 		ImGui::PushItemWidth(-fs * 6.5f);
 		param_slider("system.master_volume", 0, m, br);
 		param_slider("system.master_tune", 0, m, br);
 		param_slider("system.transpose", 0, m, br);
 		ImGui::PopItemWidth();
 		ImGui::Spacing();
-		ImGui::TextDisabled("チューンは 0.1 セントの目盛り、\n移調は半音");
+		ImGui::TextDisabled("%s", UI_TEXT(me_tune_note, "Tune moves in 0.1 cent steps,\ntranspose in semitones"));
 		ImGui::Spacing();
 		sysex_pane(ram, br);
 	}
@@ -136,13 +137,13 @@ void master_editor::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 
 	// ---- 上の右: システムエフェクト（リバーブ・コーラス・バリエーション）
 	if (ImGui::BeginChild("effects", ImVec2(0, top_h), ImGuiChildFlags_Borders)) {
-		heading("システムエフェクト");
+		heading(UI_TEXT(me_fx, "System effects"));
 		const ImGuiTableFlags tf = ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_BordersInnerV;
 		if (ImGui::BeginTable("fx", 4, tf)) {
 			ImGui::TableSetupColumn("##what", ImGuiTableColumnFlags_WidthFixed, fs * 6.5f);
-			ImGui::TableSetupColumn("リバーブ");
-			ImGui::TableSetupColumn("コーラス");
-			ImGui::TableSetupColumn("バリエーション");
+			ImGui::TableSetupColumn(UI_TEXT(sys_reverb, "Reverb"));
+			ImGui::TableSetupColumn(UI_TEXT(sys_chorus, "Chorus"));
+			ImGui::TableSetupColumn(UI_TEXT(sys_variation, "Variation"));
 			ImGui::TableHeadersRow();
 
 			// 1 行ずつ。無い所は空けておく
@@ -163,7 +164,7 @@ void master_editor::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 			ImGui::TableNextRow();
 			ImGui::TableNextColumn();
 			ImGui::AlignTextToFramePadding();
-			ImGui::TextUnformatted("種類");
+			ImGui::TextUnformatted(UI_TEXT(fx_kind, "Type"));
 			ImGui::TableNextColumn();
 			ImGui::SetNextItemWidth(-FLT_MIN);
 			type_combo("##revtype", xg::rev_types(), "reverb.type", m, br);
@@ -178,19 +179,19 @@ void master_editor::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 			ImGui::TableNextRow();
 			ImGui::TableNextColumn();
 			ImGui::AlignTextToFramePadding();
-			ImGui::TextUnformatted("パラメータ");
+			ImGui::TextUnformatted(UI_TEXT(me_params, "Parameters"));
 			for (int slot : { 5, 6, 7 }) {
 				ImGui::TableNextColumn();
 				ImGui::PushID(slot);
-				if (ImGui::Button("つまみを開く..."))
+				if (ImGui::Button(UI_TEXT(me_knobs_open, "Open knobs...")))
 					request_fx(slot);
 				ImGui::PopID();
 			}
 
-			row("戻り量", "reverb.return", "chorus.return", "variation.return");
-			row("パン", "reverb.pan", "chorus.pan", "variation.pan");
-			row("リバーブへ", nullptr, "chorus.to_reverb", "variation.to_reverb");
-			row("コーラスへ", nullptr, nullptr, "variation.to_chorus");
+			row(UI_TEXT(me_back, "Return"), "reverb.return", "chorus.return", "variation.return");
+			row(UI_TEXT(me_pan, "Pan"), "reverb.pan", "chorus.pan", "variation.pan");
+			row(UI_TEXT(me_to_rev, "To reverb"), nullptr, "chorus.to_reverb", "variation.to_reverb");
+			row(UI_TEXT(me_to_cho, "To chorus"), nullptr, nullptr, "variation.to_chorus");
 
 			// バリエーションの接続。INSERTION のときは戻り量と送りは使われず、掛けるパートに直に入る
 			int conn = 1;
@@ -198,7 +199,7 @@ void master_editor::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 			ImGui::TableNextRow();
 			ImGui::TableNextColumn();
 			ImGui::AlignTextToFramePadding();
-			ImGui::TextUnformatted("接続");
+			ImGui::TextUnformatted(UI_TEXT(fx_connect, "Connection"));
 			ImGui::TableNextColumn();
 			ImGui::TableNextColumn();
 			ImGui::TableNextColumn();
@@ -208,7 +209,7 @@ void master_editor::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 			ImGui::TableNextRow();
 			ImGui::TableNextColumn();
 			ImGui::AlignTextToFramePadding();
-			ImGui::TextUnformatted("掛けるパート");
+			ImGui::TextUnformatted(UI_TEXT(fx_part, "Part"));
 			ImGui::TableNextColumn();
 			ImGui::TableNextColumn();
 			ImGui::TableNextColumn();
@@ -217,7 +218,7 @@ void master_editor::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 			part_combo("##varpart", "variation.part", m, br);
 			ImGui::EndDisabled();
 			if (known_conn && conn != 0 && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-				ImGui::SetTooltip("接続が INSERTION のときだけ使う");
+				ImGui::SetTooltip("%s", UI_TEXT(me_insert_note, "Only used when connected as INSERTION"));
 			ImGui::EndTable();
 		}
 	}
@@ -226,18 +227,18 @@ void master_editor::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 	// ---- 下: マスター EQ
 	if (ImGui::BeginChild("eq", ImVec2(0, 0), ImGuiChildFlags_Borders)) {
 		ImGui::AlignTextToFramePadding();
-		ImGui::TextUnformatted("マスター EQ");
+		ImGui::TextUnformatted(UI_TEXT(me_master_eq, "Master EQ"));
 		ImGui::SameLine(0, fs * 1.5f);
-		ImGui::TextUnformatted("種類");
+		ImGui::TextUnformatted(UI_TEXT(fx_kind, "Type"));
 		ImGui::SameLine();
 		ImGui::SetNextItemWidth(fs * 8);
 		choice_combo("##eqtype", "master_eq.type", m, br);
 		if (ImGui::IsItemHovered())
-			ImGui::SetTooltip("種類を選ぶと、firmware が 5 つの帯をその種類の値に書き換える");
+			ImGui::SetTooltip("%s", UI_TEXT(me_eq_type_note, "Picking a type rewrites the 5 bands to that type's values"));
 		for (int band : { 1, 5 }) {
 			char key[24], label[32];
 			std::snprintf(key, sizeof(key), "master_eq.shape%d", band);
-			std::snprintf(label, sizeof(label), "帯 %d をピークにする", band);
+			std::snprintf(label, sizeof(label), UI_TEXT(me_band_peak_fmt, "Make band %d peak"), band);
 			int shape = 0;
 			const bool known = m.get(P(key), 0, shape);
 			bool peak = shape == 1;
@@ -247,8 +248,8 @@ void master_editor::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 				br.send(m.set(P(key), 0, peak ? 1 : 0));
 			ImGui::EndDisabled();
 			if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-				ImGui::SetTooltip(band == 1 ? "帯 1 の形。外すとローシェルフ、入れるとピーク"
-				                            : "帯 5 の形。外すとハイシェルフ、入れるとピーク");
+				ImGui::SetTooltip("%s", band == 1 ? UI_TEXT(me_band_shape1, "Band 1 shape. Off is low-shelf, on is peak")
+				                                  : UI_TEXT(me_band_shape5, "Band 5 shape. Off is high-shelf, on is peak"));
 		}
 		ImGui::Separator();
 
@@ -262,11 +263,11 @@ void master_editor::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 			ImGui::TableSetupColumn("##what", ImGuiTableColumnFlags_WidthFixed, fs * 4.5f);
 			for (int b = 1; b <= 5; b++) {
 				char name[16];
-				std::snprintf(name, sizeof(name), "帯 %d", b);
+				std::snprintf(name, sizeof(name), UI_TEXT(me_band_fmt, "Band %d"), b);
 				ImGui::TableSetupColumn(name);
 			}
 			ImGui::TableHeadersRow();
-			static const char *const WHAT[3] = { "ゲイン", "周波数", "Q（幅）" };
+			const char *const WHAT[3] = { UI_TEXT(me_w_gain, "Gain"), UI_TEXT(me_w_freq, "Freq"), UI_TEXT(me_w_q, "Q (width)") };
 			static const char *const KEY[3] = { "master_eq.gain%d", "master_eq.freq%d", "master_eq.q%d" };
 			for (int r = 0; r < 3; r++) {
 				ImGui::TableNextRow();
@@ -321,7 +322,7 @@ void master_editor::sysex_pane(const xg_snapshot &ram, bridge &br)
 		for (u8 b : m_import)
 			n += b == 0xf0;
 		char note[64];
-		std::snprintf(note, sizeof(note), n ? "読み込み中（SysEx %zu 通）" : "SysEx が入っていない", n);
+		std::snprintf(note, sizeof(note), n ? UI_TEXT(note_sysex_busy_fmt, "Loading (%zu SysEx messages)") : UI_TEXT(note_sysex_idle, "No SysEx found"), n);
 		xgui::set_file_note(note);
 	}
 	while (m_import_at < m_import.size() && br.audio_ms() >= m_import_hold_until) {
@@ -347,17 +348,17 @@ void master_editor::sysex_pane(const xg_snapshot &ram, bridge &br)
 			m_import_hold_until = br.audio_ms() + 200;
 		m_import_at = end + 1;
 		if (m_import_at >= m_import.size())
-			xgui::set_file_note("読み込んだ");
+			xgui::set_file_note(UI_TEXT(note_imported, "Imported"));
 	}
 	if (m_import_at >= m_import.size() && !m_import.empty()) {
 		m_import.clear();
 		m_import_at = 0;
 	}
 
-	ImGui::SeparatorText("SysEx（.syx）");
+	ImGui::SeparatorText(UI_TEXT(me_sysex_title, "SysEx (.syx)"));
 	const bool can = xgui::file_dialogs() && ready && !m_export_waiting && m_import.empty();
 	ImGui::BeginDisabled(!can);
-	if (ImGui::Button("書き出す...")) {
+	if (ImGui::Button(UI_TEXT(me_export, "Export..."))) {
 		if (!m_diff_only) {
 			xgui::ask_save_file(setup_messages(ram));
 		} else {
@@ -366,19 +367,19 @@ void master_editor::sysex_pane(const xg_snapshot &ram, bridge &br)
 		}
 	}
 	ImGui::SameLine();
-	if (ImGui::Button("読み込む..."))
+	if (ImGui::Button(UI_TEXT(me_import, "Import...")))
 		xgui::ask_open_file();
 	ImGui::EndDisabled();
 	if (!xgui::file_dialogs() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-		ImGui::SetTooltip("この環境ではまだファイルの窓を開けない");
-	ImGui::Checkbox("既定と違うものだけ", &m_diff_only);
+		ImGui::SetTooltip("%s", UI_TEXT(me_no_dialog, "No file dialog on this platform yet"));
+	ImGui::Checkbox(UI_TEXT(me_diff_only, "Only non-defaults"), &m_diff_only);
 	if (ImGui::IsItemHovered())
-		ImGui::SetTooltip("入れると、頭に XG System On を置き、既定値と違うところだけを書き出す（曲の頭に貼るのに向く）。\n"
-		                  "外すと、XG の値を全部書き出す。\n"
-		                  "既定値は、機械の姿を控えて XG System On を流して読み、控えを戻して作る。\n"
-		                  "最初の 1 回だけ、音が一瞬途切れることがある");
+		ImGui::SetTooltip("%s", UI_TEXT(me_diff_only_tip, "On: start with XG System On, then only what differs from defaults (for pasting at a song start).\n"
+		                                            "Off: write all XG values.\n"
+		                                            "Defaults are read by saving the machine, playing XG System On and restoring.\n"
+		                                            "Sound may glitch for a moment the first time"));
 	if (m_export_waiting)
-		ImGui::TextDisabled("既定値を読んでいる...");
+		ImGui::TextDisabled("%s", UI_TEXT(me_reading_defaults, "Reading defaults..."));
 	else if (!xgui::file_note().empty())
 		ImGui::TextDisabled("%s", xgui::file_note().c_str());
 }

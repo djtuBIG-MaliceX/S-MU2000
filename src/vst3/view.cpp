@@ -5,8 +5,7 @@
 // platform (view_win.cpp, view_mac.mm), reached through plug_window.h.
 //
 // This file is plain C++ and includes compat/gdi.h, which is what paints the
-// panel on both platforms. On macOS that means CoreGraphics is fine to include
-// here too -- it is Cocoa, not CoreGraphics, that clashes with the GDI shim.
+// panel on both platforms.
 
 #include "view.h"
 #include "plug_window.h"
@@ -431,7 +430,7 @@ void plug_view::card_make(const std::string &path, int mb)
 	std::string err;
 	smartmedia card;
 	if (!card.create(u32(mb)) || !card.save(path, err)) {
-		card_error(err.empty() ? "SmartMedia を作れない" : err);
+		card_error(err.empty() ? UI_TEXT(dlg_card_create_fail, "Cannot create the SmartMedia image") : err);
 		return;
 	}
 	if (!m_engine.card_insert(path, err)) {
@@ -442,8 +441,8 @@ void plug_view::card_make(const std::string &path, int mb)
 	// on the machine before it holds anything. gui.cpp says the same thing when
 	// one is made there
 	if (m_window)
-		m_window->alert("空の SmartMedia を差しました。\n"
-		                "使う前に、本体の UTIL → CARD → Format で書式化してください。");
+		m_window->alert(UI_TEXT(dlg_fresh_card, "Inserted a blank SmartMedia image.\n"
+		                                        "Before use, format it on the machine: UTIL → CARD → Format."));
 }
 
 void plug_view::card_insert_path(const std::string &path)

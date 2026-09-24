@@ -1341,8 +1341,23 @@ void mu2000::note_fw_swp(bool master, u32 reg, u16 value)
 	// MEG の戻りのミキサは毎サンプル書き替わるので数えない
 	if (rr == 0x0e || rr == 0x0f || (rr >= 0x38 && rr <= 0x3f))
 		return;
-	if ((m_ndrv.slot_mask() >> (reg / 64)) & 1)
+	if ((m_ndrv.slot_mask() >> (reg / 64)) & 1) {
 		m_ne_fw_stomp++;
+		static const bool dbg = std::getenv("SMU2000_STOMP_DEBUG") != nullptr;
+		if (dbg)
+			std::fprintf(stderr, "stomp slot=%u reg=%02x value=%04x\n", reg / 64, rr, value);
+		// そこはもう firmware の音が走っている。二重に書かず、譲って避ける
+		m_ndrv.yield_slot(reg / 64);
+		return;
+	}
+	// **書いたスロットは firmware のものとして避け続ける**（6.220）。
+	// 鍵を押した瞬間の印（上の 0x20e）だけだと、firmware の音が 2 秒より
+	// 長く伸びるときに印が切れてしまい、こちらが取ったあとも firmware が
+	// 自分の音の続きを書いてきて、鳴っている音が途中で化ける。
+	// **いま鳴らしているスロットには印を付けない**（上で返している）。
+	// そこはもう取り合いになっていて、避けても今の音は直らないうえ、
+	// 使える枠だけが減って下のほう（firmware が使う側）へ押し出される
+	m_ndrv.mark_fw_slot(reg / 64);
 }
 
 void mu2000::set_native_engine(int mode)

@@ -9,6 +9,8 @@
 #include "fx_help.h"
 #include "fx_icons.h"
 #include "eq_curve.h"
+#include "ui/lang.h"
+#include "ui/texts.h"
 
 #include <algorithm>
 #include <cmath>
@@ -144,7 +146,7 @@ bool fx_editor::knob(const char *id, int &v, int lo, int hi, float size, const c
 	dl->AddRectFilled(t0, ImVec2(t0.x + ts.x + fs * 0.6f, t0.y + fs * 1.1f), IM_COL32(12, 14, 10, 200), 3.0f);
 	dl->AddText(ImVec2(t0.x + fs * 0.3f, t0.y + fs * 0.05f), dim ? IM_COL32(120, 140, 110, 255) : IM_COL32(150, 230, 90, 255), text);
 	if (tooltip && hovered && !active)
-		ImGui::SetItemTooltip("%s  %s\n上下にドラッグ（Shift で細かく）・ホイール・ダブルクリックで数を打つ", label, text);
+		ImGui::SetItemTooltip(UI_TEXT(fxe_slider_tip_fmt, "%s  %s\nDrag up/down (Shift for fine), wheel, or double-click to type a value"), label, text);
 	ImGui::PopID();
 	const bool changed = nv != v;
 	v = nv;
@@ -328,8 +330,7 @@ void fx_editor::eq_graph(const xg::fx_def &def, xg::model &m, bridge &br, ImVec2
 		dl->AddText(ImVec2(h.x - ImGui::CalcTextSize(n).x * 0.5f, h.y - fs * 0.5f), IM_COL32(10, 12, 10, 255), n);
 	}
 	if (hovered && !active && hot >= 0)
-		ImGui::SetItemTooltip(help_lang() == 1 ? "Drag a point: sideways for frequency, up/down for gain. Wheel on M for width."
-		                                       : "点をつまんで、横で周波数、縦でゲイン。M の点ではホイールで幅");
+		ImGui::SetItemTooltip("%s", UI_TEXT(fxe_eq_tip, "Drag a point: sideways for frequency, up/down for gain. Wheel on M for width."));
 }
 
 
@@ -376,7 +377,7 @@ void fx_editor::draw(xg::model &m, const xg_snapshot &, bridge &br)
 	// ---- 種類と掛けるパート
 	ImGui::SameLine(0, fs * 1.5f);
 	ImGui::AlignTextToFramePadding();
-	ImGui::TextUnformatted("種類");
+	ImGui::TextUnformatted(UI_TEXT(fx_kind, "Type"));
 	ImGui::SameLine();
 	ImGui::SetNextItemWidth(fs * 11);
 	if (begin_fx_combo("##type", has_type ? type : -1, ImGuiComboFlags_HeightLarge)) {
@@ -390,7 +391,7 @@ void fx_editor::draw(xg::model &m, const xg_snapshot &, bridge &br)
 	}
 	if (!sys) {
 		ImGui::SameLine(0, fs);
-		ImGui::TextUnformatted("掛けるパート");
+		ImGui::TextUnformatted(UI_TEXT(fx_part, "Part"));
 		ImGui::SameLine();
 		ImGui::SetNextItemWidth(fs * 6);
 		if (ImGui::BeginCombo("##part", part < XG_PARTS + 2 ? part_name(part).c_str() : "OFF", ImGuiComboFlags_HeightLarge)) {
@@ -468,9 +469,9 @@ void fx_editor::draw(xg::model &m, const xg_snapshot &, bridge &br)
 	if (!def || def->count == 0) {
 		ImGui::SetCursorScreenPos(ImVec2(left, y));
 		ImGui::TextColored(ImVec4(1, 1, 1, 0.75f), "%s",
-		                   msb == 0 ? "NO EFFECT（種類を選ぶと、ここにつまみが並ぶ）"
-		                   : msb == 0x40 ? "THRU（パラメータは無い）"
-		                                 : "この種類のパラメータの表はまだ無い");
+		                   msb == 0 ? UI_TEXT(fxe_noeffect, "NO EFFECT (pick a type to list its knobs here)")
+		                   : msb == 0x40 ? UI_TEXT(fxe_thru, "THRU (no parameters)")
+		                                 : UI_TEXT(fxe_no_table, "No parameter table for this type yet"));
 	} else {
 		const int per_row = std::max(1, int((right - left) / (cell_w + fs * 0.6f)));
 		int shown = 0;                          // 並べた数（その塊に無いパラメータは飛ばす）
@@ -513,10 +514,10 @@ void fx_editor::draw(xg::model &m, const xg_snapshot &, bridge &br)
 		dl->AddText(font, fs * 1.1f, ImVec2(note0.x + fs * 0.6f, note0.y + fs * 0.4f), IM_COL32(150, 230, 90, 255), head);
 		const char *h = fx_param_help(fp.label);
 		dl->AddText(font, fs, ImVec2(note0.x + fs * 0.6f, note0.y + fs * 1.8f), IM_COL32(250, 250, 240, 230),
-		            h ? h : (help_lang() == 1 ? "(no description yet)" : "（まだ説明が無い）"), nullptr, note1.x - note0.x - fs * 1.2f);
+		            h ? h : UI_TEXT(fxe_no_desc, "(no description yet)"), nullptr, note1.x - note0.x - fs * 1.2f);
 	} else if (def && def->count) {
 		dl->AddText(font, fs, ImVec2(note0.x + fs * 0.6f, note0.y + fs * 0.5f), IM_COL32(250, 250, 240, 150),
-		            help_lang() == 1 ? "Hover over a knob to see what it does." : "つまみにカーソルを載せると、ここに何に効くのかが出る");
+		            UI_TEXT(fxe_hover_knob, "Hover over a knob to see what it does."));
 	}
 	ImGui::SetCursorScreenPos(ImVec2(pos.x, end.y));
 	ImGui::Dummy(ImVec2(0, 0));

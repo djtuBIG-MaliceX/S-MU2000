@@ -14,7 +14,7 @@
 #                 (mingw-w64 が要る: brew install mingw-w64)
 
 # 音を作るのは重いので最適化を上げる。-O2 より 6% 速い
-CXXFLAGS ?= -std=c++20 -O3 -Wall -Wno-unused-variable -Wno-unused-but-set-variable
+CXXFLAGS ?= -std=c++20 -O3 -Wall -Wformat-security -Wno-unused-variable -Wno-unused-but-set-variable
 
 # ---- Platform ----------------------------------------------------------------
 #
@@ -312,7 +312,11 @@ $(BUILD)/imgui/%.o: %.cpp
 
 $(BUILD)/src/gui.o: CXXFLAGS += $(IMGUI_FLAGS)
 
-$(BUILD)/gui$(EXE): $(OBJS) $(BUILD)/src/mu2000.o $(BUILD)/src/smf.o $(UI_OBJS) $(PC_OBJS) $(BUILD)/src/gui.o
+# The app classes pull in app.h, whose editor headers want imgui.h
+$(BUILD)/src/ui/app_win.o: CXXFLAGS += $(IMGUI_FLAGS)
+$(BUILD)/src/ui/window_win.o: CXXFLAGS += $(IMGUI_FLAGS)
+
+$(BUILD)/gui$(EXE): $(OBJS) $(BUILD)/src/mu2000.o $(BUILD)/src/smf.o $(UI_OBJS) $(PC_OBJS) $(BUILD)/src/gui.o $(BUILD)/src/ui/app_win.o $(BUILD)/src/ui/window_win.o
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS) -lwinmm -lole32 -lgdi32 -luser32 -lavrt -lcomdlg32 -lshell32 	       -ld3d11 -ldxgi -ld3dcompiler -ldwmapi -limm32
 
@@ -490,6 +494,8 @@ LINUX_GUI_SRCS := src/ui/panel.cpp src/ui/layout.cpp src/ui/svg.cpp \
                   src/ui/player.cpp src/xg/model.cpp \
                   src/ui/xg_ui.cpp src/ui/fx_help.cpp src/ui/fx_icons.cpp \
                   src/ui/sdl_popup.cpp \
+                  src/ui/window_sdl.cpp \
+                  src/ui/app_linux.cpp \
                   src/ui/pc_window_linux.cpp \
                   src/ui/pc_editor.cpp src/ui/overview.cpp src/ui/fx_editor.cpp \
                   src/ui/part_shapes.cpp src/ui/master_editor.cpp
@@ -635,15 +641,14 @@ $(BUILD)/live$(EXE): $(OBJS) $(BUILD)/src/mu2000.o $(MAC_IO_OBJS) $(BUILD)/src/l
 # CoreGraphics and window_mac.mm fills the window in with AppKit
 # (doc/porting-macos.md).
 #
-# window_mac.mm is the one file compiled as Objective-C++: Cocoa's headers and
-# compat/gdi.h both want to define BOOL and Polygon, so they cannot be in the
-# same translation unit.
+# window_mac.mm is the one file compiled as Objective-C++.
 MAC_GUI_SRCS := src/ui/panel.cpp src/ui/editor.cpp src/ui/effects.cpp \
                 src/ui/png.cpp src/ui/layout.cpp src/ui/svg.cpp src/ui/player.cpp \
                 src/ui/audio_out_mac.cpp src/ui/audio_in_mac.cpp \
                 src/ui/midi_in_mac.cpp src/ui/midi_out_mac.cpp \
                 src/xg/model.cpp \
-                src/compat/gdi_mac.cpp src/ui/window_mac.mm src/gui_mac.cpp
+                src/compat/gdi_mac.cpp src/ui/window_mac.mm src/ui/app_mac.cpp \
+                src/gui_mac.cpp
 
 # PC editor (doc/pc-editor.md). The views are the same files as on Windows;
 # the window is AppKit + Metal (pc_window_mac.mm). imgui_impl_osx is not used
@@ -672,8 +677,11 @@ $(BUILD)/%.o: %.mm
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -fobjc-arc -c -o $@ $<
 
-# The macOS front end pulls in the editor's headers (fx_editor.h and friends),
-# which want imgui.h on the include path. Same reason as gui.o on Windows
+# The macOS front end pulls in the editor's headers (fx_editor.h and friends)
+# through app.h, which want imgui.h on the include path. Same reason as gui.o
+# on Windows -- and window_mac.mm too now, since it includes app.h directly
+$(BUILD)/src/ui/app_mac.o: CXXFLAGS += $(IMGUI_FLAGS)
+$(BUILD)/src/ui/window_mac.o: CXXFLAGS += $(IMGUI_FLAGS)
 $(BUILD)/src/gui_mac.o: CXXFLAGS += $(IMGUI_FLAGS)
 
 MAC_FRAMEWORKS += -framework Metal
@@ -827,12 +835,15 @@ probe: $(BUILD)/vst3probe$(EXE) $(VST3_BIN)
 AU_DIR := $(BUILD)/S-MU2000.component
 AU_BIN := $(AU_DIR)/Contents/MacOS/S-MU2000
 
-# The editor is the VST3 view, so the AU carries that too: editor_mac.mm makes a
-# smu2000::vst3::plug_view and hands it to the host inside an NSView. Its own
-# files are plugin.cpp and editor_mac.mm; everything below them is the same panel
+# The editor is the VST3 view, so the AU carries that too: panel_nsview.mm makes
+# a smu2000::vst3::plug_view and hands it back inside an NSView, and the AUv3
+# asks that same file for the same view. Its own files are plugin.cpp and
+# editor_mac.mm, which is now only the AUv2 way of being asked; everything below
+# them is the same panel
 # iids.cpp is view.cpp's: it answers IPlugView's interface id, and view.cpp
 # refers to it even when the host on the other side is an AU rather than a VST3
 AU_SRCS := src/au/plugin.cpp src/au/editor_mac.mm src/vst3/engine.cpp src/vst3/iids.cpp \
+           src/vst3/panel_nsview.mm \
            $(PANEL_VIEW_SRCS) $(PANEL_SRCS) $(VST3_SDK_SRCS)
 AU_OBJS := $(AU_SRCS:%.cpp=$(BUILD)/vst3obj/%.o)
 AU_OBJS := $(AU_OBJS:%.mm=$(BUILD)/vst3obj/%.o)
@@ -895,9 +906,11 @@ AUV3_BIN   := $(AUV3_APPEX)/Contents/MacOS/S-MU2000AU
 AUV3_HOST  := $(AUV3_APP)/Contents/MacOS/S-MU2000
 
 # The sound engine is the same one VST3 uses (no VST3 types in it).
-# The UI is the same panel VST3 and AUv2 show (view_controller.mm hosts plug_view)
+# The UI is the same panel VST3 and AUv2 show, and literally the same editor:
+# panel_nsview.mm builds the NSView, view_controller.mm only puts it in the
+# NSViewController the AUv3 hands its host
 AUV3_SRCS := src/auv3/audio_unit.mm src/auv3/factory.mm src/auv3/view_controller.mm \
-             src/vst3/engine.cpp src/vst3/iids.cpp \
+             src/vst3/engine.cpp src/vst3/iids.cpp src/vst3/panel_nsview.mm \
              $(PANEL_VIEW_SRCS) $(PANEL_SRCS) $(VST3_SDK_SRCS)
 AUV3_OBJS := $(AUV3_SRCS:%.cpp=$(BUILD)/auv3obj/%.o)
 AUV3_OBJS := $(AUV3_OBJS:%.mm=$(BUILD)/auv3obj/%.o)

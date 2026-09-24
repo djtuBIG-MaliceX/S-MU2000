@@ -210,7 +210,9 @@ void panel::paint_editor(HDC dc, const char *status) const
 	text_in(dc, info, line1, TEXT, m_font_small, DT_LEFT | DT_TOP | DT_WORDBREAK);
 
 	RECT hint = scale(26, 288, 290, 60);
-	text_in(dc, hint, texts().editor_hint,
+	text_in(dc, hint, UI_TEXT(editor_hint, "Drag knobs up/down, or use the wheel.\n"
+                           "Sends XG parameter changes.\n"
+                           "Values are read back from the MU2000."),
 	        RGB(104, 109, 116), m_font_small, DT_LEFT | DT_TOP | DT_WORDBREAK);
 
 	if (status && status[0])
@@ -430,9 +432,9 @@ void panel::build_editor_spots()
 	}
 
 	m_spots.push_back({ spot_kind::action, mu2000::button::count, CTL_XG_RESET,
-	                    scale(26, 250, 130, 24), texts().editor_xg_reset, "" });
+	                    scale(26, 250, 130, 24), UI_TEXT(editor_xg_reset, "XG reset"), "" });
 	m_spots.push_back({ spot_kind::action, mu2000::button::count, CTL_ALL_OFF,
-	                    scale(162, 250, 150, 24), texts().editor_all_off, "" });
+	                    scale(162, 250, 150, 24), UI_TEXT(editor_all_off, "All notes off"), "" });
 }
 
 } // namespace ui

@@ -1650,8 +1650,39 @@ def case_xgsys():
     return [track(seq(ev))], t + 2.0
 
 
+def case_calshort():
+    """**写し取りが足りないまま鳴らす**（doc/native-engine.md の 6.219）。
+
+    要素を 2 つ以上持つ音色の「写し取りの音」を、ほかのパートで声を埋めた
+    ところで鳴らすと、firmware がこちらのスロットを取り返して**要素の数より
+    少ない数しか写し取れない**。そのあとの音で native の口は写し取りの記録が
+    無いまま組むことになる。ここを確かめずに見ていて**落ちていた**"""
+    ev = head()
+    # ほかの 15 パートを厚い音色にして、声をめいっぱい使う
+    for ch in range(1, 16):
+        if ch == 9:
+            continue
+        ev.append((1.0, bytes([0xc0 | ch, 48 + (ch % 8)])))     # Strings 系（要素が多い）
+    for ch in range(1, 16):
+        if ch == 9:
+            continue
+        base = 40 + ch
+        for j, k in enumerate((base, base + 3, base + 7, base + 12)):
+            ev += note(ch, k, 100, 1.2 + ch * 0.01 + j * 0.005, 3.0)
+    # 声が埋まっているあいだに、パート 1 の写し取りの音を鳴らす。
+    # 音色は要素を 2 つ持つもの（prog 60 = French Horn）。奪い合いが起きると
+    # 写し取りは 1 つしか残らない
+    ev.append((1.5, bytes([0xc0, 60])))
+    ev += note(0, 60, 100, 1.9, 0.6)
+    # 埋まりが解けてから、同じ音色でもう一度。ここが native の道
+    ev += note(0, 64, 100, 5.2, 1.2)
+    ev += note(0, 67, 100, 5.4, 1.2)
+    return [track(seq(ev))], 7.5
+
+
 CASES = {
     "piano":   case_piano,
+    "calshort": case_calshort,
     "chord":   case_chord,
     "drums":   case_drums,
     "effects": case_effects,

@@ -12,14 +12,20 @@
 // Plain C++ only: gui.cpp is windows.h-heavy and window_mac.h must stay
 // AppKit/gdi-free, so this header includes only <string> and <vector>.
 // Header-only (inline) so no build system changes are needed anywhere.
+//
+// Alongside the menus this is home to the small shared pump vocabulary:
+// mouse_out and the F-key codes every platform's event loop translates into.
 
 #ifndef S_MU2000_UI_MENU_H
 #define S_MU2000_UI_MENU_H
 
 #pragma once
 
+#include <cstdio>
 #include <string>
 #include <vector>
+
+#include "ui/texts.h"
 
 namespace ui {
 
@@ -41,6 +47,30 @@ struct menu_item {
 struct menu_group {
 	std::string            title;
 	std::vector<menu_item> items;
+};
+
+// What one mouse press on the main window did. The pump decides what still
+// to do: press a panel control down (panel_pressed, feeds drag/up and the
+// repaint), open a PC window (bar_window, a kind id, -1 when none) or show
+// the popup (show_menu; the items come from menu_groups_for()). Lives here
+// because every platform's pump reads the same struct: the Mac's bool
+// mouse_down once left an opened window looking like a popup request
+struct mouse_out {
+	bool panel_pressed = false;
+	bool opened_window = false;
+	bool show_menu = false;
+};
+
+// Panel keys that are not characters: the F-keys, in a shared code space
+// above ASCII that every platform translates into (virtual keys on Windows,
+// SDL keycodes on Linux, Carbon key codes on macOS). button_for_char()
+// ignores anything outside ASCII, so these cannot alias a panel button --
+// which is what lets the one shared handler act on them
+enum : int {
+	KEY_F2 = 0x100,   // the PC editor window
+	KEY_F3 = 0x101,   // the overview window
+	KEY_F4 = 0x102,   // the native-engine toggle
+	KEY_F5 = 0x103,   // layout reload
 };
 
 // Menu command numbers for picking a port. MIDI IN has four ports, laid out
@@ -97,10 +127,16 @@ static_assert([] {
 
 // The names shown in the menu and in the startup report, A B C D.
 // (The gui.ini keys stay per front end with the settings code.)
-inline constexpr const char *IN_LABELS[4] = {
-	"MIDI IN A（パート 1-16）", "MIDI IN B（パート 17-32）",
-	"MIDI IN C（パート 33-48）", "MIDI IN D（パート 49-64）"
-};
+// Localized: the table in ui/texts.h (menu_in_a and friends).
+inline const char *in_label(int p)
+{
+	switch (p) {
+	case 0: return UI_TEXT(menu_in_a, "MIDI IN A (parts 1-16)");
+	case 1: return UI_TEXT(menu_in_b, "MIDI IN B (parts 17-32)");
+	case 2: return UI_TEXT(menu_in_c, "MIDI IN C (parts 33-48)");
+	default: return UI_TEXT(menu_in_d, "MIDI IN D (parts 49-64)");
+	}
+}
 
 // Everything a menu shows. MIDI IN is four ports in A-D order; device
 // choices are indices into the lists (-1 is unused). The recording device
@@ -175,10 +211,10 @@ inline menu_group menu_port_group(const char *title, const std::vector<std::stri
 	using namespace menu_detail;
 	menu_group g;
 	g.title = title;
-	g.items.push_back(text("使わない", id_none, now < 0, true));
+	g.items.push_back(text(UI_TEXT(menu_unused, "Unused"), id_none, now < 0, true));
 	g.items.push_back(separator());
 	if (names.empty()) {
-		g.items.push_back(text("（機器が無い）", 0, false, false));
+		g.items.push_back(text(UI_TEXT(menu_no_devices, "(No devices)"), 0, false, false));
 		return g;
 	}
 	for (size_t i = 0; i < names.size(); i++)
@@ -191,11 +227,11 @@ inline menu_group menu_ain_group(const std::vector<std::string> &names, const st
 {
 	using namespace menu_detail;
 	menu_group g;
-	g.title = "A/D INPUT（サンプリングで録る音）";
-	g.items.push_back(text("使わない", ID_AIN_NONE, ain_name.empty(), true));
+	g.title = UI_TEXT(menu_ain_title, "A/D INPUT (sound to sample)");
+	g.items.push_back(text(UI_TEXT(menu_unused, "Unused"), ID_AIN_NONE, ain_name.empty(), true));
 	g.items.push_back(separator());
 	if (names.empty()) {
-		g.items.push_back(text("（録音デバイスが無い）", 0, false, false));
+		g.items.push_back(text(UI_TEXT(menu_no_ain, "(No recording devices)"), 0, false, false));
 		return g;
 	}
 	for (size_t i = 0; i < names.size(); i++)
@@ -211,23 +247,23 @@ inline std::vector<menu_group> menu_ports(const menu_state &s)
 	using namespace menu_detail;
 	std::vector<menu_group> groups;
 	for (int p = 0; p < 4; p++)
-		groups.push_back(menu_port_group(IN_LABELS[p], s.midi_ins, s.in_dev[p],
+		groups.push_back(menu_port_group(in_label(p), s.midi_ins, s.in_dev[p],
 		                                 ID_IN_NONE + p * ID_IN_STRIDE,
 		                                 ID_IN_BASE + p * ID_IN_STRIDE));
-	groups.push_back(menu_port_group("MIDI OUT（MU2000 が送り出すもの）", s.midi_outs,
+	groups.push_back(menu_port_group(UI_TEXT(menu_out_mu, "MIDI OUT (what the MU2000 sends)"), s.midi_outs,
 	                                 s.out_dev_mu, ID_OUTMU_NONE, ID_OUTMU_BASE));
-	groups.push_back(menu_port_group("MIDI THRU A（A で受けたものを外へ）", s.midi_outs,
+	groups.push_back(menu_port_group(UI_TEXT(menu_thru_a, "MIDI THRU A (sends out what A receives)"), s.midi_outs,
 	                                 s.out_dev, ID_OUT_NONE, ID_OUT_BASE));
-	groups.push_back(menu_port_group("MIDI THRU B（B で受けたものを外へ）", s.midi_outs,
+	groups.push_back(menu_port_group(UI_TEXT(menu_thru_b, "MIDI THRU B (sends out what B receives)"), s.midi_outs,
 	                                 s.out_dev_b, ID_OUTB_NONE, ID_OUTB_BASE));
 	groups.push_back(menu_ain_group(s.audio_ins, s.ain_name));
 
 	menu_group ed;
-	ed.items.push_back(text("一覧を開く", ID_OVERVIEW, false, true, "F3"));
-	ed.items.push_back(text("エディタを開く", ID_PC_EDITOR, false, true, "F2"));
-	ed.items.push_back(text("エフェクトを C++ で鳴らす（軽い・音は実機と違う）",
+	ed.items.push_back(text(UI_TEXT(menu_open_list, "Open the list"), ID_OVERVIEW, false, true, "F3"));
+	ed.items.push_back(text(UI_TEXT(menu_open_editor, "Open the editor"), ID_PC_EDITOR, false, true, "F2"));
+	ed.items.push_back(text(UI_TEXT(menu_native_fx, "Play effects in C++ (light; differs from hardware)"),
 	                        ID_NATIVE_FX, s.native_fx, true));
-	ed.items.push_back(text("firmware を走らせずに鳴らす（速い・まだ音が違う）",
+	ed.items.push_back(text(UI_TEXT(menu_native_engine, "Play without the firmware (fast; still differs)"),
 	                        ID_NATIVE_ENGINE, s.native_engine, true, "F4"));
 	groups.push_back(ed);
 
@@ -235,7 +271,7 @@ inline std::vector<menu_group> menu_ports(const menu_state &s)
 	// once the firmware is actually up
 	menu_group g;
 	g.items.push_back(separator());
-	g.items.push_back(text("工場出荷状態に戻す...", ID_FACTORY, false, s.ready));
+	g.items.push_back(text(UI_TEXT(menu_factory, "Factory reset..."), ID_FACTORY, false, s.ready));
 	groups.push_back(g);
 	return groups;
 }
@@ -248,7 +284,7 @@ inline std::vector<menu_group> menu_card(const menu_state &s)
 	std::vector<menu_group> groups;
 
 	menu_group fresh;
-	fresh.title = "新しい SmartMedia を作って差す";
+	fresh.title = UI_TEXT(menu_card_new, "Make a new SmartMedia image");
 	fresh.items.push_back(text("16MB", ID_CARD_NEW16, false, true));
 	fresh.items.push_back(text("32MB", ID_CARD_NEW32, false, true));
 	fresh.items.push_back(text("64MB", ID_CARD_NEW64, false, true));
@@ -256,21 +292,26 @@ inline std::vector<menu_group> menu_card(const menu_state &s)
 	groups.push_back(fresh);
 
 	menu_group g;
-	g.items.push_back(text("SmartMedia を差す...", ID_CARD_OPEN, false, true));
-	std::string eject = "SmartMedia を抜く";
+	g.items.push_back(text(UI_TEXT(menu_card_open, "Insert a SmartMedia image..."), ID_CARD_OPEN, false, true));
+	char eject[512];
 	if (!s.card_path.empty())
-		eject += "（" + basename(s.card_path) + "）";
-	g.items.push_back(text(eject.c_str(), ID_CARD_EJECT, false, !s.card_path.empty()));
+		std::snprintf(eject, sizeof(eject), UI_TEXT(menu_card_eject_fmt, "Eject the SmartMedia (%s)"),
+		              basename(s.card_path).c_str());
+	else
+		std::snprintf(eject, sizeof(eject), "%s", UI_TEXT(menu_card_eject, "Eject the SmartMedia"));
+	g.items.push_back(text(eject, ID_CARD_EJECT, false, !s.card_path.empty()));
 	g.items.push_back(separator());
-	g.items.push_back(text("MIDI ファイルを再生...", ID_PLAY_FILE, false, true));
-	std::string stop = "止める";
+	g.items.push_back(text(UI_TEXT(menu_play_file, "Play a MIDI file..."), ID_PLAY_FILE, false, true));
+	char stop[512];
 	if (s.playing)
-		stop += "（" + s.play_name + "）";
-	g.items.push_back(text(stop.c_str(), ID_STOP_FILE, false, s.playing));
+		std::snprintf(stop, sizeof(stop), UI_TEXT(menu_stop_fmt, "Stop (%s)"), s.play_name.c_str());
+	else
+		std::snprintf(stop, sizeof(stop), "%s", UI_TEXT(menu_stop, "Stop"));
+	g.items.push_back(text(stop, ID_STOP_FILE, false, s.playing));
 	// What to do with a MIDI file that uses ports 3 and 4
 	g.items.push_back(separator());
-	g.items.push_back(text("口 3・4 を A・B に重ねて鳴らす", ID_PORTS34_FOLD, s.fold34, true));
-	g.items.push_back(text("口 3・4 は鳴らさない", ID_PORTS34_DROP, !s.fold34, true));
+	g.items.push_back(text(UI_TEXT(menu_fold34, "Fold ports 3+4 onto A and B"), ID_PORTS34_FOLD, s.fold34, true));
+	g.items.push_back(text(UI_TEXT(menu_drop34, "Drop ports 3+4"), ID_PORTS34_DROP, !s.fold34, true));
 	groups.push_back(g);
 	return groups;
 }
@@ -281,11 +322,11 @@ inline std::vector<menu_group> menu_phones(bool analog)
 {
 	using namespace menu_detail;
 	menu_group g;
-	g.items.push_back(text("音の出口", 0, false, false));
+	g.items.push_back(text(UI_TEXT(menu_out_title, "Sound output"), 0, false, false));
 	g.items.push_back(separator());
-	g.items.push_back(text("デジタル（S/PDIF。DPCM の直流も残る）",
+	g.items.push_back(text(UI_TEXT(menu_out_digital, "Digital (S/PDIF; keeps DPCM DC)"),
 	                       ID_OUTPUT_DIGITAL, !analog, true));
-	g.items.push_back(text("アナログ（LINE OUT・PHONES。直流を切る）",
+	g.items.push_back(text(UI_TEXT(menu_out_analog, "Analog (LINE OUT/PHONES; cuts DC)"),
 	                       ID_OUTPUT_ANALOG, analog, true));
 	return { g };
 }
@@ -312,7 +353,7 @@ inline std::vector<menu_group> menu_plug_card(const plug_menu_state &s)
 	std::vector<menu_group> groups;
 
 	menu_group fresh;
-	fresh.title = "新しい SmartMedia を作って差す";
+	fresh.title = UI_TEXT(menu_card_new, "Make a new SmartMedia image");
 	fresh.items.push_back(text("16MB", ID_PLUG_CARD_NEW16, false, s.card_ready));
 	fresh.items.push_back(text("32MB", ID_PLUG_CARD_NEW32, false, s.card_ready));
 	fresh.items.push_back(text("64MB", ID_PLUG_CARD_NEW64, false, s.card_ready));
@@ -320,14 +361,17 @@ inline std::vector<menu_group> menu_plug_card(const plug_menu_state &s)
 	groups.push_back(fresh);
 
 	menu_group g;
-	g.items.push_back(text("SmartMedia を差す...", ID_PLUG_CARD_OPEN, false, s.card_ready));
-	std::string eject = "SmartMedia を抜く";
+	g.items.push_back(text(UI_TEXT(menu_card_open, "Insert a SmartMedia image..."), ID_PLUG_CARD_OPEN, false, s.card_ready));
+	char eject[512];
 	if (!s.card_path.empty())
-		eject += "（" + basename(s.card_path) + "）";
-	g.items.push_back(text(eject.c_str(), ID_PLUG_CARD_EJECT, false, !s.card_path.empty()));
+		std::snprintf(eject, sizeof(eject), UI_TEXT(menu_card_eject_fmt, "Eject the SmartMedia (%s)"),
+		              basename(s.card_path).c_str());
+	else
+		std::snprintf(eject, sizeof(eject), "%s", UI_TEXT(menu_card_eject, "Eject the SmartMedia"));
+	g.items.push_back(text(eject, ID_PLUG_CARD_EJECT, false, !s.card_path.empty()));
 	g.items.push_back(separator());
-	g.items.push_back(text("一覧を開く", ID_PLUG_LIST, false, true));
-	g.items.push_back(text("エディタを開く", ID_PLUG_EDITOR, false, true));
+	g.items.push_back(text(UI_TEXT(menu_open_list, "Open the list"), ID_PLUG_LIST, false, true));
+	g.items.push_back(text(UI_TEXT(menu_open_editor, "Open the editor"), ID_PLUG_EDITOR, false, true));
 	groups.push_back(g);
 	return groups;
 }
@@ -337,8 +381,8 @@ inline std::vector<menu_group> menu_plug_panel()
 {
 	using namespace menu_detail;
 	menu_group g;
-	g.items.push_back(text("一覧を開く", ID_PLUG_LIST, false, true));
-	g.items.push_back(text("エディタを開く", ID_PLUG_EDITOR, false, true));
+	g.items.push_back(text(UI_TEXT(menu_open_list, "Open the list"), ID_PLUG_LIST, false, true));
+	g.items.push_back(text(UI_TEXT(menu_open_editor, "Open the editor"), ID_PLUG_EDITOR, false, true));
 	return { g };
 }
 
