@@ -2896,7 +2896,11 @@ void mu2000::run_sample(s32 &left, s32 &right)
 	//   * そのあと少しの間（処理が終わるまで）
 	// だけ。ふだんは止めておく
 	bool run_cpu = m_cpu_enabled;
+	// 内訳をもう一段割る（m_t_ndrv / m_t_nemisc / m_t_sh2）。測るときだけ読む
+	u64 pn0 = 0, pn1 = 0;
 	if (m_native_engine) {
+		if (m_profile)
+			pn0 = smu2000::perf_ticks();
 		m_ne_samples.fetch_add(1, std::memory_order_relaxed);
 		// firmware が鳴らしている音がある間は止めない。LFO・包絡線・ベンドの
 		// 追従をやっているのは firmware なので、止めるとその音だけ変わってしまう。
@@ -2971,7 +2975,7 @@ void mu2000::run_sample(s32 &left, s32 &right)
 			}
 			// **調べ用**（`SMU2000_METER_DBG=1`）。draw_meter の前の
 			// 液晶の中身と、目盛り（生 / なまし）を出す
-			if (std::getenv("SMU2000_METER_DBG")) {
+			if (m_meter_dbg) {
 				const u8 *dd = m_lcd.ddram();
 				std::fprintf(stderr, "MTR %.3f",
 				             double(m_ne_clock) / 44100.0);
@@ -3000,7 +3004,7 @@ void mu2000::run_sample(s32 &left, s32 &right)
 		// `SMU2000_FW_ALWAYS=1` で **native の口でも SH-2 を止めない**。
 		// 止めると firmware の打鍵が 1 サンプル後ろへずれるのを見つけた
 		// ときの道具（doc/native-engine.md の 6.153）。ふだんは使わない
-		} else if (!std::getenv("SMU2000_FW_ALWAYS")) {
+		} else if (!m_fw_always) {
 			run_cpu = false;
 		}
 		if (run_cpu) {
@@ -3036,12 +3040,26 @@ void mu2000::run_sample(s32 &left, s32 &right)
 		m_ne_clock++;
 		if (!m_nq.empty())
 			native_pump();
+		if (m_profile)
+			pn1 = smu2000::perf_ticks();
 		m_ndrv.tick(m_ne_clock);
 		if (m_traj_rec)
 			traj_step();
+		if (m_profile) {
+			const u64 pn2 = smu2000::perf_ticks();
+			m_t_ndrv += pn2 - pn1;
+			m_t_nemisc += pn1 - pn0;
+		}
 	}
-	if (run_cpu)
-		run_cycles(cycles);
+	if (run_cpu) {
+		if (m_profile) {
+			const u64 pc0 = smu2000::perf_ticks();
+			run_cycles(cycles);
+			m_t_sh2 += smu2000::perf_ticks() - pc0;
+			m_n_sh2++;
+		} else
+			run_cycles(cycles);
+	}
 
 	if (m_profile) {
 		pt1 = smu2000::perf_ticks();

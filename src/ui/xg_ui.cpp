@@ -733,6 +733,24 @@ void program_menu(int part, xg::model &m, const xg_snapshot *ram, bridge &br)
 //   右上: その分類の基本の音色（キットならキットの並び）
 //   右下: いまの音色のバンク違い
 // 分類は自分で選べるが、外から音色が変わったときは今の音色の分類へ移す
+// いまのピッチベンド。入ってきた MIDI から取る（xg_ui.h の注記）。
+// 受信チャンネルの分からないパートでは何も出さない
+void bend_now_line(int part, xg::model &m, const xg_snapshot *ram)
+{
+	if (!ram)
+		return;
+	int rcv = 127;
+	m.get(P("part.rcv_channel"), part, rcv);
+	if (rcv < 0 || rcv >= XG_PARTS)
+		return;
+	const int b = ram->bend[rcv];
+	int range = 0x42;                        // PB Pitch Control（0x40 が 0 半音）
+	m.get(P("part.bend_pitch"), part, range);
+	ImGui::TextDisabled(UI_TEXT(xgui_bend_now_fmt, "Now %+d (%+.2f semitones)"),
+	                    b, double(b) / 8192.0 * double(range - 0x40));
+}
+
+
 void program_pane(int part, xg::model &m, const xg_snapshot *ram, bridge &br)
 {
 	constexpr int GROUP_DRUM = 16, GROUP_SFX = 17;

@@ -720,12 +720,20 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 			if (u32(k) % 3 == c && ops[k].dm) { last_slot_m[k] = true; break; }
 	}
 
+	// 何を出したかの内訳（SMU2000_MEG_JIT_STATS=1 のときだけ出す。どこを削ると効くかを見るため）
+	struct jit_stats {
+		u32 alu = 0, skipped = 0, clamp = 0, shift = 0, latch = 0;
+		u32 wr_m = 0, wr_r = 0, early = 0, mem_r = 0, mem_w = 0, lfo = 0, tw = 0, chain = 0;
+		u32 mul = 0, mul_pow2 = 0, dm_src[8] = {};
+	} st;
+
 	assembler a;
 #if SMU_X64ASM_MODE == 32
 	// 32bit: ebx=ms, edi=swp, ebp=ram（callee-saved の 3 つを pins）。eax ecx edx esi は scratch。
 	// p(s64)・seed・sample・一時的な acc 退避は esp 基準の置き場。限界値は全部即値（load_p_limits 不要）
 	const u8 MS = EBX, SWP = EDI, RAM = EBP;
 	const s32 F_PLO = 0, F_PHI = 4, F_SEED = 8, F_SC = 12, F_ALO = 16, F_AHI = 20;
+	const s32 LFO_SLOT_BASE = 24;                    // x86-32 では巻き上げをしない（使わない）
 	const auto M = [&](s32 disp) { return mem{MS, NOREG, 1, disp}; };
 	const auto FM = [&](s32 disp) { return mem{RSP, NOREG, 1, disp}; };
 	const auto load_p_limits = [&]() {};
@@ -788,6 +796,10 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 	const auto ShrAcc = [&](u8 n) { a.sar64(RAX, RDX, n); };
 #else
 	const u8 MS = RBX, SWP = R12, P = R13, SC = R14, RAM = R15, SEED = RSI, K_MAX = RDI, K_MIN = RBP;
+	// LFO の値を 1 サンプルに 1 回だけ作って置いておく枠（24 個 × 4 バイト。下の emit_lfo）
+	const s32 LFO_SLOT_BASE = 48;
+	const s32 FRAME = 152;                               // 影 32 + 置き場 16 + LFO 96 + 揃え 8
+	const auto FM = [&](s32 disp) { return mem{RSP, NOREG, 1, disp}; };
 	const u8 P_MAX = R9, P_MIN = R10;                    // p の飽和の限界。r9 r10 は呼ぶ先で壊れるので、呼んだあと積み直す
 	const auto load_p_limits = [&]() {
 		a.imm64(P_MAX, 0x3fffffffff);
@@ -797,7 +809,7 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 
 	// 入口（引数は ARG0 = ms、ARG1 = swp、ARG2 = リバーブ RAM。Windows x64 でも SysVでも）
 	a.push(RBX); a.push(R12); a.push(R13); a.push(R14); a.push(R15); a.push(RSI); a.push(RDI); a.push(RBP);
-	a.subrsp(56);                                    // 呼ぶ先の影 32 + 自分の置き場 16 + 揃え 8。rsp は 16 の倍数
+	a.subrsp(FRAME);                                 // 影 32 + 置き場 16 + LFO 96 + 揃え 8。rsp は 16 の倍数
 	a.mov64(MS, ARG0);
 	a.mov64(SWP, ARG1);
 	a.mov64(RAM, ARG2);
@@ -807,6 +819,108 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 	a.imm64(K_MAX, 0x7fffff);                            // pack24 の限界（即値を毎回積まないため）
 	a.imm64(K_MIN, u64(s64(-0x800000)));
 	load_p_limits();
+
+	// **LFO の値はプログラムを回している間ずっと変わらない**。数えるのを進める
+	// lfo_step() はプログラムを回し終えた後に呼ばれ、設定（m_lfo）を書くのは CPU、
+	// つまりサンプルとサンプルの合間だけ。なのに前は「使う命令ごとに」毎回 30 命令
+	// ほどかけて作り直していた。使う番号ごとに頭で 1 回だけ作って置き場に入れ、
+	// 使う命令は読むだけにする（出力はまったく同じ）。出力 eax。rcx rdx r8 を壊す
+	const auto emit_lfo = [&](u32 idx) {
+		static constexpr u32 lfo_offsets[16] = {
+			0x00000, 0x02aaa, 0x04000, 0x05555, 0x08000, 0x0aaaa, 0x0c000, 0x0d555,
+			0x10000, 0x12aaa, 0x14000, 0x15555, 0x18000, 0x1aaaa, 0x1c000, 0x1d555,
+		};
+		a.load32(RAX, M(o_lfo_counter + 4 * s32(idx)));
+		a.shr32(RAX, 5);
+		a.loadu16(RDX, M(o_lfo + 2 * s32(idx)));
+		a.mov32(RCX, RDX);
+		a.shr32(RCX, 8);
+		a.and32i(RCX, 3);
+		a.shl32cl(RAX);
+		a.mov32(RCX, RDX);
+		a.shr32(RCX, 12);
+#if SMU_X64ASM_MODE == 32
+		a.imm32(RSI, u32(uintptr_t(lfo_offsets)));
+		a.load32(RCX, mem{RSI, RCX, 4, 0});
+#else
+		a.imm64(R8, u64(uintptr_t(lfo_offsets)));
+		a.load32(RCX, mem{R8, RCX, 4, 0});
+#endif
+		a.add32(RAX, RCX);
+		a.and32i(RAX, 0x1ffff);
+		a.shr32(RDX, 10);
+		a.and32i(RDX, 3);
+		std::vector<size_t> done;
+		a.test32(RDX, RDX);
+		const size_t not_sine = a.jcc_fwd(0x85);
+		{   // sine
+			a.mov32(RCX, RAX);
+			a.and32i(RCX, 0x7fff);
+			a.test32ri(RAX, 0x8000);
+			const size_t no_rev = a.jcc_fwd(0x84);
+			a.xor32ri(RCX, 0x7fff);
+			a.patch(no_rev);
+#if SMU_X64ASM_MODE == 32
+			a.imm32(RSI, u32(uintptr_t(sintab)));
+			a.mov32(RDX, RAX);
+			a.loadu16(RAX, mem{RSI, RCX, 2, 0});
+#else
+			a.imm64(R8, u64(uintptr_t(sintab)));
+			a.mov32(RDX, RAX);
+			a.loadu16(RAX, mem{R8, RCX, 2, 0});
+#endif
+			a.test32ri(RDX, 0x10000);
+			const size_t no_neg = a.jcc_fwd(0x84);
+			a.xor32ri(RAX, 0xffff);
+			a.patch(no_neg);
+			done.push_back(a.jmp_fwd());
+		}
+		a.patch(not_sine);
+		a.cmp32ri(RDX, 1);
+		const size_t not_tri = a.jcc_fwd(0x85);
+		{   // tri
+			a.add32ri(RAX, 0x8000);
+			a.and32i(RAX, 0x1ffff);
+			a.test32ri(RAX, 0x10000);
+			const size_t no_fold = a.jcc_fwd(0x84);
+			a.xor32ri(RAX, 0x1ffff);
+			a.patch(no_fold);
+			done.push_back(a.jmp_fwd());
+		}
+		a.patch(not_tri);
+		a.cmp32ri(RDX, 2);
+		const size_t not_up = a.jcc_fwd(0x85);
+		a.shr32(RAX, 1);                                     // saw up
+		done.push_back(a.jmp_fwd());
+		a.patch(not_up);
+		a.xor32ri(RAX, 0x1ffff);                             // saw down
+		a.shr32(RAX, 1);
+		for (size_t d : done) a.patch(d);
+		a.shl32(RAX, 7);
+	};
+
+	// 2 回以上使う番号だけ頭で作る（1 回だけなら、置いて読む手間のぶん損になる）
+	bool lfo_hoist[0x18] = {};
+	s32 lfo_slot[0x18] = {};
+	{
+		u32 uses[0x18] = {};
+		if (sintab)
+			for (u32 k = 0; k != 0x180; k++)
+				if (ops[k].dm && ops[k].dm_src <= 3 && ops[k].lfo < 0x18)
+					uses[ops[k].lfo]++;
+#if SMU_X64ASM_MODE != 32
+		u32 n = 0;
+		for (u32 i = 0; i != 0x18; i++)
+			if (uses[i] >= 2) {
+				lfo_hoist[i] = true;
+				lfo_slot[i] = LFO_SLOT_BASE + s32(4 * n);
+				n++;
+				emit_lfo(i);
+				a.store32(FM(lfo_slot[i]), RAX);
+			}
+#endif
+	}
+
 	if (branchy)
 		a.store32i(mem{SWP, NOREG, 1, o_skip}, 0);
 
@@ -837,10 +951,8 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 	const auto p_packed = [&](bool noise) {
 		if (noise) {
 			rnd();
-			a.and32i(RAX, 0x07e0);
-			a.mov64(RDX, RAX);
-			a.mov64(RAX, P);
-			a.add64(RAX, RDX);
+			a.and32i(RAX, 0x07e0);                    // 雑音（正の小さな値）
+			a.add64(RAX, P);                          // そのまま p を足す（写しを 2 つ省く）
 		} else
 			a.mov64(RAX, P);
 		pack24();
@@ -850,8 +962,11 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 	const auto ShrAcc = [&](u8 n) { a.sar64(RAX, n); };
 #endif
 
+	// 命令ごとに出したバイト数を、どの仕事のぶんかで数える（統計のときだけ）
+	size_t sz_ring = 0, sz_alu = 0, sz_dm = 0, sz_dr = 0, sz_ix = 0, sz_t = 0, sz_mark = a.code.size();
 	for (u32 k = 0; k != 0x180; k++) {
 		const meg_state::op &o = ops[k];
+		sz_mark = a.code.size();
 
 		// ---- 反映（遅れて入る書き込み）----
 		if (k < 3 || branchy) {
@@ -993,10 +1108,55 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 				a.mov32(RDX, RSI);
 #else
 				a.loads32(RAX, o.m2_from_m ? M(o_m + 4 * o.sm) : M(o_r + 4 * o.sr));
-				a.imul64i(RAX, RAX, u32(s32(c)));
+				// **2 の冪の係数は掛け算をやめてずらす**。imul は 3 サイクル、
+				// shl は 1 サイクル。曲の中の係数の 1〜2 割がこれに当たる。
+				// 符号を反転するぶん（neg）を足しても掛け算より短い
+				{
+					const s64 ac = c < 0 ? -c : c;
+					int sh = -1;
+					if (ac && !(ac & (ac - 1)))
+						for (sh = 0; (s64(1) << sh) != ac; sh++)
+							;
+					if (sh < 0)
+						a.imul64i(RAX, RAX, u32(s32(c)));
+					else {
+						if (sh)
+							a.shl64(RAX, u8(sh));
+						if (c < 0)
+							a.neg64(RAX);
+					}
+				}
 #endif
 			}
 		}
+		sz_ring += a.code.size() - sz_mark;
+		sz_mark = a.code.size();
+		if (o.alu)
+			st.alu++;
+		if (o.alu && alu_skip)
+			st.skipped++;
+		if (o.alu && !alu_skip) {
+			if (o.clamp) st.clamp++;
+			if (o.shift) st.shift++;
+			if (o.latch) st.latch++;
+			// asel==0 は「前の p をそのまま使う」＝ p の鎖が切れない命令
+			if (o.asel == 0) st.chain++;
+		}
+		if (o.dm) st.wr_m++;
+		if (o.dr) st.wr_r++;
+		if (o.dm && early_m[o.dm]) st.early++;
+		if (o.dr && early_r[o.dr]) st.early++;
+		if (o.memw) st.mem_w++;
+		if (o.memop == 2 || o.memop == 3) st.mem_r++;
+		if (o.dm && o.dm_src <= 3) st.lfo++;
+		if (o.dm) st.dm_src[o.dm_src & 7]++;
+		if (o.alu && !alu_skip && !o.m1_from_t && o.mmode == 2) {
+			const s64 c = o.m1_expand ? meg_state::m1_expand(s16(ms.m_const[k])) : s64(ms.m_const[k]);
+			st.mul++;
+			const s64 ac = c < 0 ? -c : c;
+			if (ac && !(ac & (ac - 1))) st.mul_pow2++;
+		}
+		if (o.t_write) st.tw++;
 		if (o.alu && !alu_skip) {
 			if (!(bake && !o.m1_from_t && o.mmode != 3)) {
 #if SMU_X64ASM_MODE == 32
@@ -1070,6 +1230,9 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 			}
 #endif
 			}
+			// 足す相手を置くレジスタ。x86-64 で asel==0（p そのもの）のときは
+			// **p の居るレジスタを直に使い**、rcx への写しを 1 つ省く
+			u8 B = RCX;
 			switch (o.asel) {
 #if SMU_X64ASM_MODE == 32
 			// acc=(eax,edx)。相手 b を (ecx,esi) に
@@ -1079,7 +1242,7 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 			case 3: a.load32(RCX, FM(F_PLO)); a.load32(RSI, FM(F_PHI)); a.sar64(RCX, RSI, 15); break;
 			default: a.xor32(RCX, RCX); a.xor32(RSI, RSI); break;
 #else
-			case 0: a.mov64(RCX, P); break;
+			case 0: B = P; break;                          // 写さずに p のレジスタを使う
 			case 1: a.loads32(RCX, M(o_r + 4 * o.sr)); a.shl64(RCX, 15); break;
 			case 2: a.loads32(RCX, M(o_m + 4 * o.sm)); a.shl64(RCX, 15); break;
 			case 3: a.mov64(RCX, P); a.sar64(RCX, 15); break;
@@ -1091,14 +1254,14 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 #if SMU_X64ASM_MODE == 32
 				a.add32(RAX, RCX); a.adc32(RDX, RSI);
 #else
-				a.add64(RAX, RCX);
+				a.add64(RAX, B);
 #endif
 				break;
 			case 1:
 #if SMU_X64ASM_MODE == 32
 				a.sub32(RAX, RCX); a.sbb32(RDX, RSI);
 #else
-				a.sub64(RAX, RCX);
+				a.sub64(RAX, B);
 #endif
 				break;
 			case 2:
@@ -1112,9 +1275,9 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 				a.load32(RCX, FM(F_AHI));                        // a_hi（mov なので cf は保持）
 				a.adc32(RDX, RCX);
 #else
-				a.mov64(RDX, RCX);
+				a.mov64(RDX, B);
 				a.neg64(RDX);
-				a.cmovs64(RDX, RCX);
+				a.cmovs64(RDX, B);
 				a.add64(RAX, RDX);
 #endif
 				break;
@@ -1122,7 +1285,7 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 #if SMU_X64ASM_MODE == 32
 				a.and32(RAX, RCX); a.and32(RDX, RSI);
 #else
-				a.and64(RAX, RCX);
+				a.and64(RAX, B);
 #endif
 				break;
 			}
@@ -1215,83 +1378,17 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 #endif
 		}
 
+		sz_alu += a.code.size() - sz_mark;
+		sz_mark = a.code.size();
+
 		// ---- dm ----
 		if (o.dm) {
 			switch (o.dm_src) {
 			case 0: case 1: case 2: case 3:
-				if (sintab && o.lfo < 0x18) {
-					// meg_state::get_lfo を機械語で（関数は呼ばない）。出力 eax。rcx rdx r8 を壊す
-					static constexpr u32 lfo_offsets[16] = {
-						0x00000, 0x02aaa, 0x04000, 0x05555, 0x08000, 0x0aaaa, 0x0c000, 0x0d555,
-						0x10000, 0x12aaa, 0x14000, 0x15555, 0x18000, 0x1aaaa, 0x1c000, 0x1d555,
-					};
-					a.load32(RAX, M(o_lfo_counter + 4 * s32(o.lfo)));
-					a.shr32(RAX, 5);
-					a.loadu16(RDX, M(o_lfo + 2 * s32(o.lfo)));
-					a.mov32(RCX, RDX);
-					a.shr32(RCX, 8);
-					a.and32i(RCX, 3);
-					a.shl32cl(RAX);
-					a.mov32(RCX, RDX);
-					a.shr32(RCX, 12);
-#if SMU_X64ASM_MODE == 32
-					a.imm32(RSI, u32(uintptr_t(lfo_offsets)));
-					a.load32(RCX, mem{RSI, RCX, 4, 0});
-#else
-					a.imm64(R8, u64(uintptr_t(lfo_offsets)));
-					a.load32(RCX, mem{R8, RCX, 4, 0});
-#endif
-					a.add32(RAX, RCX);
-					a.and32i(RAX, 0x1ffff);
-					a.shr32(RDX, 10);
-					a.and32i(RDX, 3);
-					std::vector<size_t> done;
-					a.test32(RDX, RDX);
-					const size_t not_sine = a.jcc_fwd(0x85);
-					{   // sine
-						a.mov32(RCX, RAX);
-						a.and32i(RCX, 0x7fff);
-						a.test32ri(RAX, 0x8000);
-						const size_t no_rev = a.jcc_fwd(0x84);
-						a.xor32ri(RCX, 0x7fff);
-						a.patch(no_rev);
-#if SMU_X64ASM_MODE == 32
-						a.imm32(RSI, u32(uintptr_t(sintab)));
-						a.mov32(RDX, RAX);
-						a.loadu16(RAX, mem{RSI, RCX, 2, 0});
-#else
-						a.imm64(R8, u64(uintptr_t(sintab)));
-						a.mov32(RDX, RAX);
-						a.loadu16(RAX, mem{R8, RCX, 2, 0});
-#endif
-						a.test32ri(RDX, 0x10000);
-						const size_t no_neg = a.jcc_fwd(0x84);
-						a.xor32ri(RAX, 0xffff);
-						a.patch(no_neg);
-						done.push_back(a.jmp_fwd());
-					}
-					a.patch(not_sine);
-					a.cmp32ri(RDX, 1);
-					const size_t not_tri = a.jcc_fwd(0x85);
-					{   // tri
-						a.add32ri(RAX, 0x8000);
-						a.and32i(RAX, 0x1ffff);
-						a.test32ri(RAX, 0x10000);
-						const size_t no_fold = a.jcc_fwd(0x84);
-						a.xor32ri(RAX, 0x1ffff);
-						a.patch(no_fold);
-						done.push_back(a.jmp_fwd());
-					}
-					a.patch(not_tri);
-					a.cmp32ri(RDX, 2);
-					const size_t not_up = a.jcc_fwd(0x85);
-					a.shr32(RAX, 1);                                     // saw up
-					done.push_back(a.jmp_fwd());
-					a.patch(not_up);
-					a.xor32ri(RAX, 0x1ffff);                             // saw down
-					a.shr32(RAX, 1);
-					for (size_t d : done) a.patch(d);
-					a.shl32(RAX, 7);
+				if (sintab && o.lfo < 0x18 && lfo_hoist[o.lfo]) {
+					a.load32(RAX, FM(lfo_slot[o.lfo]));   // 頭で 1 回だけ作っておいた値
+				} else if (sintab && o.lfo < 0x18) {
+					emit_lfo(o.lfo);                      // 1 回しか使わない番号はその場で
 				} else {
 #if SMU_X64ASM_MODE == 32
 					// cdecl: 引数を後ろから積む（lfo, ms）。p/seed は置き場にあって callee-saved を壊さない
@@ -1347,6 +1444,9 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 		if (k >= 0x17d || branchy)
 			a.store8i(M(o_mw_reg + slot3(k)), o.dm);
 
+		sz_dm += a.code.size() - sz_mark;
+		sz_mark = a.code.size();
+
 		// ---- dr ----
 		if (o.dr) {
 			if (o.dr_from_r)
@@ -1362,6 +1462,9 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 		}
 		if (k >= 0x17d || branchy)
 			a.store8i(M(o_rw_reg + slot3(k)), o.dr);
+
+		sz_dr += a.code.size() - sz_mark;
+		sz_mark = a.code.size();
 
 		// ---- メモリへの書き値 ----
 		if (o.memw) {
@@ -1387,6 +1490,9 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 		}
 		if (k >= 0x17d || branchy)
 			a.store8i(mem{SWP, NOREG, 1, o_ix2_act + s32(slot3(k))}, o.index2 ? 1 : 0);
+
+		sz_ix += a.code.size() - sz_mark;
+		sz_mark = a.code.size();
 
 		// ---- t ----
 		if (o.t_write) {
@@ -1420,6 +1526,9 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 			}
 			a.store16(M(o_t_value + 2 * slot2(k)), RAX);
 		}
+
+		sz_t += a.code.size() - sz_mark;
+		sz_mark = a.code.size();
 
 		// ---- メモリ操作 ----
 		size_t table_done = 0;
@@ -1546,7 +1655,7 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 #else
 	a.store64(M(o_p), P);
 	a.store32(mem{SWP, NOREG, 1, o_seed}, SEED);
-	a.addrsp(56);
+	a.addrsp(FRAME);
 	a.pop(RBP); a.pop(RDI); a.pop(RSI); a.pop(R15); a.pop(R14); a.pop(R13); a.pop(R12); a.pop(RBX);
 #endif
 	a.ret();
@@ -1568,6 +1677,25 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 	if (!exec_mem::make_executable(buf, buf_size))
 		return false;
 	fn = reinterpret_cast<fn_t>(buf);
+	{
+		static const bool stats = std::getenv("SMU2000_MEG_JIT_STATS") != nullptr;
+		if (stats)
+			std::fprintf(stderr,
+			             "meg-jit: %zu バイト / ALU %u（省いた %u）/ p の鎖 %u / 詰め %u / ずらし %u"
+			             " / 印 %u / m 書き %u / r 書き %u（前倒し %u）/ RAM 読み %u 書き %u / LFO %u / t 書き %u%s\n",
+			             a.code.size(), st.alu, st.skipped, st.chain, st.clamp, st.shift, st.latch,
+			             st.wr_m, st.wr_r, st.early, st.mem_r, st.mem_w, st.lfo, st.tw,
+			             branchy ? " / 分岐あり" : "");
+		if (stats)
+			std::fprintf(stderr, "        バイトの内訳: 遅れの後始末 %zu / ALU %zu / dm %zu / dr %zu"
+			             " / index %zu / t %zu / メモリ %zu\n",
+			             sz_ring, sz_alu, sz_dm, sz_dr, sz_ix, sz_t,
+			             a.code.size() - sz_ring - sz_alu - sz_dm - sz_dr - sz_ix - sz_t);
+		if (stats)
+			std::fprintf(stderr, "        掛け算 %u（2 の冪 %u）/ dm の出どころ %u %u %u %u %u %u %u %u\n",
+			             st.mul, st.mul_pow2, st.dm_src[0], st.dm_src[1], st.dm_src[2], st.dm_src[3],
+			             st.dm_src[4], st.dm_src[5], st.dm_src[6], st.dm_src[7]);
+	}
 #if SMU_X64ASM_MODE == 32
 	// x86-32 の JIT が本当に効いている証明（環境変数で 1 回だけ）。ビルドは meg_jit_run からしか来ない
 	static bool done32 = false;

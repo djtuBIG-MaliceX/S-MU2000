@@ -317,6 +317,8 @@ void pc_editor::part_page(xg::model &m, bridge &br)
 					ImGui::SameLine(label_w);
 					value(p, m_part, m, br, std::min(fs * 9, ImGui::GetContentRegionAvail().x));
 				}
+				if (!std::strcmp(g.title, texts().xgui_group_bend))
+					xgui::bend_now_line(m_part, m, m_ram);
 				ImGui::Spacing();
 			}
 			ImGui::EndTable();
@@ -352,6 +354,8 @@ void pc_editor::part_page(xg::model &m, bridge &br)
 				}
 				ImGui::EndGroup();
 			}
+			if (!std::strcmp(g.title, texts().xgui_group_bend))
+				xgui::bend_now_line(m_part, m, m_ram);
 			ImGui::Spacing();
 		}
 	}

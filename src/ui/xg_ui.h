@@ -175,6 +175,11 @@ void set_master_zoom(float zoom);
 // 今見ているのと違う分類を押すと、その分類の先頭の音色（キットなら先頭のキット）に替える。
 // 音色を替えたら、そのパートで 1 秒だけ音を鳴らして聴かせる
 void program_pane(int part, xg::model &m, const xg_snapshot *ram, bridge &br);
+
+// 「ピッチベンド」の組の下に出す、いまのベンドの値。**ワーク RAM ではなく
+// 入ってきた MIDI から**取る（式だけの口では firmware にベンドを渡さないので、
+// RAM の PART_BEND は真ん中のまま動かない）。ram が無ければ何も出さない
+void bend_now_line(int part, xg::model &m, const xg_snapshot *ram);
 // 試聴で鳴らしている音を止める（窓を閉じたとき）
 void audition_stop(bridge &br);
 // 試聴で鳴らす鍵。パートの音色の窓の鍵盤を右クリックして決める（目印が付く）。
