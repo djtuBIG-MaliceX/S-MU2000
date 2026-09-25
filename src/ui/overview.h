@@ -81,6 +81,12 @@ public:
 	static void vib_small(int part, xg::model &m, bridge &br, float w, float h, bool compact);
 	// モジュレーションのビブラート（ホイールの位置ごとの揺れの深さ。音色の窓）
 	static void mod_cell(int part, xg::model &m, bridge &br, float w, float h, bool compact);
+	// **ゆれ（VIB・MW・BEND）**。ビブラートとモジュレーションを 1 枚の絵にした区画
+	// （音色の窓）。上が絵、下がフェーダーで、ピッチベンドの縦フェーダーもここに居る
+	static void wobble_cell(int part, xg::model &m, bridge &br, float w, float h);
+	// そのパートのベンドの今の値（送ったばかりならその値。真ん中からの離れ）と、動かして送る
+	static int  bend_now(int part, int slot);
+	static void bend_send(int part, int slot, int value, bridge &br);
 	// マスター EQ の 5 つの帯の特性。edit なら点をつまんで周波数とゲイン、ホイールで Q（マスターの窓）。
 	// edit でなければ描くだけ（一覧のマスターの行）
 	static void master_eq_plot(xg::model &m, bridge &br, float w, float h, bool edit);
@@ -105,7 +111,6 @@ private:
 	void keys_cell(int part, int slot, const xg_snapshot &ram, bridge &br, float w, float h,
 	               bool marker = false, int pc_low = -1);
 	// モジュレーションホイール（CC1）。カーソルを載せてホイールか、上下にドラッグで変える
-	void mod_wheel(int part, int slot, const xg_snapshot &ram, bridge &br, float w, float h);
 	// PC のキーボードで弾く（A W S E D F T G Y H U J K O L P ; が C から、Z / X でオクターブ）
 	void pc_keys(int slot, bridge &br);
 	void release_pc_keys(bridge &br);
@@ -159,6 +164,10 @@ private:
 	static inline int    m_mod_sent = -1;
 	static inline int    m_mod_sent_part = -1;
 	static inline double m_mod_sent_at = -10.0;
+	// ピッチベンドも同じ（一覧の列と、音色の窓のつまみの両方から動かす）
+	static inline int    m_bend_sent = 0;
+	static inline int    m_bend_sent_part = -1;
+	static inline double m_bend_sent_at = -10.0;
 	// そのパートのホイールの今の値（送ったばかりならその値）と、回して送る
 	static int  mod_now(int part, int ram_value);
 	static void mod_send(int part, int slot, int value, bridge &br);

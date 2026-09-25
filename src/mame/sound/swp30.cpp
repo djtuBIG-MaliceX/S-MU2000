@@ -2111,7 +2111,10 @@ void swp30_device::write16(offs_t addr, u16 data)
 	const u32 slot = addr & 0x3f;
 	const u32 chan = (addr >> 6) & 0x3f;
 
-	if(const char *e = getenv("WTRACE")) {
+	// S-MU2000: 環境の読み取りは 1 回だけ。レジスタ書き込みは演奏中に何千回も
+	// 通るので、毎回 getenv を呼ぶとそれだけで目に見えて遅くなる
+	static const char *const wtrace = getenv("WTRACE");
+	if(const char *e = wtrace) {
 		const u32 from = u32(atoi(e));
 		if(m_meg->m_sample_counter >= from && m_meg->m_sample_counter < from + 30000)
 			fprintf(stderr, "W %u ch%02x sl%02x = %04x\n", m_meg->m_sample_counter, chan, slot, data);

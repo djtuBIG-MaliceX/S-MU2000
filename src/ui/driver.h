@@ -154,8 +154,10 @@ public:
 			m_wire.wipe(port);
 			if (b == 0xf7) {
 				if (is_reset(m_sx[port], m_sx_len[port]))
-					for (int ch = 0; ch < 16; ch++)
+					for (int ch = 0; ch < 16; ch++) {
 						m_xg.notes[port * 16 + ch][0] = m_xg.notes[port * 16 + ch][1] = 0;
+						m_xg.bend[port * 16 + ch] = 0;    // ベンドも真ん中へ
+					}
 				return;
 			}
 		}
@@ -187,6 +189,14 @@ public:
 		} else if (kind == 0xb0 && (d0 == 120 || d0 >= 123)) {
 			// オールサウンドオフ・オールノートオフ、オムニ／モノ／ポリの切り替え（どれも全部離す）
 			m_xg.notes[slot][0] = m_xg.notes[slot][1] = 0;
+		} else if (kind == 0xe0) {
+			// **ピッチベンド**。真ん中からの離れで覚える。
+			// 式だけの口では firmware にベンドを渡さない（音程は自分で作る）ので、
+			// ワーク RAM の PART_BEND は動かない。画面はここを見る
+			m_xg.bend[slot] = s16((int(d0 & 0x7f) | (int(d1 & 0x7f) << 7)) - 8192);
+		} else if (kind == 0xb0 && d0 == 121) {
+			// リセットオールコントローラ。ベンドは真ん中へ戻る（MIDI の決まり）
+			m_xg.bend[slot] = 0;
 		}
 	}
 

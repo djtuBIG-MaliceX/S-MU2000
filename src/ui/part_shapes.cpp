@@ -1338,15 +1338,15 @@ void part_shapes::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 			const float h = (room_h - st.ScrollbarSize - st.ItemSpacing.y) * 0.5f;
 			const float tall = h * 2.0f + st.ItemSpacing.y;
 			ImGui::BeginChild("flow", ImVec2(0, room_h), ImGuiChildFlags_None, ImGuiWindowFlags_HorizontalScrollbar);
-			ImGui::BeginGroup();
-			panel("vib", UI_TEXT(ps_title_vib, "Vibrato (VIB)"), w, h, part, m, br, { "part.vib_rate", "part.vib_depth", "part.vib_delay" }, 0,
-			      [](int p, xg::model &mm, bridge &b, float pw, float ph) { overview::vib_cell(p, mm, b, pw, ph, false); },
-			      UI_TEXT(ps_about_vib, "Voice wobble (vibrato). The picture is the actual wobble including Depth (the thin gray line is the voice's own wobble at the default Depth 64). The faders change speed (Rate), depth (Depth) and delay (Delay)"));
-			panel("mod", UI_TEXT(ps_title_mod, "Modulation (MW)"), w, h, part, m, br,
-			      { "part.mw_lfo_pmod", "part.mw_pitch", "part.mw_filter", "part.mw_amp", "part.mw_lfo_fmod", "part.mw_lfo_amod" }, 5,
-			      [](int p, xg::model &mm, bridge &b, float pw, float ph) { overview::mod_cell(p, mm, b, pw, ph, false); },
-			      UI_TEXT(ps_about_mod, "Extra vibrato from raising the modulation wheel. Sideways is wheel position, up/down is depth. The left wheel is CC1, the right is MW LFO PM. Louder of the two wins over the voice's own wobble (the background band)"));
-			ImGui::EndGroup();
+			// **ビブラートとモジュレーションは 1 つの区画にまとめ、ピッチベンドも足した**。
+			// 上から「音色そのものの揺れ」「ホイールで足す揺れ」「ベンド」と、
+			// 同じ『揺らすもの』が縦に並ぶ
+			panel("wobble", UI_TEXT(ps_title_wobble, "Wobble (VIB/MW/BEND)"), w, tall, part, m, br,
+			      { "part.vib_rate", "part.vib_depth", "part.vib_delay",
+			        "part.mw_lfo_pmod", "part.mw_pitch", "part.mw_filter", "part.mw_amp",
+			        "part.mw_lfo_fmod", "part.mw_lfo_amod" }, 0,
+			      [](int p, xg::model &mm, bridge &b, float pw, float ph) { overview::wobble_cell(p, mm, b, pw, ph); },
+			      UI_TEXT(ps_about_wobble, "One picture for the wobble. Sideways is the modulation wheel (0 at the left, 127 at the right), up/down is cents. The background wave is the vibrato itself, getting deeper towards the right. The orange dotted line is the voice's own depth (it moves with Vib Depth); where the curve passes it, the wheel starts to win. Below are Rate, Depth, Delay and MW LFO PM, plus the live MW (CC1) and pitch bend. Letting the bend go springs it back to the middle (Ctrl+release keeps it)"));
 			ImGui::SameLine();
 			panel("filter", UI_TEXT(ps_title_filterenv, "Filter and EQ (FILTER/EQ)"), w, tall, part, m, br,
 			      { "part.cutoff", "part.resonance", "part.hpf_cutoff",
@@ -1418,6 +1418,8 @@ void part_shapes::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 							param_slider(key, part, m, br);
 						}
 						ImGui::PopItemWidth();
+						if (!std::strcmp(g.title, texts().xgui_group_bend))
+							bend_now_line(part, m, current_ram());
 						ImGui::Spacing();
 					}
 					ImGui::EndTable();

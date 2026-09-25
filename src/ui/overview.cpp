@@ -341,6 +341,9 @@ void overview::cell(const column &c, int part, xg::model &m, const xg_snapshot &
 	// 値と、見せ方
 	int v = 0, lo = 0, hi = 127;
 	int cc_slot = -1, cc_num = -1;       // EXP・MOD の列: CC を流す先（受信チャンネル）と CC の番号
+	int bend_slot = -1;                  // P.BEND の列: ピッチベンドを流す先
+	int wheel_step = 1;                  // ホイール 1 目盛りぶん（ベンドは 16384 段なので粗く）
+	float drag_px = 200.0f;              // 全域を動かすのに要る画面の幅（ベンドは段が細かいので広く）
 	const ImGuiID sent_id = ImGui::GetID(c.title) + ImGuiID(part + 1) * 2;   // 送った値と時刻を覚える所
 	bool known = true, bipolar = false, editable = false;
 	std::string text;
@@ -372,12 +375,32 @@ void overview::cell(const column &c, int part, xg::model &m, const xg_snapshot &
 		break;
 	}
 	case src::bend: {
-		// RAM には MSB の半分と、下のバイトの最下位ビットに MSB の残り
-		const int msb = (blk[xg::ram::PART_BEND] & 0x3f) * 2 + (blk[xg::ram::PART_BEND + 1] & 1);
-		v = msb; bipolar = true;
-		char buf[8];
-		std::snprintf(buf, sizeof(buf), "%+d", msb - 64);
-		text = msb == 64 ? "0" : buf;
+		// **入ってきた MIDI から取る**（ui/driver.h）。式だけの口では firmware に
+		// ベンドを渡さない（音程はこちらで作る）ので、ワーク RAM の PART_BEND は
+		// 動かない。受信チャンネルが分からないパートだけ、RAM の値で代わりにする。
+		// **16384 段のまま**扱う（真ん中からの離れ。0 が真ん中）
+		int rcv = 127;
+		m.get(P("part.rcv_channel"), part, rcv);
+		bend_slot = rcv >= 0 && rcv < PARTS ? rcv : -1;
+		if (bend_slot >= 0)
+			v = ram.bend[bend_slot];
+		else {
+			// RAM には MSB の半分と、下のバイトの最下位ビットに MSB の残り
+			const int msb = (blk[xg::ram::PART_BEND] & 0x3f) * 2 + (blk[xg::ram::PART_BEND + 1] & 1);
+			v = (msb - 64) * 128;
+		}
+		// 送ったばかりの間は送った値を出す（写しは 25ms ごと）
+		ImGuiStorage *st = ImGui::GetStateStorage();
+		if (ImGui::GetTime() - st->GetFloat(sent_id + 1, -10.0f) < 0.3f)
+			v = st->GetInt(sent_id, v);
+		lo = -8192; hi = 8191;
+		bipolar = true;
+		editable = bend_slot >= 0;
+		wheel_step = 128;                          // ホイール 1 目盛りで MSB 1 つぶん
+		drag_px = 600.0f;                          // 端まで 300px。細かいので緩やかに
+		char buf[12];
+		std::snprintf(buf, sizeof(buf), "%+d", v);
+		text = v == 0 ? "0" : buf;
 		break;
 	}
 	case src::hold: v = blk[xg::ram::PART_HOLD] ? 127 : 0; text = v ? "ON" : "OFF"; break;
@@ -399,7 +422,7 @@ void overview::cell(const column &c, int part, xg::model &m, const xg_snapshot &
 			// so take a value and write it back
 			ImGuiStorage *st = ImGui::GetStateStorage();
 			float acc = st->GetFloat(id, 0.0f);
-			acc += (io.MouseDelta.x - io.MouseDelta.y) * float(hi - lo) / (io.KeyShift ? 800.0f : 200.0f);
+			acc += (io.MouseDelta.x - io.MouseDelta.y) * float(hi - lo) / (io.KeyShift ? drag_px * 4.0f : drag_px);
 			const int step = int(acc);
 			if (step) { nv = std::clamp(nv + step, lo, hi); acc -= float(step); }
 			st->SetFloat(id, acc);
@@ -409,7 +432,7 @@ void overview::cell(const column &c, int part, xg::model &m, const xg_snapshot &
 		if (hovered && ImGui::GetTime() - m_scrolled_at > 0.5) {
 			ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
 			if (io.MouseWheel != 0.0f) {
-				nv = std::clamp(nv + (io.MouseWheel > 0 ? 1 : -1) * (io.KeyCtrl ? 10 : 1), lo, hi);
+				nv = std::clamp(nv + (io.MouseWheel > 0 ? 1 : -1) * wheel_step * (io.KeyCtrl ? 10 : 1), lo, hi);
 				m_wheel_taken = true;
 			}
 		}
@@ -432,6 +455,17 @@ void overview::cell(const column &c, int part, xg::model &m, const xg_snapshot &
 		if (nv != v && p) {
 			drag_send(br, m.set(*p, at, nv));
 			text = xg::format(*p, nv);
+		} else if (nv != v && bend_slot >= 0) {
+			// **ピッチベンド**（0xE0）。真ん中からの離れを 14bit に戻して流す
+			const int raw = std::clamp(nv + 8192, 0, 16383);
+			const u8 pb[3] = { u8(0xe0 | (bend_slot & 15)), u8(raw & 0x7f), u8((raw >> 7) & 0x7f) };
+			br.send_port(bend_slot / 16, pb, 3);
+			ImGuiStorage *st = ImGui::GetStateStorage();
+			st->SetInt(sent_id, nv);
+			st->SetFloat(sent_id + 1, float(ImGui::GetTime()));
+			char buf[12];
+			std::snprintf(buf, sizeof(buf), "%+d", nv);
+			text = nv == 0 ? "0" : buf;
 		} else if (nv != v && cc_num >= 0) {
 			const u8 cc[3] = { u8(0xb0 | (cc_slot & 15)), u8(cc_num), u8(nv) };
 			br.send_port(cc_slot / 16, cc, 3);
@@ -2401,9 +2435,6 @@ void overview::mod_cell(int part, xg::model &m, bridge &br, float w, float h, bo
 	const float x0 = lx1 + fs * 0.5f, x1 = rx0 - fs * 0.5f;
 	const float in = std::max(2.0f, fs * 0.15f);
 	const float wa = wt + in, wb = bottom - in;      // ホイールの動く範囲
-	auto value_at = [&](float y, int maxv) {
-		return std::clamp(int(std::lround((wb - y) / std::max(1.0f, wb - wa) * float(maxv))), 0, maxv);
-	};
 	const bool over_right = io.MousePos.x >= rx0 - fs * 0.25f;
 	const bool over_left = io.MousePos.x <= lx1 + fs * 0.25f;
 
@@ -2426,7 +2457,9 @@ void overview::mod_cell(int part, xg::model &m, bridge &br, float w, float h, bo
 			}
 		}
 	}
-	// **ホイールの絵をつまんで上下**。押した所の高さがそのまま値（1 が左、2 が右）
+	// **ホイールの絵をつまんで上下**（1 が左、2 が右）。
+	// **押した所へ飛ばさず、動かした距離で増減する**。実物のホイールと同じ手触りで、
+	// つまんだ瞬間に値が跳ぶこともない（溝の高さいっぱいで全域。Shift で 4 倍細かく）
 	ImGuiStorage *st = ImGui::GetStateStorage();
 	int grab = st->GetInt(id, 0);
 	if (active && ImGui::IsItemActivated())
@@ -2434,18 +2467,33 @@ void overview::mod_cell(int part, xg::model &m, bridge &br, float w, float h, bo
 	if (!active)
 		grab = 0;
 	st->SetInt(id, grab);
-	if (grab == 1 && slot >= 0) {
-		const int nv = value_at(io.MousePos.y, 127);
-		if (nv != wheel_now) {
-			mod_send(part, slot, nv, br);
-			wheel_now = nv;
+	if (!grab)
+		st->SetFloat(id + 1, 0.0f);
+	if (grab && io.MouseDelta.y != 0.0f) {
+		const int maxv = grab == 1 ? 127 : pm.max;
+		float acc = st->GetFloat(id + 1, 0.0f);
+		// 溝の高さいっぱいで全域。ただし溝が短いときは 1 画素あたりが荒くなり
+		// すぎるので、最低でも 150 画素は動かす（Shift でさらに 4 倍細かく）
+		acc += -io.MouseDelta.y * float(maxv) /
+		       std::max(150.0f, (wb - wa)) / (io.KeyShift ? 4.0f : 1.0f);
+		const int step = int(acc);
+		if (step) {
+			acc -= float(step);
+			if (grab == 1 && slot >= 0) {
+				const int nv = std::clamp(wheel_now + step, 0, 127);
+				if (nv != wheel_now) {
+					mod_send(part, slot, nv, br);
+					wheel_now = nv;
+				}
+			} else if (grab == 2 && known) {
+				const int nv = std::clamp(vm + step, pm.min, pm.max);
+				if (nv != vm) {
+					drag_send(br, m.set(pm, part, nv));
+					vm = nv;
+				}
+			}
 		}
-	} else if (grab == 2 && known) {
-		const int nv = value_at(io.MousePos.y, pm.max);
-		if (nv != vm) {
-			drag_send(br, m.set(pm, part, nv));
-			vm = nv;
-		}
+		st->SetFloat(id + 1, acc);
 	}
 
 	voice_ctx v;
@@ -2742,6 +2790,281 @@ int overview::wheel_steps(float wheel, bool big)
 	return wheel > 0 ? step : -step;
 }
 
+// ---- ゆれ（VIB・MW・BEND）。**1 枚の絵**にまとめた区画（音色の窓）
+//
+// 横はモジュレーションホイールの位置（左が 0、右が 127）、縦はセント（真ん中が 0）。
+//   * 背景  … ビブラートの波そのもの。**振幅がその位置での実際の深さ**になる
+//              （右へ行くほど深くなる）。波の細かさは Rate に連れる
+//   * 前面  … モジュレーションの曲線（±の包み）
+//   * 横の線… **音色自身の揺れの深さ**（Vib Depth で動く）。曲線がこの線を超えた所から
+//              ホイールのぶんが勝つ ＝ 効き始め。その位置に印を出す
+//   * 縦の線… いまのホイールの位置（CC1）
+// 下の段は Rate・Depth・Delay・MW LFO PM のフェーダーと、CC1 とピッチベンドの
+// 生のフェーダー（この 2 本は音源へ直に流す）
+void overview::wobble_cell(int part, xg::model &m, bridge &br, float w, float h)
+{
+	ImGuiIO &io = ImGui::GetIO();
+	const float fs = ImGui::GetFontSize();
+	ImDrawList *dl = ImGui::GetWindowDrawList();
+
+	constexpr int NF = 4;
+	static const char *const KEYS[NF] = { "part.vib_rate", "part.vib_depth", "part.vib_delay", "part.mw_lfo_pmod" };
+	static const char *const NAMES[NF] = { "Rate", "Depth", "Delay", "MW PM" };
+	const xg::param *ps[NF];
+	int vals[NF];
+	bool have[NF];
+	for (int i = 0; i < NF; i++) {
+		ps[i] = &P(KEYS[i]);
+		vals[i] = ps[i]->def;
+		have[i] = m.get(*ps[i], part, vals[i]);
+	}
+	const bool known = have[0] && have[1] && have[2];
+
+	int rcv = 127;
+	m.get(P("part.rcv_channel"), part, rcv);
+	const int slot = rcv >= 0 && rcv < PARTS ? rcv : -1;
+	const xg_snapshot *snap = current_ram();
+	int wheel_now = snap ? mod_now(part, snap->parts[part][xg::ram::PART_MOD] & 0x7f) : 0;
+	int bend = bend_now(part, slot);
+	int range = 0x42;
+	m.get(P("part.bend_pitch"), part, range);
+
+	ImGui::PushID("wobble");
+	const ImVec2 pos = ImGui::GetCursorScreenPos();
+	ImGui::InvisibleButton("##wobble", ImVec2(w, h), ImGuiButtonFlags_MouseButtonLeft);
+	const ImGuiID id = ImGui::GetItemID();
+	const bool hovered = ImGui::IsItemHovered();
+	const bool active = ImGui::IsItemActive();
+
+	// メゾネット: 上の段に絵、下の段にフェーダー（ほかの区画と同じ）
+	const float pad = fs * 0.25f;
+	const float split = pos.y + h * MAISON_SPLIT;
+	dl->AddRectFilled(pos, ImVec2(pos.x + w, pos.y + h), col(hovered || active ? ImGuiCol_FrameBgHovered : ImGuiCol_FrameBg), 3.0f);
+	dl->PushClipRect(pos, ImVec2(pos.x + w, pos.y + h), true);
+
+	// ---- 下の段。左に層のフェーダー 4 本、右に生の 2 本（CC1 とベンド）
+	const float live_w = std::min(fs * 1.5f, w * 0.12f);
+	const float live_gap = fs * 0.5f;
+	const float live_right = pos.x + w - pad;
+	const float mw_x0 = live_right - live_w * 2.0f - live_gap;
+	const float bend_x0 = live_right - live_w;
+	const float ftop = split + pad, fbot = pos.y + h - pad;
+	const int focus = fader_row(KEYS, NAMES, NF, 2, part, m, br, ImVec2(pos.x + pad, ftop),
+	                            ImVec2(mw_x0 - fs * 0.6f, fbot), hovered, active, id, vals, have);
+
+	// 生の 2 本。**つまんだ距離で増減**する（押した所へ飛ばない）
+	const bool over_mw = hovered && io.MousePos.x >= mw_x0 - live_gap * 0.5f && io.MousePos.x < bend_x0 - live_gap * 0.5f;
+	const bool over_bend = hovered && io.MousePos.x >= bend_x0 - live_gap * 0.5f;
+	ImGuiStorage *st = ImGui::GetStateStorage();
+	int grab = st->GetInt(id + 1, 0);
+	if (active && ImGui::IsItemActivated())
+		grab = over_mw ? 1 : (over_bend ? 2 : 0);
+	if (!active) {
+		if (grab == 2 && !io.KeyCtrl && bend != 0 && slot >= 0) {
+			bend_send(part, slot, 0, br);        // 離したら真ん中へ（実物のホイールと同じ）
+			bend = 0;
+		}
+		grab = 0;
+		st->SetFloat(id + 2, 0.0f);
+	}
+	st->SetInt(id + 1, grab);
+	const float travel = std::max(1.0f, fbot - ftop);
+	if (grab && io.MouseDelta.y != 0.0f && slot >= 0) {
+		float acc = st->GetFloat(id + 2, 0.0f);
+		const float full = grab == 1 ? 127.0f : 16384.0f;
+		acc += -io.MouseDelta.y * full / std::max(150.0f, travel) / (io.KeyShift ? 4.0f : 1.0f);
+		const int step = int(acc);
+		if (step) {
+			acc -= float(step);
+			if (grab == 1) {
+				const int nv = std::clamp(wheel_now + step, 0, 127);
+				if (nv != wheel_now) { mod_send(part, slot, nv, br); wheel_now = nv; }
+			} else {
+				const int nv = std::clamp(bend + step, -8192, 8191);
+				if (nv != bend) { bend_send(part, slot, nv, br); bend = nv; }
+			}
+		}
+		st->SetFloat(id + 2, acc);
+	}
+	// ホイールで（CC1 は 1 つずつ、ベンドは MSB 1 つぶん）
+	if ((over_mw || over_bend) && slot >= 0) {
+		ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
+		if (io.MouseWheel != 0.0f) {
+			const int d = wheel_steps(io.MouseWheel, io.KeyCtrl);
+			if (over_mw) {
+				const int nv = std::clamp(wheel_now + d, 0, 127);
+				if (nv != wheel_now) { mod_send(part, slot, nv, br); wheel_now = nv; }
+			} else {
+				const int nv = std::clamp(bend + d * 128, -8192, 8191);
+				if (nv != bend) { bend_send(part, slot, nv, br); bend = nv; }
+			}
+		}
+	}
+	{
+		char t[24];
+		std::snprintf(t, sizeof(t), "%d", wheel_now);
+		fader_picture(dl, mw_x0, mw_x0 + live_w, ftop, fbot, wheel_now, 0, 127, "MW", t, grab == 1 || over_mw);
+		std::snprintf(t, sizeof(t), "%+d", bend);
+		fader_picture(dl, bend_x0, bend_x0 + live_w, ftop, fbot, bend + 8192, 0, 16383, "BEND", t, grab == 2 || over_bend);
+		// 真ん中（ベンド 0）の印。戻る先が目で分かるように
+		const float cap = std::max(6.0f, fs * 0.55f);
+		const float my = (ftop + cap * 0.5f + fbot - cap * 0.5f) * 0.5f;
+		dl->AddLine(ImVec2(bend_x0, my), ImVec2(bend_x0 + live_w, my), col(ImGuiCol_TextDisabled, 0.6f), 1.0f);
+	}
+	if (over_mw || grab == 1)
+		hint(UI_TEXT(ov_mod_wheel_hint, "MODULATION WHEEL (CC1)  %d\nModulation wheel. Drag or wheel up/down. Higher adds more of the right side's MW LFO PMOD DEPTH vibrato (sends CC1 to the receive channel)"), wheel_now);
+	else if (over_bend || grab == 2)
+		hint(UI_TEXT(ps_bend_hint_fmt, "PITCH BEND  %+d (%+.2f semitones)\nDrag sideways to bend (Shift for finer, wheel for steps). Letting go springs back to the middle, Ctrl+release keeps it. Sends pitch bend to the receive channel"),
+		     bend, double(bend) / 8192.0 * double(range - 0x40));
+	(void)focus;
+	dl->AddLine(ImVec2(pos.x, split), ImVec2(pos.x + w, split), col(ImGuiCol_Border), 1.0f);
+
+	// ---- 上の段。1 枚の絵
+	const float x0 = pos.x + pad, x1 = pos.x + w - pad;
+	const float top = pos.y + pad, bottom = split - pad;
+	const float mid = (top + bottom) * 0.5f, half = (bottom - top) * 0.5f;
+
+	voice_ctx v;
+	std::vector<shape::mod_line> ms_lines;
+	std::vector<shape::vib_line> vs_lines;
+	if (known && voice_of(part, v)) {
+		v.blk[0x15] = u8(vals[0]);
+		v.blk[0x16] = u8(vals[1]);
+		v.blk[0x17] = u8(vals[2]);
+		if (have[3])
+			v.blk[0x20] = u8(vals[3]);
+		ms_lines = shape::mod_lines(v.rom, v.rec, v.blk);
+		vs_lines = shape::vib_lines(v.rom, v.rec, v.blk, 1500.0f);
+	}
+	if (ms_lines.empty()) {
+		const ImVec2 ts = ImGui::CalcTextSize("--");
+		dl->AddText(ImVec2(x0 + (x1 - x0 - ts.x) * 0.5f, mid - ts.y * 0.5f), col(ImGuiCol_TextDisabled), "--");
+		dl->PopClipRect();
+		ImGui::PopID();
+		return;
+	}
+	const shape::mod_line &L = lead_line(ms_lines);
+	const shape::vib_line *V = vs_lines.empty() ? nullptr : &lead_line(vs_lines);
+
+	// 縦の目盛り。いちばん深い所が少し余るように（最低でも ±220 セント）
+	float span = 220.0f;
+	span = std::max(span, L.own_cents * 1.15f);
+	for (float c : L.eff)
+		span = std::max(span, c * 1.15f);
+	auto y_of = [&](float cents) { return mid - half * std::clamp(cents / span, -1.0f, 1.0f); };
+	auto x_of = [&](float wheel) { return x0 + (x1 - x0) * std::clamp(wheel, 0.0f, 127.0f) / 127.0f; };
+
+	dl->AddLine(ImVec2(x0, mid), ImVec2(x1, mid), col(ImGuiCol_TextDisabled, 0.35f));
+	for (float c : { 50.0f, 100.0f, 200.0f, 400.0f }) {
+		if (c > span)
+			break;
+		for (float sgn : { 1.0f, -1.0f })
+			dl->AddLine(ImVec2(x0, y_of(sgn * c)), ImVec2(x1, y_of(sgn * c)), col(ImGuiCol_TextDisabled, 0.12f));
+		char g[16];
+		std::snprintf(g, sizeof(g), "%.0f", c);
+		dl->AddText(ImGui::GetFont(), fs * 0.55f, ImVec2(x0 + 2.0f, y_of(c) - fs * 0.6f), col(ImGuiCol_TextDisabled, 0.5f), g);
+	}
+
+	// ---- 背景: ビブラートの波。振幅はその位置の実際の深さ、細かさは Rate に連れる
+	{
+		const float hz = V ? V->hz : 5.0f;
+		const float cycles = std::clamp(hz * 1.5f, 3.0f, 24.0f);   // 1.5 秒ぶんを横幅に写す
+		const int steps = std::max(64, int((x1 - x0) / 2.0f));
+		std::vector<ImVec2> wave;
+		wave.reserve(size_t(steps) + 1);
+		for (int i = 0; i <= steps; i++) {
+			const float t = float(i) / float(steps);
+			const float amp = L.eff[size_t(std::clamp(int(std::lround(t * 127.0f)), 0, 127))];
+			wave.push_back(ImVec2(x0 + (x1 - x0) * t,
+			                      y_of(amp * std::sin(6.2831853f * cycles * t))));
+		}
+		dl->AddPolyline(wave.data(), int(wave.size()), col(ImGuiCol_Text, 0.30f), 0, 1.0f);
+	}
+
+	// ---- 前面: モジュレーションの曲線（±の包み）
+	for (float sgn : { 1.0f, -1.0f }) {
+		std::vector<ImVec2> pts;
+		pts.reserve(128);
+		for (int i = 0; i < 128; i++)
+			pts.push_back(ImVec2(x_of(float(i)), y_of(sgn * L.eff[size_t(i)])));
+		dl->AddPolyline(pts.data(), int(pts.size()), col(ImGuiCol_SliderGrabActive), 0, std::max(1.5f, fs * 0.09f));
+	}
+
+	// ---- 効き始めの線（音色自身の深さ。Vib Depth で上下する）と、超える位置
+	if (L.own_cents > 0.0f) {
+		for (float sgn : { 1.0f, -1.0f }) {
+			const float y = y_of(sgn * L.own_cents);
+			for (float x = x0; x < x1; x += fs * 0.6f)
+				dl->AddLine(ImVec2(x, y), ImVec2(std::min(x1, x + fs * 0.3f), y), IM_COL32(230, 180, 90, 200));
+		}
+		int cross = -1;
+		for (int i = 0; i < 128; i++)
+			if (L.eff[size_t(i)] > L.own_cents + 0.5f) { cross = i; break; }
+		if (cross > 0) {
+			const float x = x_of(float(cross));
+			dl->AddLine(ImVec2(x, y_of(L.own_cents)), ImVec2(x, y_of(-L.own_cents)), IM_COL32(230, 180, 90, 120));
+			char t[24];
+			std::snprintf(t, sizeof(t), "%d", cross);
+			dl->AddText(ImGui::GetFont(), fs * 0.55f, ImVec2(x + 2.0f, y_of(L.own_cents) - fs * 0.65f),
+			            IM_COL32(230, 180, 90, 220), t);
+		}
+	}
+
+	// ---- いまのホイールの位置
+	{
+		const float x = x_of(float(wheel_now));
+		dl->AddLine(ImVec2(x, top), ImVec2(x, bottom), col(ImGuiCol_Text, 0.5f), 1.0f);
+		dl->AddCircleFilled(ImVec2(x, y_of(L.eff[size_t(std::clamp(wheel_now, 0, 127))])), std::max(2.0f, fs * 0.16f),
+		                    col(ImGuiCol_Text, 0.9f));
+	}
+
+	// ---- 数字（左上）と、下の帯に出す説明用
+	char s[128];
+	std::snprintf(s, sizeof(s), "%.2f Hz  ±%.0f c  %.0f ms   MW %d → ±%.0f c",
+	              V ? V->hz : 0.0f, V ? V->depth_cents : L.own_cents, V ? V->delay_ms : 0.0f,
+	              wheel_now, L.eff[size_t(std::clamp(wheel_now, 0, 127))]);
+	dl->AddText(ImGui::GetFont(), fs * 0.65f, ImVec2(x0 + fs * 1.3f, top + 1.0f), col(ImGuiCol_Text, 0.85f), s);
+	// 横の目盛り（ホイールの位置）
+	dl->AddText(ImGui::GetFont(), fs * 0.55f, ImVec2(x0 + 2.0f, bottom - fs * 0.6f), col(ImGuiCol_TextDisabled, 0.6f), "MW 0");
+	{
+		const ImVec2 ts = ImGui::CalcTextSize("127");
+		dl->AddText(ImGui::GetFont(), fs * 0.55f, ImVec2(x1 - ts.x * 0.6f - 2.0f, bottom - fs * 0.6f),
+		            col(ImGuiCol_TextDisabled, 0.6f), "127");
+	}
+
+	dl->PopClipRect();
+	ImGui::PopID();
+}
+
+
+// ---- ピッチベンド（音色の窓の「ゆれ」の区画のつまみ、と一覧の列）
+//
+// 値は **16384 段のまま**（真ん中からの離れ、-8192〜+8191）扱う。画面に出す値は
+// 入ってきた MIDI から取る（ui/driver.h）ので、式だけの口でも firmware の道でも同じ
+
+int overview::bend_now(int part, int slot)
+{
+	// 送ったばかりの間は送った値（写しは 25ms ごとなので、その間は古い）
+	if (m_bend_sent_part == part && ImGui::GetTime() - m_bend_sent_at < 0.3)
+		return m_bend_sent;
+	const xg_snapshot *snap = current_ram();
+	return snap && slot >= 0 ? snap->bend[slot] : 0;
+}
+
+void overview::bend_send(int part, int slot, int value, bridge &br)
+{
+	if (slot < 0)
+		return;
+	const int raw = std::clamp(value + 8192, 0, 16383);
+	const u8 pb[3] = { u8(0xe0 | (slot & 15)), u8(raw & 0x7f), u8((raw >> 7) & 0x7f) };
+	br.send_port(slot / 16, pb, 3);
+	m_bend_sent = value;
+	m_bend_sent_part = part;
+	m_bend_sent_at = ImGui::GetTime();
+}
+
+
+
 void overview::mod_send(int part, int slot, int value, bridge &br)
 {
 	if (slot < 0)
@@ -2753,43 +3076,6 @@ void overview::mod_send(int part, int slot, int value, bridge &br)
 	m_mod_sent_at = ImGui::GetTime();
 }
 
-void overview::mod_wheel(int part, int slot, const xg_snapshot &ram, bridge &br, float w, float h)
-{
-	ImDrawList *dl = ImGui::GetWindowDrawList();
-	ImGuiIO &io = ImGui::GetIO();
-	const float fs = ImGui::GetFontSize();
-	const ImVec2 pos = ImGui::GetCursorScreenPos();
-	ImGui::InvisibleButton("##modwheel", ImVec2(w, h), ImGuiButtonFlags_MouseButtonLeft);
-	const bool hovered = ImGui::IsItemHovered();
-	const bool active = ImGui::IsItemActive();
-	// 今の値。送ったばかりなら送った値（RAM の写しは 25ms ごとなので、その間は古い）
-	int v = mod_now(part, ram.parts[part][xg::ram::PART_MOD] & 0x7f);
-	int nv = v;
-	if (hovered && slot >= 0) {
-		ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY);
-		if (io.MouseWheel != 0.0f)
-			nv = std::clamp(nv + wheel_steps(io.MouseWheel, io.KeyCtrl), 0, 127);
-	}
-	if (active && slot >= 0 && io.MouseDelta.y != 0.0f) {
-		// 上へ動かすと大きく。高さいっぱいで 0-127
-		const float pad = fs * 0.2f;
-		const float frac = 1.0f - (io.MousePos.y - (pos.y + pad)) / std::max(1.0f, h - pad * 2);
-		nv = std::clamp(int(std::lround(frac * 127.0f)), 0, 127);
-	}
-	if (nv != v && slot >= 0) {
-		mod_send(part, slot, nv, br);
-		v = nv;
-	}
-	// 描く。縦の溝と、下から伸びる棒
-	const float pad = fs * 0.2f;
-	const ImVec2 a(pos.x + pad, pos.y + pad), b(pos.x + w - pad, pos.y + h - pad);
-	dl->AddRectFilled(a, b, col(hovered || active ? ImGuiCol_FrameBgHovered : ImGuiCol_FrameBg), 3.0f);
-	const float y = b.y - (b.y - a.y) * float(v) / 127.0f;
-	dl->AddRectFilled(ImVec2(a.x + 2, y), ImVec2(b.x - 2, b.y - 1), col(ImGuiCol_SliderGrabActive));
-	dl->AddLine(ImVec2(a.x, y), ImVec2(b.x, y), col(ImGuiCol_Text), 2.0f);
-	if (hovered && !active)
-		ImGui::SetItemTooltip(UI_TEXT(ov_mod_tip_fmt, "Modulation (CC1)  %d\nWheel (Ctrl for coarse), or drag up/down"), v);
-}
 
 void overview::pc_keys(int slot, bridge &br)
 {
@@ -3216,12 +3502,11 @@ void overview::part_strip(int part, xg::model &m, const xg_snapshot &ram, bridge
 	int rcv = 127;
 	m.get(P("part.rcv_channel"), part, rcv);
 	const int slot = rcv >= 0 && rcv < PARTS ? rcv : -1;
-	// 左の端にモジュレーションホイール、その右に鍵盤（右クリックで試聴の鍵、PC のキーボードでも弾ける）
-	const float wheel_w = fs * 1.6f;
+	// 鍵盤（右クリックで試聴の鍵、PC のキーボードでも弾ける）。
+	// **左端にあったモジュレーションホイールは外した**（同じものが下の
+	// 「ゆれ」の区画にあり、鍵盤の幅を削ってまで置くものではない）
 	ImGui::SetCursorScreenPos(ImVec2(origin.x, keys_y));
-	mod_wheel(part, slot, ram, br, wheel_w, h);
-	ImGui::SetCursorScreenPos(ImVec2(origin.x + wheel_w + fs * 0.2f, keys_y));
-	keys_cell(part, slot, ram, br, std::max(fs * 8.0f, right - origin.x - wheel_w - fs * 0.2f), h, true, m_pc_base);
+	keys_cell(part, slot, ram, br, std::max(fs * 8.0f, right - origin.x), h, true, m_pc_base);
 	pc_keys(slot, br);
 
 	ImGui::SetCursorScreenPos(ImVec2(origin.x, keys_y + h));
