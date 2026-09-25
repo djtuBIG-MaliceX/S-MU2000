@@ -25,7 +25,14 @@ namespace ui {
 // snapshots only after boot, at a point each tool picks itself, so only
 // their parsing is shared.
 struct engine_options {
+#if defined(__EMSCRIPTEN__) || defined(SMU2000_FORCE_FAST_MIDI)
+	// wasm: fast MIDI は組み込み既定。ブラウザの ScriptProcessor のポンプは
+	// 実物速度（DIN 31250bps）の線間隔に追いつけないので、速い方を
+	// 選択の余地なく有効にする（web/index.html、--fast-midi は無害に残る）
+	bool fast_midi = true;
+#else
 	bool fast_midi = false;
+#endif
 	int  native_fx = 0;
 	int  native_engine = 0;
 	int  voicecache = 0;
@@ -49,7 +56,12 @@ inline bool consume_engine_option(const char *arg, engine_options &o)
 // Applies the flags, as every tool does before loading.
 inline void apply_engine_options(mu2000 &mu, const engine_options &o)
 {
+#if defined(__EMSCRIPTEN__) || defined(SMU2000_FORCE_FAST_MIDI)
+	// 組み込みで確定: wasm では argv 経由でも止められない
+	mu.set_fast_midi(true);
+#else
 	mu.set_fast_midi(o.fast_midi);
+#endif
 	if (o.native_fx)
 		mu.set_native_fx(o.native_fx);
 }

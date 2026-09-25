@@ -209,7 +209,7 @@ std::string jstr(const std::string &in)
 	return out;
 }
 
-constexpr unsigned AUDIO_PULL_MAX = 8192;   // frames per smu_audio_render
+constexpr unsigned AUDIO_PULL_MAX = 16384;  // frames per smu_audio_render
 static thread_local s16 g_audio_buf[AUDIO_PULL_MAX * 2];
 
 } // namespace

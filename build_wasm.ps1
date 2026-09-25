@@ -24,7 +24,7 @@ $env:Path = @(
 
 Push-Location $PSScriptRoot
 try {
-    emcmake cmake -B build-wasm -G Ninja -DCMAKE_BUILD_TYPE=Release
+    emcmake cmake -B build-wasm -G Ninja -DCMAKE_BUILD_TYPE=Release -DSMU2000_MEG_JIT_WASM=1
     if ($LASTEXITCODE) { throw "emcmake cmake failed" }
     ninja -C build-wasm gui-wasm render-wasm
     if ($LASTEXITCODE) { throw "ninja failed" }

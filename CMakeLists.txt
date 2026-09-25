@@ -207,6 +207,9 @@ endif()
 if(EMSCRIPTEN)
   # (memory/ENVIRONMENT options moved above the tool list so they apply
   # there too). What only the browser front end needs:
+  # fast MIDI is compiled in: the page's ScriptProcessor pump cannot keep
+  # the real 31250bps DIN spacing (ui/options.h refuses to turn it off).
+  add_compile_definitions(SMU2000_FORCE_FAST_MIDI=1)
   add_link_options(
     -sEXPORTED_RUNTIME_METHODS=ccall,cwrap,FS,UTF8ToString,stringToUTF8,lengthBytesUTF8,HEAPU8,callMain
     # the page marshals MIDI/mic bytes with Module._malloc/_free directly

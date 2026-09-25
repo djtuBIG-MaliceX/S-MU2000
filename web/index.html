@@ -23,7 +23,9 @@ body { margin: 0; background: #17181b; color: #d8d8dc;
 #left { flex: 0 0 min(660px, 62vw); display: flex; flex-direction: column; gap: 10px; }
 #right { flex: 1 1 auto; min-width: 320px; display: flex; flex-direction: column;
          border: 1px solid #2c2d31; border-radius: 6px; overflow: hidden;
-         min-height: 420px; }
+         /* the editor pane is the tall one by default: the canvas was a
+            cramped 420px sliver next to the panel column */
+         min-height: 100vh; }
 #right.hidden { display: none; }
 #panelwrap { border: 1px solid #2c2d31; border-radius: 6px; overflow: hidden;
              background: #000; }
@@ -239,7 +241,7 @@ const ringL = new Float32Array(RING), ringR = new Float32Array(RING);
 let wPos = 0, rPos = 0, underruns = 0;
 function enginePump() {
   if (wPos - rPos > RING * 0.5) return;    // reservoir plenty full
-  const b = pullBlock(1024);               // exactly one block per tick
+  const b = pullBlock(16384);              // exactly one block per tick
   if (!b) return;
   for (let i = 0; i < b.frames; i++) {
     const at = wPos++ % RING;
@@ -254,7 +256,7 @@ function audioStart() {
     catch (e) { audioCtx = new AudioContext(); }
     if (audioCtx.sampleRate !== 44100)
       logLine('note: audio context runs at ' + audioCtx.sampleRate + 'Hz, resampling');
-    srcNode = audioCtx.createScriptProcessor(2048, 0, 2);
+    srcNode = audioCtx.createScriptProcessor(16384, 0, 2);
     srcNode.onaudioprocess = (ev) => {
       const L = ev.outputBuffer.getChannelData(0),
             R = ev.outputBuffer.getChannelData(1);
@@ -282,7 +284,7 @@ function audioStart() {
   audioCtx.resume();
 }
 function pullBlock(frames) {
-  frames = frames || 1024;
+  frames = frames || 16384;   // matches the ScriptProcessor buffer
   const ptr = X.audioPull(frames);
   if (!ptr) return null;
   const view = new Int16Array(Module.HEAPU8.buffer, ptr, frames * 2);
