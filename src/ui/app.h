@@ -1122,7 +1122,14 @@ public:
 		// The remembered ports open on this thread, while the machine boots
 		// beside it: the audio device is the only thing that needs the
 		// firmware. --midi and friends win over what was remembered
+#ifdef __EMSCRIPTEN__
+		// Browser build: the page owns the WebMIDI routing. The lists are
+		// whatever it registered, and nothing gets opened until the user
+		// routes it -- an auto-opened OUT would sit on a real system port
+		// from the moment the page loads.
+#else
 		open_remembered_ports(a, oo);
+#endif
 
 		// Give the panel something to read before the boot thread says
 		// anything, so the window comes up showing the boot message rather

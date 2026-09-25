@@ -48,6 +48,12 @@ set_target_properties(smu2000_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # ---- Offline tools (run anywhere; need no ROMs except via argv) -------------
 if(EMSCRIPTEN)
+  # Release alone means -O2: the SH7030 interpreter and the DSP need
+  # -O3 + SIMD to hold under real-time cost in the browser. Above real
+  # time, the ScriptProcessor overruns pile up and the page starves --
+  # it looks frozen right after boot.
+  add_compile_options(-O3 -msimd128)
+  add_link_options(-O3 -msimd128)
   # The emulator's tables + ROMs blow past the 16MB default heap
   add_link_options(
     -sALLOW_MEMORY_GROWTH=1
@@ -191,6 +197,8 @@ if(EMSCRIPTEN)
   # there too). What only the browser front end needs:
   add_link_options(
     -sEXPORTED_RUNTIME_METHODS=ccall,cwrap,FS,UTF8ToString,stringToUTF8,lengthBytesUTF8,HEAPU8,callMain
+    # the page marshals MIDI/mic bytes with Module._malloc/_free directly
+    -sEXPORTED_FUNCTIONS=_main,_malloc,_free
     -sSTACK_SIZE=8MB
   )
 

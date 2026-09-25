@@ -32,7 +32,18 @@ try {
 
     if ($Serve) {
         Write-Host "Serving build-wasm\ on http://localhost:8080 (Ctrl+C stops)"
-        & "$emsdk\python\3.13.3_64bit\python.exe" -m http.server 8080 -d build-wasm
+        # not plain `python -m http.server`: no-store headers keep Chrome from
+        # serving a stale smu2000.wasm/index.html after a rebuild, and the
+        # right Content-Type for .wasm is set explicitly.
+        & "$emsdk\python\3.13.3_64bit\python.exe" -c @"
+import http.server
+class H(http.server.SimpleHTTPRequestHandler):
+    def end_headers(self):
+        self.send_header('Cache-Control', 'no-store')
+        super().end_headers()
+H.extensions_map['.wasm'] = 'application/wasm'
+http.server.test(HandlerClass=H, port=8080, directory='build-wasm')
+"@
     }
 }
 finally { Pop-Location }

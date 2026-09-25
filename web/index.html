@@ -192,9 +192,10 @@ function bindExports() {
 }
 
 // ---------------------------------------------------------------- ROMs
-// engine.load() needs these four; everything else it looks up itself.
+// engine.load() hard-requires the flash image and the wave dump; the LCD
+// font and sin-table are warned-about-but-tolerated, same as the desktop.
 const ROM_WANTED = ['mu2000_flash.bin', 'dump/xv364a0.ic49', 'dump/xv365a0.ic50',
-                    'dump/xw848a0.ic53', 'dump/xw849a0.ic54', 'hd44780u_b04.bin'];
+                    'dump/xw848a0.ic53', 'dump/xw849a0.ic54'];
 function romPathOf(name) {
   // single-file picker knows the MU2000 layout; the directory picker keeps
   // its own structure under /roms instead
@@ -225,35 +226,58 @@ async function takeRomFiles(files, relative) {
 }
 
 // ---------------------------------------------------------------- audio out
-let audioCtx = null, srcNode = null;
+// The wasm fill() is the whole emulator's cost per block, and it runs a
+// little OVER real time on slower machines. Pulled from inside the
+// ScriptProcessor callback, every overrun queues another callback, and
+// rAF never gets a slot -- the page looks frozen while it only drowns.
+// So decouple: a paced pump advances the engine at most one block per
+// tick into a ~1s ring; the callback just drains the ring (cheap copies)
+// and can never overrun.
+let audioCtx = null, srcNode = null, pumpIv = null;
+const RING = 44100;                        // one second of 44.1k frames
+const ringL = new Float32Array(RING), ringR = new Float32Array(RING);
+let wPos = 0, rPos = 0, underruns = 0;
+function enginePump() {
+  if (wPos - rPos > RING * 0.5) return;    // reservoir plenty full
+  const b = pullBlock(1024);               // exactly one block per tick
+  if (!b) return;
+  for (let i = 0; i < b.frames; i++) {
+    const at = wPos++ % RING;
+    ringL[at] = b.L[i]; ringR[at] = b.R[i];
+  }
+  // age out ancient backlog rather than wrap over unread audio
+  if (wPos - rPos > RING - 2048) rPos = wPos - RING + 2048;
+}
 function audioStart() {
   if (!audioCtx) {
     try { audioCtx = new AudioContext({ sampleRate: 44100 }); }
     catch (e) { audioCtx = new AudioContext(); }
     if (audioCtx.sampleRate !== 44100)
       logLine('note: audio context runs at ' + audioCtx.sampleRate + 'Hz, resampling');
-    srcNode = audioCtx.createScriptProcessor(1024, 0, 2);
-    let carry = null;                 // last pulled block for JS-side resampling
-    let carryAt = 0;
+    srcNode = audioCtx.createScriptProcessor(2048, 0, 2);
     srcNode.onaudioprocess = (ev) => {
       const L = ev.outputBuffer.getChannelData(0),
             R = ev.outputBuffer.getChannelData(1);
       const n = L.length;
-      if (!carry || carryAt >= carry.frames) { carry = pullBlock(); carryAt = 0; }
-      if (!carry) { L.fill(0); R.fill(0); return; }
-      // linear resample 44100 -> ctx rate when the browser refused ours
-      const ratio = 44100 / audioCtx.sampleRate;
-      for (let i = 0; i < n; i++) {
-        const at = carryAt + i * ratio;
-        const i0 = Math.floor(at), i1 = Math.min(i0 + 1, carry.frames - 1),
-              f = at - i0;
-        if (i0 >= carry.frames) { L[i] = 0; R[i] = 0; continue; }
-        L[i] = (carry.L[i0] * (1 - f) + carry.L[i1] * f);
-        R[i] = (carry.R[i0] * (1 - f) + carry.R[i1] * f);
+      const r = 44100 / audioCtx.sampleRate;   // linear resample if not 44.1k
+      if (wPos - rPos < Math.ceil(n * r)) {
+        underruns++;
+        if (underruns % 40 === 1)
+          logLine('audio: underrunning (engine over real time) — ' + underruns);
       }
-      carryAt += n * ratio;
+      for (let i = 0; i < n; i++) {
+        const pos = rPos + i * r;
+        const i0 = Math.floor(pos), f = pos - i0;
+        if (i0 >= wPos) { L[i] = 0; R[i] = 0; continue; }
+        const a0 = i0 % RING, a1 = (i0 + 1) % RING;
+        L[i] = ringL[a0] * (1 - f) + ringL[a1] * f;
+        R[i] = ringR[a0] * (1 - f) + ringR[a1] * f;
+      }
+      rPos += n * r;
+      if (rPos > wPos) rPos = wPos;            // clamp across silences/boot gaps
     };
     srcNode.connect(audioCtx.destination);
+    pumpIv = setInterval(enginePump, 10);
   }
   audioCtx.resume();
 }
@@ -306,30 +330,55 @@ async function micToggle() {
 let midiAccess = null;
 const INSEL = ['inA', 'inB', 'inC', 'inD'];
 function selOf(id) { return document.getElementById(id); }
+function midiBind() {
+  // Listeners attach to the current port OBJECTS. A statechange hands us
+  // fresh ones, so re-bind on every refresh -- otherwise the input goes
+  // silently dead after a hotplug blip (e.g. around boot) while the
+  // dropdown still shows the device.
+  if (!midiAccess) return;
+  for (const p of midiAccess.inputs.values())
+    p.onmidimessage = (e) => {
+      if (!started) return;
+      for (let port = 0; port < 4; port++)
+        if (selOf(INSEL[port]).value === e.port.id) midiPushBytes(port, e.data);
+    };
+}
+let midiSig = '';
 function midiRefresh() {
   if (!midiAccess) return;
-  const ins = [...midiAccess.inputs.values()], outs = [...midiAccess.outputs.values()];
-  for (const id of INSEL) {
-    const sel = selOf(id), keep = sel.value;
-    sel.innerHTML = '<option value="off">— off —</option>';
-    for (const p of ins) {
-      const o = document.createElement('option');
-      o.value = p.id; o.textContent = p.name || p.manufacturer || p.id;
-      sel.appendChild(o);
+  try {
+    const sig = [...midiAccess.inputs.keys()].join(',') + '|' +
+                [...midiAccess.outputs.keys()].join(',');
+    const rebuild = sig !== midiSig; // no DOM churn on no-op statechanges
+    midiSig = sig;
+    const ins = [...midiAccess.inputs.values()], outs = [...midiAccess.outputs.values()];
+    if (rebuild) {
+      for (const id of INSEL) {
+        const sel = selOf(id), keep = sel.value;
+        sel.innerHTML = '<option value="off">— off —</option>';
+        for (const p of ins) {
+          const o = document.createElement('option');
+          o.value = p.id; o.textContent = p.name || p.manufacturer || p.id;
+          sel.appendChild(o);
+        }
+        sel.value = [...sel.options].some((o) => o.value === keep) ? keep : 'off';
+      }
+      const osel = selOf('outsel'), okeep = osel.value;
+      osel.innerHTML = '<option value="off">— off —</option>';
+      for (const p of outs) {
+        const o = document.createElement('option');
+        o.value = p.id; o.textContent = p.name || p.manufacturer || p.id;
+        osel.appendChild(o);
+      }
+      osel.value = [...osel.options].some((o) => o.value === okeep) ? okeep : 'off';
     }
-    sel.value = [...sel.options].some((o) => o.value === keep) ? keep : 'off';
+    document.getElementById('midihint').textContent =
+      ins.length + ' input(s), ' + outs.length + ' output(s).';
+    midiBind();
+    midiRegister();
+  } catch (e) {
+    document.getElementById('midihint').textContent = 'MIDI refresh failed: ' + e;
   }
-  const osel = selOf('outsel'), okeep = osel.value;
-  osel.innerHTML = '<option value="off">— off —</option>';
-  for (const p of outs) {
-    const o = document.createElement('option');
-    o.value = p.id; o.textContent = p.name || p.manufacturer || p.id;
-    osel.appendChild(o);
-  }
-  osel.value = [...osel.options].some((o) => o.value === okeep) ? okeep : 'off';
-  document.getElementById('midihint').textContent =
-    ins.length + ' input(s), ' + outs.length + ' output(s).';
-  midiRegister();
 }
 function registerLists() {
   // menu <-> dropdown agreement: device index == port for the IN list
@@ -356,13 +405,11 @@ function midiInit() {
   navigator.requestMIDIAccess({ sysex: true }).then((acc) => {
     midiAccess = acc;
     acc.onstatechange = midiRefresh;
-    for (const p of acc.inputs)
-      p[1].onmidimessage = (e) => {
-        if (!started) return;
-        for (let port = 0; port < 4; port++) {
-          if (selOf(INSEL[port]).value === e.port.id) midiPushBytes(port, e.data);
-        }
-      };
+    // routing choices reach C++ the moment the user changes one, and the
+    // OUT stays merely listed until then (nothing opens on page start)
+    for (const id of INSEL.concat('outsel'))
+      selOf(id).onchange = midiRegister;
+    midiBind();
     midiRefresh();
   }, () => { document.getElementById('midihint').textContent = 'WebMIDI access denied.'; });
 }
@@ -629,7 +676,8 @@ async function startup() {
   });
   setInterval(() => { try { Module.FS.syncfs(false, () => {}); } catch (e) {} }, 5000);
 
-  try { Module.callMain(['-d', '/roms']); }
+  // the rom dir is a positional argument (ui/tool_args.h; there is no -d)
+  try { Module.callMain(['/roms']); }
   catch (e) { setStatus('start failed: ' + e, true); logLine('callMain: ' + e); }
   started = true;
 
