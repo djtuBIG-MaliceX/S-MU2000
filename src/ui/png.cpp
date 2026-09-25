@@ -61,11 +61,20 @@ bool write_png(const std::string &path, const u8 *bgra, int w, int h, int stride
 	for (int y = 0; y < h; y++) {
 		raw.push_back(0);
 		const u8 *src = bgra + size_t(y) * stride;
+#ifdef __EMSCRIPTEN__
+		// The wasm DIB (gdi_wasm.cpp) already lands [R,G,B,A] in memory
+		for (int x = 0; x < w; x++) {
+			raw.push_back(src[x * 4 + 0]);   // R
+			raw.push_back(src[x * 4 + 1]);   // G
+			raw.push_back(src[x * 4 + 2]);   // B
+		}
+#else
 		for (int x = 0; x < w; x++) {
 			raw.push_back(src[x * 4 + 2]);   // R
 			raw.push_back(src[x * 4 + 1]);   // G
 			raw.push_back(src[x * 4 + 0]);   // B
 		}
+#endif
 	}
 
 	// zlib。無圧縮ブロックを並べるだけ

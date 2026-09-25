@@ -18,6 +18,7 @@
 #include "smf.h"
 
 #include <atomic>
+#include <chrono>
 #include <string>
 #include <thread>
 #include <vector>
@@ -47,6 +48,22 @@ public:
 private:
 	void run(bridge &br);
 
+#ifdef __EMSCRIPTEN__
+	// Single-threaded browser build: no feeder thread. start() records the
+	// state below and the frame loop calls pump() instead of run() sleeping.
+	// Timing is the rAF clock (one pass a frame), which is fine for files.
+#endif
+	bridge *m_br = nullptr;
+	size_t  m_at = 0;
+	std::chrono::steady_clock::time_point m_t0{};
+
+public:
+#ifdef __EMSCRIPTEN__
+	// Advance playback by one frame's worth of due events
+	void pump();
+#endif
+
+private:
 	std::vector<smf::event> m_events;
 	std::thread       m_thread;
 	std::atomic<bool> m_quit{false};

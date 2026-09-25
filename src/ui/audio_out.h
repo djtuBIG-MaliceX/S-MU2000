@@ -37,7 +37,7 @@
 #include <functional>
 #include <string>
 
-#if defined(__APPLE__) || defined(__linux__)
+#if defined(__APPLE__) || defined(__linux__) || defined(__EMSCRIPTEN__)
 #include <memory>
 #include <vector>
 #else
@@ -49,7 +49,7 @@ namespace ui {
 
 constexpr u32 AUDIO_RATE = 44100;
 
-#if defined(__APPLE__) || defined(__linux__)
+#if defined(__APPLE__) || defined(__linux__) || defined(__EMSCRIPTEN__)
 
 // macOS: a CoreAudio DefaultOutput AudioUnit calls the render callback on its
 // own real-time HAL thread, so unlike the Windows side there is no worker thread
@@ -236,7 +236,7 @@ private:
 	s64 m_qpc_freq = 1;
 };
 
-#endif // __APPLE__ || __linux__
+#endif // __APPLE__ || __linux__ || __EMSCRIPTEN__
 
 } // namespace ui
 

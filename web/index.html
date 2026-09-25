@@ -1,0 +1,675 @@
+<!DOCTYPE html>
+<!-- S-MU2000 browser front end. Panel on a 2D canvas (gdi_wasm rasterizes
+     the GDI calls), the ImGui editors in the reserved pane on the right
+     (WebGL2), MIDI through WebMIDI, ROMs from your disk (kept in IndexedDB
+     so the next reload boots on its own). Serve this directory over http
+     (python -m http.server) next to smu2000.js / smu2000.wasm. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>S-MU2000</title>
+<style>
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body { margin: 0; background: #17181b; color: #d8d8dc;
+       font: 13px/1.45 "Segoe UI", system-ui, sans-serif; }
+#top { padding: 8px 14px; border-bottom: 1px solid #2c2d31; display: flex;
+       gap: 14px; align-items: baseline; }
+#top h1 { font-size: 15px; margin: 0; letter-spacing: .04em; }
+#statusline { color: #9fd49b; }
+#statusline.err { color: #e2867e; }
+#cols { display: flex; gap: 12px; padding: 12px 14px; align-items: flex-start; }
+#left { flex: 0 0 min(660px, 62vw); display: flex; flex-direction: column; gap: 10px; }
+#right { flex: 1 1 auto; min-width: 320px; display: flex; flex-direction: column;
+         border: 1px solid #2c2d31; border-radius: 6px; overflow: hidden;
+         min-height: 420px; }
+#right.hidden { display: none; }
+#panelwrap { border: 1px solid #2c2d31; border-radius: 6px; overflow: hidden;
+             background: #000; }
+#panel { width: 100%; height: auto; display: block; cursor: default; }
+#panel:focus { outline: 1px solid #4a6da7; }
+.card { border: 1px solid #2c2d31; border-radius: 6px; padding: 10px 12px; }
+.card h2 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase;
+           letter-spacing: .08em; color: #8b8d94; }
+.row { display: flex; gap: 8px; align-items: center; margin: 5px 0; flex-wrap: wrap; }
+.row label { flex: 0 0 110px; color: #a9abb2; }
+select, button, input[type=file]::file-selector-button {
+  background: #26272b; color: #d8d8dc; border: 1px solid #3a3b40;
+  border-radius: 4px; padding: 3px 7px; font: inherit; }
+button:hover { background: #303138; }
+select:disabled { opacity: .45; }
+button.on { background: #2f4a2f; border-color: #4c7a4c; }
+input[type=file] { color: #8b8d94; font: inherit; border: 0; background: none; }
+#tabstrip { display: flex; gap: 2px; background: #1e1f23; padding: 4px 6px 0;
+            border-bottom: 1px solid #2c2d31; flex-wrap: wrap; }
+#tabstrip button { border-bottom: 0; border-radius: 4px 4px 0 0; padding: 4px 12px; }
+#tabstrip button.sel { background: #17181b; color: #fff; }
+#editorwrap { flex: 1 1 auto; position: relative; min-height: 380px; }
+#editor { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+#log { max-height: 150px; overflow-y: auto; font: 11px/1.4 Consolas, monospace;
+       color: #97999f; white-space: pre-wrap; }
+#romhint { color: #8b8d94; }
+#ctxmenu { position: fixed; display: none; background: #26272b;
+           border: 1px solid #45464c; border-radius: 6px; padding: 4px 0;
+           z-index: 50; min-width: 190px; box-shadow: 0 6px 18px #0009; }
+#ctxmenu .grp { padding: 4px 12px 2px; color: #8b8d94; font-size: 11px;
+                text-transform: uppercase; letter-spacing: .06em; }
+#ctxmenu .item { padding: 4px 14px 4px 26px; position: relative; }
+#ctxmenu .item:hover { background: #384a6b; }
+#ctxmenu .item.off { color: #5c5e65; pointer-events: none; }
+#ctxmenu .item .chk { position: absolute; left: 9px; }
+#ctxmenu hr { border: 0; border-top: 1px solid #3a3b40; margin: 4px 0; }
+#dropveil { position: fixed; inset: 0; background: #000a; color: #fff;
+            display: none; align-items: center; justify-content: center;
+            font-size: 18px; z-index: 60; }
+</style>
+</head>
+<body>
+<div id="top"><h1 id="title">S-MU2000</h1><span id="statusline">Loading…</span></div>
+
+<div id="cols">
+  <div id="left">
+    <div id="panelwrap"><canvas id="panel" tabindex="0"></canvas></div>
+
+    <div class="card">
+      <h2>ROMs &amp; fonts</h2>
+      <div class="row"><label for="romdir">ROM directory</label>
+        <input type="file" id="romdir" webkitdirectory multiple></div>
+      <div class="row"><label for="romfiles">Single files</label>
+        <input type="file" id="romfiles" multiple
+               accept=".bin,.svg,.ic49,.ic50,.ic53,.ic54"></div>
+      <div class="row"><label for="fontfile">CJK font (.ttf/.otf)</label>
+        <input type="file" id="fontfile" accept=".ttf,.otf"></div>
+      <div id="romhint"></div>
+    </div>
+
+    <div class="card">
+      <h2>WebMIDI</h2>
+      <div class="row"><label for="inA">MIDI IN port A</label>
+        <select id="inA"><option value="off">— off —</option></select></div>
+      <div class="row"><label for="inB">MIDI IN port B</label>
+        <select id="inB"><option value="off">— off —</option></select></div>
+      <div class="row"><label for="inC">MIDI IN port C</label>
+        <select id="inC"><option value="off">— off —</option></select></div>
+      <div class="row"><label for="inD">MIDI IN port D</label>
+        <select id="inD"><option value="off">— off —</option></select></div>
+      <div class="row"><label for="outsel">MIDI OUT / THRU</label>
+        <select id="outsel"><option value="off">— off —</option></select></div>
+      <div class="row"><label for="micsel">A/D INPUT (mic)</label>
+        <button id="micbtn">Off</button>
+        <button id="playbtn">Play MIDI file…</button>
+        <input type="file" id="playfile" accept=".mid,.midi" hidden></div>
+      <div id="midihint" style="color:#8b8d94"></div>
+    </div>
+
+    <div class="card"><h2>Log</h2><div id="log"></div></div>
+  </div>
+
+  <div id="right" class="hidden">
+    <div id="tabstrip"></div>
+    <div id="editorwrap"><canvas id="editor"></canvas></div>
+  </div>
+</div>
+
+<div id="ctxmenu"></div>
+<div id="dropveil">Drop a .mid to play</div>
+
+<script>
+// Defined before the engine script loads (Emscripten picks it up as Module).
+var Module = {
+  noInitialRun: true,
+  print:    (s) => logLine(s),
+  printErr: (s) => logLine(s),
+  onAbort:  (w) => setStatus('wasm aborted: ' + w, true),
+};
+function logLine(s) {
+  const el = document.getElementById('log');
+  el.textContent += (el.textContent ? '\n' : '') + s;
+  while (el.textContent.length > 20000)
+    el.textContent = el.textContent.slice(8000);
+  el.scrollTop = el.scrollHeight;
+}
+function setStatus(text, isErr) {
+  const el = document.getElementById('statusline');
+  el.textContent = text;
+  el.className = isErr ? 'err' : '';
+}
+</script>
+<script src="smu2000.js"></script>
+<script>
+'use strict';
+
+// ---------------------------------------------------------------- helpers
+let started = false;
+const FSdir = (p) => { const parts = p.split('/').filter(Boolean);
+                       let cur = ''; for (const s of parts)
+                       { cur += '/' + s; try { Module.FS.mkdir(cur); } catch (e) {} } };
+const FSexists = (p) => Module.FS.analyzePath(p).exists;
+async function FSput(path, file) {
+  FSdir(path.slice(0, path.lastIndexOf('/')));
+  const buf = new Uint8Array(await file.arrayBuffer());
+  Module.FS.writeFile(path, buf);
+}
+const fn = (name, ret, args) => Module.cwrap(name, ret, args);
+
+// exports (js_wasm.cpp) — fetched lazily so nothing binds before load
+let X = {};
+function bindExports() {
+  X = {
+    frame:      fn('smu_frame', null, []),
+    state:      fn('smu_state', 'number', []),
+    message:    fn('smu_message', 'string', []),
+    allowBoot:  fn('smu_allow_boot', null, []),
+    glInit:     fn('smu_gl_init', 'number', ['string']),
+    glResize:   fn('smu_gl_resize', null, ['number','number','number']),
+    glMove:     fn('smu_gl_mouse_move', null, ['number','number']),
+    glButton:   fn('smu_gl_mouse_button', null, ['number','number']),
+    glWheel:    fn('smu_gl_wheel', null, ['number','number']),
+    glKey:      fn('smu_gl_key', null, ['number','number']),
+    glChar:     fn('smu_gl_char', null, ['number']),
+    wantsText:  fn('smu_gl_wants_text', 'number', []),
+    paneCount:  fn('smu_pane_count', 'number', []),
+    paneTitle:  fn('smu_pane_title', 'string', ['number']),
+    paneActive: fn('smu_pane_active', 'number', []),
+    paneOpen:   fn('smu_pane_activate', 'number', ['number']),
+    menuJson:   fn('smu_context_menu_json', 'string', ['number','number']),
+    menu:       fn('smu_menu', null, ['number']),
+    mDown:      fn('smu_mouse_down', 'number', ['number','number','number']),
+    mDrag:      fn('smu_mouse_drag', 'number', ['number','number']),
+    mUp:        fn('smu_mouse_up', null, []),
+    wheel:      fn('smu_wheel', 'number', ['number','number','number']),
+    hand:       fn('smu_hand_cursor', 'number', ['number','number']),
+    key:        fn('smu_key', null, ['number','number']),
+    audioPull:  fn('smu_audio_render', 'number', ['number']),
+    audioIn:    fn('smu_audio_in_push', null, ['number','number']),
+    midiPush:   fn('smu_midi_push', null, ['number','number','number']),
+    setIns:     fn('smu_set_midi_in_ports', null, ['string']),
+    setOuts:    fn('smu_set_midi_out_ports', null, ['string']),
+    setMic:     fn('smu_set_mic', null, ['string','number']),
+    openSmf:    fn('smu_open_smf', 'number', ['string']),
+  };
+}
+
+// ---------------------------------------------------------------- ROMs
+// engine.load() needs these four; everything else it looks up itself.
+const ROM_WANTED = ['mu2000_flash.bin', 'dump/xv364a0.ic49', 'dump/xv365a0.ic50',
+                    'dump/xw848a0.ic53', 'dump/xw849a0.ic54', 'hd44780u_b04.bin'];
+function romPathOf(name) {
+  // single-file picker knows the MU2000 layout; the directory picker keeps
+  // its own structure under /roms instead
+  if (/^x[vw]\d+[a-z0-9]*\.ic\d+$/i.test(name)) return '/roms/dump/' + name;
+  if (name === 'sin-table.bin') return '/roms/standin/' + name;
+  return '/roms/' + name;
+}
+function romsReady() { return ROM_WANTED.every((p) => FSexists('/roms/' + p)); }
+function romHint() {
+  const miss = ROM_WANTED.filter((p) => !FSexists('/roms/' + p));
+  const el = document.getElementById('romhint');
+  el.textContent = miss.length
+    ? 'Missing: ' + miss.join(', ') + ' — pick the whole roms folder.'
+    : 'All ROM files in place.';
+  if (!miss.length) X.allowBoot();
+}
+async function takeRomFiles(files, relative) {
+  for (const f of files) {
+    const rel = relative ? f.webkitRelativePath.split('/').slice(1).join('/') : f.name;
+    if (!rel) continue;
+    if (/mulcd\.zip|swp30\.zip/.test(rel)) {
+      if (rel.includes('mulcd')) logLine('note: mulcd.zip ignored — upload mulcd.svg instead');
+      continue; // swp30.zip is the SH7030 sim, already compiled into the wasm
+    }
+    await FSput(relative ? '/roms/' + rel : romPathOf(f.name), f);
+  }
+  romHint();
+}
+
+// ---------------------------------------------------------------- audio out
+let audioCtx = null, srcNode = null;
+function audioStart() {
+  if (!audioCtx) {
+    try { audioCtx = new AudioContext({ sampleRate: 44100 }); }
+    catch (e) { audioCtx = new AudioContext(); }
+    if (audioCtx.sampleRate !== 44100)
+      logLine('note: audio context runs at ' + audioCtx.sampleRate + 'Hz, resampling');
+    srcNode = audioCtx.createScriptProcessor(1024, 0, 2);
+    let carry = null;                 // last pulled block for JS-side resampling
+    let carryAt = 0;
+    srcNode.onaudioprocess = (ev) => {
+      const L = ev.outputBuffer.getChannelData(0),
+            R = ev.outputBuffer.getChannelData(1);
+      const n = L.length;
+      if (!carry || carryAt >= carry.frames) { carry = pullBlock(); carryAt = 0; }
+      if (!carry) { L.fill(0); R.fill(0); return; }
+      // linear resample 44100 -> ctx rate when the browser refused ours
+      const ratio = 44100 / audioCtx.sampleRate;
+      for (let i = 0; i < n; i++) {
+        const at = carryAt + i * ratio;
+        const i0 = Math.floor(at), i1 = Math.min(i0 + 1, carry.frames - 1),
+              f = at - i0;
+        if (i0 >= carry.frames) { L[i] = 0; R[i] = 0; continue; }
+        L[i] = (carry.L[i0] * (1 - f) + carry.L[i1] * f);
+        R[i] = (carry.R[i0] * (1 - f) + carry.R[i1] * f);
+      }
+      carryAt += n * ratio;
+    };
+    srcNode.connect(audioCtx.destination);
+  }
+  audioCtx.resume();
+}
+function pullBlock(frames) {
+  frames = frames || 1024;
+  const ptr = X.audioPull(frames);
+  if (!ptr) return null;
+  const view = new Int16Array(Module.HEAPU8.buffer, ptr, frames * 2);
+  const L = new Float32Array(frames), R = new Float32Array(frames);
+  for (let i = 0; i < frames; i++) { L[i] = view[i*2] / 32768; R[i] = view[i*2+1] / 32768; }
+  return { L, R, frames };
+}
+
+// ---------------------------------------------------------------- audio in
+let mic = null;
+async function micToggle() {
+  const btn = document.getElementById('micbtn');
+  if (mic) {
+    mic.stream.getTracks().forEach((t) => t.stop());
+    mic.node.disconnect(); mic.ctx.close(); mic = null;
+    X.setMic('', 0); btn.textContent = 'Off'; btn.classList.remove('on');
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: {
+      echoCancellation: false, noiseSuppression: false, autoGainControl: false }});
+    const ctx = new AudioContext();
+    const node = ctx.createScriptProcessor(1024, 1, 1);
+    node.onaudioprocess = (ev) => {
+      const ch = ev.inputBuffer.getChannelData(0), n = ch.length;
+      const bytes = n * 2 * 2;                       // s16 stereo (L=R)
+      const ptr = Module._malloc(bytes);
+      const i16 = new Int16Array(Module.HEAPU8.buffer, ptr, n * 2);
+      for (let i = 0; i < n; i++) {
+        const v = Math.max(-1, Math.min(1, ch[i])) * 32767;
+        i16[i*2] = v; i16[i*2+1] = v;
+      }
+      X.audioIn(ptr, n);
+      Module._free(ptr);
+    };
+    ctx.createMediaStreamSource(stream).connect(node);
+    node.connect(ctx.destination);                   // zero-gain path keeps it ticking
+    mic = { stream, node, ctx };
+    X.setMic('Microphone', ctx.sampleRate);
+    btn.textContent = 'On (' + ctx.sampleRate + 'Hz)'; btn.classList.add('on');
+  } catch (e) { setStatus('microphone: ' + e, true); }
+}
+
+// ---------------------------------------------------------------- WebMIDI
+let midiAccess = null;
+const INSEL = ['inA', 'inB', 'inC', 'inD'];
+function selOf(id) { return document.getElementById(id); }
+function midiRefresh() {
+  if (!midiAccess) return;
+  const ins = [...midiAccess.inputs.values()], outs = [...midiAccess.outputs.values()];
+  for (const id of INSEL) {
+    const sel = selOf(id), keep = sel.value;
+    sel.innerHTML = '<option value="off">— off —</option>';
+    for (const p of ins) {
+      const o = document.createElement('option');
+      o.value = p.id; o.textContent = p.name || p.manufacturer || p.id;
+      sel.appendChild(o);
+    }
+    sel.value = [...sel.options].some((o) => o.value === keep) ? keep : 'off';
+  }
+  const osel = selOf('outsel'), okeep = osel.value;
+  osel.innerHTML = '<option value="off">— off —</option>';
+  for (const p of outs) {
+    const o = document.createElement('option');
+    o.value = p.id; o.textContent = p.name || p.manufacturer || p.id;
+    osel.appendChild(o);
+  }
+  osel.value = [...osel.options].some((o) => o.value === okeep) ? okeep : 'off';
+  document.getElementById('midihint').textContent =
+    ins.length + ' input(s), ' + outs.length + ' output(s).';
+  midiRegister();
+}
+function registerLists() {
+  // menu <-> dropdown agreement: device index == port for the IN list
+  const names = INSEL.map((id) => {
+    const sel = selOf(id);
+    if (sel.value === 'off') return '';
+    const p = midiAccess && midiAccess.inputs.get(sel.value);
+    return p ? (p.name || p.id) : '';
+  });
+  X.setIns(names.join('\n'));
+  let oname = '';
+  if (midiAccess && selOf('outsel').value !== 'off') {
+    const p = midiAccess.outputs.get(selOf('outsel').value);
+    oname = p ? (p.name || p.id) : '';
+  }
+  X.setOuts(oname);
+}
+function midiRegister() { if (started) registerLists(); }
+function midiInit() {
+  if (!navigator.requestMIDIAccess) {
+    document.getElementById('midihint').textContent = 'WebMIDI unavailable in this browser.';
+    return;
+  }
+  navigator.requestMIDIAccess({ sysex: true }).then((acc) => {
+    midiAccess = acc;
+    acc.onstatechange = midiRefresh;
+    for (const p of acc.inputs)
+      p[1].onmidimessage = (e) => {
+        if (!started) return;
+        for (let port = 0; port < 4; port++) {
+          if (selOf(INSEL[port]).value === e.port.id) midiPushBytes(port, e.data);
+        }
+      };
+    midiRefresh();
+  }, () => { document.getElementById('midihint').textContent = 'WebMIDI access denied.'; });
+}
+function midiPushBytes(port, bytes) {
+  const ptr = Module._malloc(bytes.length);
+  Module.HEAPU8.set(bytes, ptr);
+  X.midiPush(port, ptr, bytes.length);
+  Module._free(ptr);
+}
+
+// ---------------------------------------------------------------- panels / canvases
+const panel = document.getElementById('panel');
+const editor = document.getElementById('editor');
+let panelCtx = null, img = null, shownSerial = 0;
+
+window.SmuHooks = {
+  presentPanel(bits, w, h, serial) {
+    if (serial === shownSerial) return;
+    if (panel.width !== w || panel.height !== h) {
+      panel.width = w; panel.height = h;
+      panelCtx = panel.getContext('2d');
+      img = panelCtx.createImageData(w, h);
+    }
+    // straight [R,G,B,A] from gdi_wasm -> opaque ImageData (force A=255)
+    const src = new Uint8Array(Module.HEAPU8.buffer, bits, w * h * 4);
+    const dst = img.data;
+    dst.set(src);
+    for (let i = 3; i < dst.length; i += 4) dst[i] = 255;
+    panelCtx.putImageData(img, 0, 0);
+    shownSerial = serial;
+  },
+  onMidiOutBytes(bytes) {
+    if (!midiAccess) return;
+    const id = selOf('outsel').value;
+    if (id === 'off') return;
+    const out = midiAccess.outputs.get(id);
+    if (out) out.send(bytes);
+  },
+  onLog(s)     { logLine(s); },
+  onTitle(s)   { document.getElementById('title').textContent = s; },
+  onStatus(s, e) { setStatus(s, e); },
+  onPanesChanged() { refreshPanes(); },
+  async openFile(filters) {
+    const inp = document.createElement('input');
+    inp.type = 'file';
+    if (filters) inp.accept = filters.split(',').map((f) => '.' + f.trim().replace(/^\./, '')).join(',');
+    const picked = await new Promise((res) => {
+      inp.onchange = () => res(inp.files[0] || null);
+      inp.click();
+      // a native dialog gives no cancel event; give up after 2 minutes
+      const iv = setInterval(() => {}, 1000);
+      setTimeout(() => { clearInterval(iv); res(null); }, 120000);
+    });
+    if (!picked) return null;
+    const path = '/uploads/' + picked.name;
+    await FSput(path, picked);
+    return path;
+  },
+  async saveFile(suggest, filters) {
+    const name = suggest || 'export.bin';
+    const path = '/downloads/' + name;
+    watchDownload(path);
+    return path;
+  },
+  confirm(text) { return window.confirm(text); },
+};
+
+// the app writes the file once saveFile returns; hand it to the browser
+function watchDownload(path) {
+  let tries = 0;
+  const iv = setInterval(() => {
+    const st = Module.FS.analyzePath(path);
+    if ((st.exists && st.object && st.object.usedBytes > 0) || ++tries > 100) {
+      clearInterval(iv);
+      if (!st.exists) return;
+      const data = Module.FS.readFile(path);
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([data], { type: 'application/octet-stream' }));
+      a.download = path.slice(path.lastIndexOf('/') + 1);
+      a.click();
+      URL.revokeObjectURL(a.href);
+    }
+  }, 300);
+}
+
+// ---- panel canvas input -------------------------------------------------
+function panelXY(e) {
+  const r = panel.getBoundingClientRect();
+  return [(e.clientX - r.left) * panel.width / r.width,
+          (e.clientY - r.top)  * panel.height / r.height];
+}
+let focusPanel = true;
+panel.addEventListener('mousedown', (e) => {
+  e.preventDefault(); panel.focus(); focusPanel = true; audioStart();
+  const [x, y] = panelXY(e);
+  const mask = X.mDown(Math.round(x), Math.round(y), e.button === 2 ? 1 : 0);
+  if (mask & 4) openMenu(e.clientX, e.clientY);
+  const move = (ev) => { const [dx, dy] = panelXY(ev); X.mDrag(Math.round(dx), Math.round(dy)); };
+  const up = () => { X.mUp(); removeEventListener('mousemove', move);
+                     removeEventListener('mouseup', up); };
+  addEventListener('mousemove', move); addEventListener('mouseup', up);
+});
+panel.addEventListener('mousemove', (e) => {
+  const [x, y] = panelXY(e);
+  panel.style.cursor = X.hand(Math.round(x), Math.round(y)) ? 'pointer' : 'default';
+});
+panel.addEventListener('wheel', (e) => {
+  e.preventDefault(); audioStart();
+  const [x, y] = panelXY(e);
+  X.wheel(Math.round(x), Math.round(y), e.deltaY < 0 ? 1 : -1);
+}, { passive: false });
+
+// ---- context menu (DOM twin of the panel's popup) ------------------------
+const menuEl = document.getElementById('ctxmenu');
+function openMenu(cx, cy) {
+  const groups = JSON.parse(X.menuJson(Math.round(cx), Math.round(cy)) || '[]');
+  menuEl.innerHTML = '';
+  for (const g of groups) {
+    if (g.title) { const t = document.createElement('div'); t.className = 'grp';
+                   t.textContent = g.title; menuEl.appendChild(t); }
+    g.items.forEach((it, i) => {
+      if (it.separator && i) { menuEl.appendChild(document.createElement('hr')); return; }
+      if (it.separator) return;
+      const d = document.createElement('div');
+      d.className = 'item' + (it.enabled ? '' : ' off');
+      d.innerHTML = (it.checked ? '<span class="chk">✓</span>' : '') +
+                    it.label.replace(/</g, '&lt;') +
+                    (it.shortcut ? '  ' + it.shortcut : '');
+      d.onclick = () => { menuEl.style.display = 'none'; audioStart(); X.menu(it.id); };
+      menuEl.appendChild(d);
+    });
+  }
+  menuEl.style.display = 'block';
+  menuEl.style.left = Math.min(cx, innerWidth - 220) + 'px';
+  menuEl.style.top = Math.min(cy, innerHeight - menuEl.offsetHeight - 8) + 'px';
+}
+addEventListener('pointerdown', (e) => {
+  if (!menuEl.contains(e.target)) menuEl.style.display = 'none';
+});
+
+// ---- editor pane (WebGL2, imgui) ----------------------------------------
+const rightCol = document.getElementById('right');
+const tabstrip = document.getElementById('tabstrip');
+function refreshPanes() {
+  const n = started ? X.paneCount() : 0;
+  rightCol.classList.toggle('hidden', n === 0);
+  if (!n) return;
+  tabstrip.innerHTML = '';
+  const act = X.paneActive();
+  for (let i = 0; i < n; i++) {
+    const b = document.createElement('button');
+    b.textContent = X.paneTitle(i);
+    if (i === act) b.classList.add('sel');
+    b.onclick = () => { X.paneOpen(i); refreshPanes(); };
+    tabstrip.appendChild(b);
+  }
+  sizeEditor();
+}
+function sizeEditor() {
+  const r = editor.getBoundingClientRect();
+  if (r.width < 2) return;
+  const dpr = window.devicePixelRatio || 1;
+  editor.width = Math.round(r.width * dpr);
+  editor.height = Math.round(r.height * dpr);
+  X.glResize(Math.round(r.width), Math.round(r.height), dpr);
+}
+new ResizeObserver(sizeEditor).observe(document.getElementById('editorwrap'));
+
+editor.addEventListener('mousedown', (e) => {
+  focusPanel = false; editor.focus(); audioStart();
+  X.glButton(e.button, 1);
+  const move = (ev) => { const r = editor.getBoundingClientRect();
+                         X.glMove(ev.clientX - r.left, ev.clientY - r.top); };
+  const up = (ev) => { const r = editor.getBoundingClientRect();
+                       move(ev); X.glButton(e.button, 0);
+                       removeEventListener('mousemove', move);
+                       removeEventListener('mouseup', up); };
+  addEventListener('mousemove', move); addEventListener('mouseup', up);
+});
+editor.addEventListener('mousemove', (e) => {
+  const r = editor.getBoundingClientRect();
+  X.glMove(e.clientX - r.left, e.clientY - r.top);
+});
+editor.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  X.glWheel(e.deltaX ? Math.sign(e.deltaX) : 0, -Math.sign(e.deltaY));
+}, { passive: false });
+editor.tabIndex = 0;
+
+// ---- keyboard ------------------------------------------------------------
+// named keys as GLFW codes (pc_window_wasm's table), printables as chars
+const NAMED = { Escape: 256, Enter: 257, Tab: 258, Backspace: 259, Insert: 260,
+                Delete: 261, ArrowRight: 262, ArrowLeft: 263, ArrowDown: 264,
+                ArrowUp: 265, PageUp: 266, PageDown: 267, Home: 268, End: 269 };
+const FKEY = { F2: 0x100, F3: 0x101, F4: 0x102, F5: 0x103 };
+addEventListener('keydown', (e) => {
+  if (!started) return;
+  if (focusPanel) {
+    e.preventDefault();
+    if (FKEY[e.key] !== undefined) X.key(FKEY[e.key], 1);
+    else if (e.key.length === 1) X.key(e.key.charCodeAt(0), 1);
+    else if (NAMED[e.key] !== undefined) X.key(NAMED[e.key], 1);
+    return;
+  }
+  // editor pane
+  if (NAMED[e.key] !== undefined) { e.preventDefault(); X.glKey(NAMED[e.key], 1); }
+  else if (e.key.length === 1 && (e.ctrlKey || X.wantsText())) {
+    e.preventDefault(); X.glChar(e.key.charCodeAt(0));
+  }
+});
+addEventListener('keyup', (e) => {
+  if (!started) return;
+  if (focusPanel) { if (e.key.length === 1) X.key(e.key.charCodeAt(0), 0);
+                    else if (NAMED[e.key] !== undefined) X.key(NAMED[e.key], 0); }
+  else if (NAMED[e.key] !== undefined) X.glKey(NAMED[e.key], 0);
+});
+
+// ---- MIDI file playback + drop -------------------------------------------
+document.getElementById('playbtn').onclick = () =>
+  document.getElementById('playfile').click();
+document.getElementById('playfile').onchange = async (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  await FSput('/songs/' + f.name, f);
+  audioStart();
+  X.openSmf('/songs/' + f.name);
+  e.target.value = '';
+};
+const veil = document.getElementById('dropveil');
+addEventListener('dragover', (e) => { e.preventDefault(); veil.style.display = 'flex'; });
+addEventListener('dragleave', (e) => { if (e.target === document.documentElement)
+                                        veil.style.display = 'none'; });
+addEventListener('drop', async (e) => {
+  e.preventDefault(); veil.style.display = 'none';
+  for (const f of e.dataTransfer.files) {
+    if (/\.(mid|i?di)$/i.test(f.name)) {
+      await FSput('/songs/' + f.name, f);
+      audioStart(); X.openSmf('/songs/' + f.name);
+    } else if (/\.(ttf|otf)$/i.test(f.name)) {
+      await FSput('/fonts/' + f.name, f); logLine('font: ' + f.name);
+    }
+  }
+});
+
+// ---------------------------------------------------------------- frame loop
+function frameLoop() {
+  requestAnimationFrame(frameLoop);
+  if (started) X.frame();
+}
+
+// ---------------------------------------------------------------- startup
+async function startup() {
+  bindExports();
+  // persistence: gui.ini + ROMs survive reloads
+  FSdir('/home/web_user/.local/share');
+  FSdir('/roms'); FSdir('/fonts'); FSdir('/uploads'); FSdir('/downloads'); FSdir('/songs');
+  await new Promise((res) => {
+    try {
+      Module.FS.mount(Module.IDBFS, {}, '/home/web_user/.local/share');
+      Module.FS.mount(Module.IDBFS, {}, '/roms');
+      Module.FS.mount(Module.IDBFS, {}, '/fonts');
+    } catch (e) { logLine('FS mount: ' + e); res(); return; }
+    Module.FS.syncfs(true, (err) => { if (err) logLine('syncfs: ' + err); res(); });
+  });
+  setInterval(() => { try { Module.FS.syncfs(false, () => {}); } catch (e) {} }, 5000);
+
+  try { Module.callMain(['-d', '/roms']); }
+  catch (e) { setStatus('start failed: ' + e, true); logLine('callMain: ' + e); }
+  started = true;
+
+  X.glInit('#editor');
+  sizeEditor();
+  midiInit();
+  romHint();            // boots by itself when the IndexedDB ROMs are complete
+  frameLoop();
+  setInterval(() => {   // status line mirror (engine state + message)
+    if (!started) return;
+    const st = X.state();
+    if (st === 1) setStatus('Running', false);
+    else if (st === 2) setStatus(X.message() || 'Boot failed', true);
+    else if (!romsReady()) setStatus('Waiting for ROM files…', false);
+    else setStatus('Booting… (about a minute the first time)', false);
+  }, 700);
+  audioStart();
+  logLine('ready — upload the roms/ folder to start (kept in this browser)');
+}
+
+// ---- wire the simple controls
+document.getElementById('romdir').addEventListener('change', (e) =>
+  takeRomFiles(e.target.files, true));
+document.getElementById('romfiles').addEventListener('change', (e) =>
+  takeRomFiles(e.target.files, false));
+document.getElementById('fontfile').addEventListener('change', async (e) => {
+  for (const f of e.target.files) await FSput('/fonts/' + f.name, f);
+  logLine('font uploaded — re-upload ROMs or reload to re-render text');
+});
+document.getElementById('micbtn').addEventListener('click', micToggle);
+for (const id of INSEL.concat('outsel'))
+  selOf(id).addEventListener('change', midiRegister);
+addEventListener('pointerdown', () => audioStart(), { once: true });
+
+if (!Module.calledRun) {
+  // Emscripten already ran (script loaded before startup defined) or not:
+  const iv = setInterval(() => {
+    if (Module._smu_frame) { clearInterval(iv); startup(); }
+  }, 50);
+}
+</script>
+</body>
+</html>

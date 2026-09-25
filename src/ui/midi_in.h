@@ -25,12 +25,13 @@
 
 namespace ui {
 
-#if defined(__APPLE__) || defined(__linux__)
+#if defined(__APPLE__) || defined(__linux__) || defined(__EMSCRIPTEN__)
 
 // macOS: CoreMIDI hands over whole packets, SysEx included, so there are no
 // receive buffers to pre-post the way WinMM needs. The shape is otherwise the
 // same as the Windows class, and so is the lock-free ring the audio thread
-// drains.
+// drains. Emscripten shares this shape: WebMIDI hands whole messages over too,
+// and the JS side pushes bytes into the same ring (src/ui/midi_in_wasm.cpp).
 class midi_in
 {
 public:
@@ -128,7 +129,7 @@ private:
 	std::atomic<bool> m_closing{false};
 };
 
-#endif // __APPLE__ || __linux__
+#endif // __APPLE__ || __linux__ || __EMSCRIPTEN__
 
 } // namespace ui
 

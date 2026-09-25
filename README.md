@@ -151,6 +151,25 @@ MIDI ファイルは窓に落とすか `--play` で流せる。
 プロジェクトに残る）。工場出荷状態に戻すには `--factory` を付けて起動するか、
 `gui` の窓を右クリックして「工場出荷状態に戻す」。ファイルを消しても同じ。
 
+## ブラウザ版（WASM）
+
+画面もエンジンも Emscripten でビルドできて、WebMIDI のあるブラウザだけで鳴らせる。
+
+```
+.\build_wasm.ps1          # emsdk（既定 D:\opt\emsdk）+ ninja → build-wasm\ に smu2000.js
+.\build_wasm.ps1 -Serve   # できたらそのまま http://localhost:8080 で配る
+```
+
+Chrome / Edge で 8080 を開いて `roms/` をまるごとアップロードするとそのあと
+起動する（IndexedDB に残るので 2 回目からはそのまま起動する）。音は JS 側が
+44.1kHz で引き取る（ScriptProcessor）、MIDI IN は A〜D の口ごとにドロップダウンで
+WebMIDI の入口を選び、MIDI OUT / THRU と A/D INPUT（マイク）も左の欄から。
+パネルを右クリックするとデスクトップ版と同じメニューが出る（HTML のメニューで
+再現）。F2・F3 の PC エディタはダイアログにせず**右の専用ペイン**に開く。
+MIDI ファイルはドラッグ&ドロップか「Play MIDI file…」で流れる。
+最初の起動（firmware のブート）はリリースビルドで 10 秒くらい。ブラウザがなくても
+`node build-wasm/render.js <rom> <MIDI> <出力.wav>` で端末から WAV に書き出せる。
+
 画面の中身は [doc/gui.md](doc/gui.md)。3 面ある。
 **パネルの絵は作り直さずに直せる**。位置も色も `panel.txt` という文字
 ファイルに追い出してある（[doc/panel-editing.md](doc/panel-editing.md)）。

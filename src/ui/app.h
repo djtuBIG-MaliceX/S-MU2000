@@ -21,6 +21,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdio>
+#include <functional>
 #include <memory>
 #include <string>
 #include <thread>
@@ -43,6 +44,8 @@
 // and shape, but it must not be declared twice in one program
 #ifdef __linux__
 #include "ui/pc_window_linux.h"
+#elif defined(__EMSCRIPTEN__)
+#include "ui/pc_window_wasm.h"
 #else
 #include "ui/pc_window.h"
 #endif
@@ -698,7 +701,13 @@ public:
 			return;
 		play.stop();
 		join_reboot();
+#ifdef __EMSCRIPTEN__
+		// No thread to spare in the browser; the reset takes a beat and the
+		// panel repaints right after (in_fill is false while we sit here)
+		eng->factory_reset();
+#else
 		reboot = std::thread([this] { eng->factory_reset(); });
+#endif
 	}
 
 	void set_fold34(bool on)
@@ -1127,8 +1136,12 @@ public:
 
 		make_audio();
 
-		// Boot on a separate thread, and start the audio once it is done
-		std::thread boot_thread([&] {
+		// Boot on a separate thread, and start the audio once it is done.
+		// The browser has no threads to spare: it runs the very same steps
+		// from its first drawn frames (m_boot_job, driven by pump_window)
+		// Captured by value: on Emscripten these lambdas outlive run()
+		// (the frame loop runs them), and a/eo/oo are run()'s arguments.
+		auto boot_then_audio = [this, a = a, eo = eo, oo = oo] {
 			if (!eng->boot()) {
 				eng->state.store(2);
 				eng->publish();
@@ -1149,7 +1162,27 @@ public:
 				play_song(a.play_path);
 			say_audio_running();
 			std::fflush(stdout);
-		});
+		};
+#ifdef __EMSCRIPTEN__
+		// The ROMs may arrive after start-up (the page's file input), so
+		// the load runs as part of the job and can be let go again after
+		// a miss. The shell consumes the job when it reports true.
+		m_boot_job = [this, a = a, start = boot_then_audio]() -> bool {
+			if (!load_machine(*eng, a)) {
+				eng->state.store(2);
+				eng->publish();
+				return false;
+			}
+			start();
+			return true;
+		};
+		// --editor and friends, alongside the panel
+		open_startup_windows(wo);
+		// Installs the frame loop; does not block in the browser
+		pump_window("S-MU2000", a.win_w, a.win_h);
+		return 0;
+#else
+		std::thread boot_thread(boot_then_audio);
 
 		// --editor and friends, alongside the panel
 		open_startup_windows(wo);
@@ -1161,6 +1194,7 @@ public:
 		shutdown();
 		print_exit_stats(audio_drops());
 		return 0;
+#endif
 	}
 
 	// ---- the window-system shell (thin shells implement these)
@@ -1220,6 +1254,11 @@ protected:
 	u64 last_flush = 0;                // card file last written back
 	u64 last_drop_report = 0;          // MIDI drops last said out loud
 	bool pressed = false;            // a panel press is in flight (drag/up)
+
+	// The browser shell runs the boot steps from its frame loop (single
+	// threaded: no boot thread). run() fills this on Emscripten only; the
+	// job reports whether the machine came up (false keeps it armed)
+	std::function<bool()> m_boot_job;
 };
 
 // --shot without a ROM or without booting: draw the empty screen. Both

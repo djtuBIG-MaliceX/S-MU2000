@@ -268,7 +268,13 @@ void mu2000::set_threaded(bool on)
 // 頼まれていて、台数が境を超えていなければ別スレッドにする。そうでなければ 1 本に戻す
 void mu2000::apply_threading()
 {
+#ifdef __EMSCRIPTEN__
+	// Single-threaded browser build: there is no second thread to hand the
+	// slave SWP30 to, and std::thread would throw outright
+	const bool on = false;
+#else
 	const bool on = m_want_threaded && g_live_instances.load(std::memory_order_relaxed) <= threaded_max();
+#endif
 	if (on == m_slave_thread.joinable())
 		return;
 

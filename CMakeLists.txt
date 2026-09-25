@@ -47,7 +47,19 @@ target_compile_options(smu2000_core PRIVATE -Wall -Wno-unused-variable -Wno-unus
 set_target_properties(smu2000_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # ---- Offline tools (run anywhere; need no ROMs except via argv) -------------
+if(EMSCRIPTEN)
+  # The emulator's tables + ROMs blow past the 16MB default heap
+  add_link_options(
+    -sALLOW_MEMORY_GROWTH=1
+    -sINITIAL_MEMORY=64MB
+    -sMAXIMUM_MEMORY=2GB
+    -sENVIRONMENT=node,web
+  )
+endif()
 foreach(tool verify boot render panel statetest blocktime)
+  if(EMSCRIPTEN AND tool STREQUAL "render")
+    continue() # render-wasm below already owns the render.js output
+  endif()
   add_executable(${tool} src/${tool}.cpp)
   target_link_libraries(${tool} PRIVATE smu2000_core)
 endforeach()
@@ -164,4 +176,78 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   else()
     message(STATUS "Cairo/SDL3 not found: skipping gui (needs libcairo2-dev libsdl3-dev)")
   endif()
+endif()
+
+# ---- Emscripten: browser build (web/) ---------------------------------------
+#
+# Build with the emsdk toolchain (emcmake cmake -B build-wasm -G Ninja).
+# The sound engine runs in wasm and renders through the page's Web Audio;
+# MIDI IN arrives through WebMIDI (web/smu2000.js wires the port dropdown).
+# The panel paints through gdi_wasm.cpp (a CPU rasterizer over the GDI shim,
+# blitted to a 2D canvas), the ImGui editor windows draw into their own
+# WebGL canvas in the page's reserved pane -- no dialogs, no extra windows.
+if(EMSCRIPTEN)
+  # (memory/ENVIRONMENT options moved above the tool list so they apply
+  # there too). What only the browser front end needs:
+  add_link_options(
+    -sEXPORTED_RUNTIME_METHODS=ccall,cwrap,FS,UTF8ToString,stringToUTF8,lengthBytesUTF8,HEAPU8,callMain
+    -sSTACK_SIZE=8MB
+  )
+
+  set(IMGUI_CORE
+    third_party/imgui/imgui.cpp
+    third_party/imgui/imgui_draw.cpp
+    third_party/imgui/imgui_tables.cpp
+    third_party/imgui/imgui_widgets.cpp)
+
+  # gui_wasm.cpp keeps main(); the shell (app + pump) lives in ui/app_wasm.*
+  add_executable(gui-wasm src/gui_wasm.cpp
+    src/compat/gdi_wasm.cpp
+    src/ui/panel.cpp src/ui/layout.cpp src/ui/svg.cpp
+    src/ui/editor.cpp src/ui/effects.cpp src/ui/png.cpp
+    src/ui/pc_editor.cpp src/ui/overview.cpp src/ui/fx_editor.cpp
+    src/ui/part_shapes.cpp src/ui/master_editor.cpp
+    src/ui/player.cpp src/xg/model.cpp
+    src/ui/xg_ui.cpp src/ui/fx_help.cpp src/ui/fx_icons.cpp
+    src/ui/app_wasm.cpp
+    src/ui/window_wasm.cpp
+    src/ui/pc_window_wasm.cpp
+    src/ui/audio_out_wasm.cpp
+    src/ui/audio_in_wasm.cpp
+    src/ui/midi_in_wasm.cpp
+    src/ui/midi_out_wasm.cpp
+    src/ui/js_wasm.cpp
+    ${IMGUI_CORE}
+    third_party/imgui/backends/imgui_impl_opengl3.cpp)
+  set_target_properties(gui-wasm PROPERTIES OUTPUT_NAME "smu2000" SUFFIX ".js")
+  target_include_directories(gui-wasm PRIVATE src src/compat third_party/imgui)
+  target_link_libraries(gui-wasm PRIVATE smu2000_core)
+  target_link_options(gui-wasm PRIVATE
+    -sUSE_WEBGL2=1
+    -sMIN_WEBGL_VERSION=2
+    -sMAX_WEBGL_VERSION=2
+    # dialog round-trips from C++ await JS promises (see ui/js_wasm.cpp)
+    -sASYNCIFY
+    -sASYNCIFY_STACK_SIZE=8MB
+    # the pull functions run from rAF/audio callbacks even while a dialog
+    # has the main stack unwound -- keep them uninstrumented
+    "-sASYNCIFY_REMOVE=[\"smu_frame*\",\"smu_audio_render*\",\"smu_midi_push*\",\"smu_gl_*\",\"smu_mouse_*\",\"smu_wheel\",\"smu_hand_cursor\",\"smu_key\",\"smu_pane_*\",\"smu_panel_*\",\"smu_state\",\"smu_message\",\"smu_set_*\",\"smu_set_mic\",\"smu_audio_in_push\"]"
+    # GUI.ini and the boot cache survive reloads
+    -lidbfs.js
+  )
+
+  # Ship the page next to the binary (index.html beside smu2000.js/.wasm so
+  # `python -m http.server` in the build dir just works). roms/ is fetched
+  # at run time.
+  add_custom_command(TARGET gui-wasm POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+      ${CMAKE_CURRENT_SOURCE_DIR}/web ${CMAKE_CURRENT_BINARY_DIR}
+    COMMENT "Copying web/ next to smu2000.js")
+
+  # Offline render as wasm too: `node render.js` smoke-tests the engine.
+  # NODERAWFS lets it read the ROMs / write the WAV straight off disk.
+  add_executable(render-wasm src/render.cpp)
+  set_target_properties(render-wasm PROPERTIES OUTPUT_NAME "render" SUFFIX ".js")
+  target_link_libraries(render-wasm PRIVATE smu2000_core)
+  target_link_options(render-wasm PRIVATE -sNODERAWFS=1)
 endif()

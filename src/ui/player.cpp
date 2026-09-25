@@ -55,7 +55,14 @@ bool player::start(const std::string &path, bridge &br, std::string &err)
 	m_quit.store(false);
 	m_pos.store(0);
 	m_playing.store(true, std::memory_order_release);
+#ifdef __EMSCRIPTEN__
+	// No thread to hand it to; the frame loop drives pump()
+	m_br = &br;
+	m_at = 0;
+	m_t0 = std::chrono::steady_clock::now();
+#else
 	m_thread = std::thread([this, &br] { run(br); });
+#endif
 	return true;
 }
 
@@ -64,6 +71,10 @@ void player::stop()
 	m_quit.store(true, std::memory_order_release);
 	if (m_thread.joinable())
 		m_thread.join();
+#ifdef __EMSCRIPTEN__
+	if (m_playing.load() && m_br)
+		all_off(*m_br);
+#endif
 	m_playing.store(false, std::memory_order_release);
 	m_pos.store(0);
 }
@@ -110,5 +121,32 @@ void player::run(bridge &br)
 #endif
 	m_playing.store(false, std::memory_order_release);
 }
+
+#ifdef __EMSCRIPTEN__
+// One frame's worth of the run() loop: send everything that has come due and
+// return. The rAF tick (about 16ms) replaces the 1-5ms sleeps
+void player::pump()
+{
+	if (!m_playing.load(std::memory_order_acquire) || !m_br)
+		return;
+
+	const double sec = std::chrono::duration<double>(
+	    std::chrono::steady_clock::now() - m_t0).count();
+	m_pos.store(sec, std::memory_order_relaxed);
+
+	const bool fold = m_fold.load(std::memory_order_relaxed);
+	while (m_at < m_events.size() && m_events[m_at].time <= sec) {
+		const smf::event &e = m_events[m_at];
+		const int to = smf::mu_port(e.port, fold);
+		if (to == 1)      m_br->send_b(e.bytes.data(), e.bytes.size());
+		else if (to == 0) m_br->send(e.bytes.data(), e.bytes.size());
+		m_at++;
+	}
+	if (m_at >= m_events.size()) {
+		all_off(*m_br);
+		m_playing.store(false, std::memory_order_release);
+	}
+}
+#endif
 
 } // namespace ui
