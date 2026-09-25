@@ -13,7 +13,56 @@
 #include <windowsx.h>
 #include <shellapi.h>
 
+#include <algorithm>
+#include <cmath>
+
 namespace ui {
+
+namespace {
+
+double lcd_aspect()
+{
+	const double h = g_win->panel.lay().lcd[3];
+	return h > 0.0 ? g_win->panel.lay().lcd[2] / h : 1.0;
+}
+
+// Keep the client area, excluding the title bar and resize frame, at the LCD ratio.
+void constrain_lcd_sizing(HWND hwnd, WPARAM edge, RECT &r)
+{
+	RECT wr{}, cr{};
+	GetWindowRect(hwnd, &wr);
+	GetClientRect(hwnd, &cr);
+	const int frame_w = (wr.right - wr.left) - (cr.right - cr.left);
+	const int frame_h = (wr.bottom - wr.top) - (cr.bottom - cr.top);
+	int outer_w = r.right - r.left;
+	int outer_h = r.bottom - r.top;
+
+	if (edge == WMSZ_TOP || edge == WMSZ_BOTTOM) {
+		const int client_h = std::max(60, outer_h - frame_h);
+		outer_h = client_h + frame_h;
+		outer_w = int(std::lround(client_h * lcd_aspect())) + frame_w;
+		if (edge == WMSZ_TOP)
+			r.top = r.bottom - outer_h;
+		else
+			r.bottom = r.top + outer_h;
+		r.right = r.left + outer_w;
+		return;
+	}
+
+	const int client_w = std::max(200, outer_w - frame_w);
+	outer_w = client_w + frame_w;
+	outer_h = int(std::lround(client_w / lcd_aspect())) + frame_h;
+	if (edge == WMSZ_LEFT || edge == WMSZ_TOPLEFT || edge == WMSZ_BOTTOMLEFT)
+		r.left = r.right - outer_w;
+	else
+		r.right = r.left + outer_w;
+	if (edge == WMSZ_TOPLEFT || edge == WMSZ_TOPRIGHT)
+		r.top = r.bottom - outer_h;
+	else
+		r.bottom = r.top + outer_h;
+}
+
+} // namespace
 
 // Menu command numbers, labels and builders are shared with gui_mac.cpp
 // in ui/menu.h (Windows is the reference), so a menu added on one side
@@ -35,9 +84,13 @@ bool make_window(const char *title, int w, int h)
 	wc.hbrBackground = nullptr;
 	RegisterClassA(&wc);
 
+	const DWORD style = g_win->lcd_only ? (WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX)
+	                                      : WS_OVERLAPPEDWINDOW;
+	if (g_win->lcd_only)
+		h = std::max(60, int(std::lround(w / lcd_aspect())));
 	RECT want{ 0, 0, w, h };
-	AdjustWindowRect(&want, WS_OVERLAPPEDWINDOW, FALSE);
-	HWND hwnd = CreateWindowA("SMU2000Panel", title, WS_OVERLAPPEDWINDOW,
+	AdjustWindowRect(&want, style, FALSE);
+	HWND hwnd = CreateWindowA("SMU2000Panel", title, style,
 	                          CW_USEDEFAULT, CW_USEDEFAULT,
 	                          want.right - want.left, want.bottom - want.top,
 	                          nullptr, nullptr, inst, nullptr);
@@ -109,6 +162,13 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 		g_win->resized(LOWORD(lp), HIWORD(lp));
 		InvalidateRect(hwnd, nullptr, FALSE);
 		return 0;
+
+	case WM_SIZING:
+		if (g_win->lcd_only) {
+			constrain_lcd_sizing(hwnd, wp, *reinterpret_cast<RECT *>(lp));
+			return TRUE;
+		}
+		break;
 
 	case WM_ERASEBKGND:
 		return 1;                               // 全部自分で描く

@@ -54,7 +54,12 @@ void begin_hint_bar();
 void end_hint_bar();
 bool hint_bar();
 // 説明を出す。帯があれば帯へ、無ければ直前の部品のツールチップへ（printf の書式）
-void hint(const char *fmt, ...);
+#if defined(__GNUC__) || defined(__clang__)
+#define UI_PRINTF_FMT(a, b) __attribute__((format(printf, a, b)))
+#else
+#define UI_PRINTF_FMT(a, b)
+#endif
+void hint(const char *fmt, ...) UI_PRINTF_FMT(1, 2);
 const std::string &hint_text();
 // 絵の点の字（実際の時間や音程）を集める。begin_values と end_values の間に描いた字を、
 // 出せなかった分も含めて 1 行ずつ返す（音色の窓が、区画にカーソルが載ったとき帯に並べる）
@@ -180,6 +185,12 @@ void program_pane(int part, xg::model &m, const xg_snapshot *ram, bridge &br);
 // 入ってきた MIDI から**取る（式だけの口では firmware にベンドを渡さないので、
 // RAM の PART_BEND は真ん中のまま動かない）。ram が無ければ何も出さない
 void bend_now_line(int part, xg::model &m, const xg_snapshot *ram);
+
+// そのパートの**見かけのバンク MSB**。XG はドラムを MSB 127（効果音は 126）で選ぶが、
+// **GS はドラムでも MSB が 0 のまま**で、キットかどうかはパートの MODE（08 pp 07）で
+// 決まる。MSB だけ見ると GS のドラムチャンネルが旋律に見えるので（issue #52）、
+// ドラムの MODE なら 127 として扱う。XG の 126/127 はそのまま返す
+int shown_bank_msb(int part, xg::model &m, int msb);
 // 試聴で鳴らしている音を止める（窓を閉じたとき）
 void audition_stop(bridge &br);
 // 試聴で鳴らす鍵。パートの音色の窓の鍵盤を右クリックして決める（目印が付く）。

@@ -7,9 +7,9 @@
 // shared ui/sdl_popup for menus and dialogs), app class (ui/app_linux.* on
 // Linux), main (gui_linux.cpp).
 //
-// The pump is not Linux's: it takes any ui::app (the generic superclass)
-// and keeps the SDL handles to itself, so a front end on another platform
-// can reuse it by linking this file and answering the same ui::app hooks.
+// The pump is Linux's: it takes a linux_app and keeps the SDL handles to
+// itself (ui::app hooks drive everything, so a front end on another platform
+// can reuse the shape by answering the same hooks).
 //
 // Nothing SDL appears in this header: the declarations below are all the
 // app class and main need.
@@ -23,13 +23,13 @@
 
 namespace ui {
 
-class app;
+class linux_app;
 
 // The SDL3 event loop: it owns the window, renderer and framebuffer, feeds
 // the app mouse/key/drop events and calls paint_main() every 33 ms. Returns
-// when the window closes. seconds > 0 ends the run after that many seconds
-// (--seconds: timed runs for smoke tests and demos)
-int run_window(app &gui, const char *title, int w, int h, double seconds = 0.0);
+// when the window closes. seconds_limit on the app ends the run after that
+// many seconds (--seconds: timed runs for smoke tests and demos)
+int run_window(linux_app &gui, const char *title, int w, int h);
 
 // --selftest: paint twice into separate surfaces and compare the bytes,
 // then upload and read the pixels back through a hidden window. The

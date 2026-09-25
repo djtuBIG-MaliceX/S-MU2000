@@ -407,6 +407,19 @@ private:
 
 	// ---- native の口（段 2）
 	int  m_native_engine = 0;
+	// **リセットが効き終わるまで、こちらの発音を待たせる**（issue #51）。
+	// 実機は firmware が MIDI を順番に処理するので、リセットの直後に並んだ打鍵は
+	// リセットのあとで鳴る。こちらは打鍵を自分でさばくため、待たせないと先に鳴り、
+	// あとから終わる firmware のリセットに消される（曲頭が丸ごと無音になる）。
+	// 決め打ちの秒数で待つのではなく、**firmware が SWP30 を触らなくなったら**解く。
+	// 取り逃しても期限で必ず解ける
+	bool   m_ne_reset_hold = false;      // いま待たせているか
+	size_t m_ne_reset_free = 0;          // 待たせる前から並んでいた分（これだけは流す）
+	u64    m_ne_reset_deadline = 0;      // これを過ぎたら必ず解く
+	u64    m_fw_swp_at = 0;              // firmware が最後に SWP30 を触った時刻
+	static constexpr u64 RESET_QUIET = 44100 / 50;    // 20ms 触らなければ「終わった」
+	static constexpr u64 RESET_HOLD_MAX = 44100 * 2 / 5;   // 400ms で必ず解く
+	void hold_after_reset(u64 fire);
 	u32  m_fw_hold = 0;            // このサンプル数だけ firmware を回す
 	// 調べ用の切り替えは**作るときに 1 回だけ読む**。run_sample から
 	// `std::getenv` を呼ぶと、それだけで 1 サンプルあたり 1µs 以上かかる

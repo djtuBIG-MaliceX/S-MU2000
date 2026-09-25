@@ -1336,6 +1336,8 @@ void mu2000::note_fw_swp(bool master, u32 reg, u16 value)
 		m_ndrv.set_eg_phase(u32(trace_sample()));
 	if (!m_native_engine || !master)
 		return;
+	// リセットが終わったかを測るのに使う（issue #51。hold_after_reset）
+	m_fw_swp_at = m_ne_clock;
 	// **firmware が鍵を押した瞬間のマスク**を拾う。これが firmware の
 	// 「このスロットを使う」という宣言なので、以後そこは避ける。
 	// あらゆる書き込みで印を付けると、ほとんどのスロットが firmware の
@@ -2308,6 +2310,33 @@ void mu2000::native_select_voice(int part)
 // 送りや音量を決める打ち込みは珍しくない）で、firmware がその SysEx を
 // 処理し終えるまで native が古い値のまま鳴らしていた。native の口では
 // firmware を 100ms につき 5ms しか回さないので、その遅れは 1 秒を超える
+// issue #51 の調べ用（`SMU2000_RESET_DEBUG=1`）。**環境は 1 回だけ読む**
+// （毎回 getenv を呼ぶと per-event の道が重くなる。6.225 の教訓）
+static bool reset_debug()
+{
+	static const bool on = std::getenv("SMU2000_RESET_DEBUG") != nullptr;
+	return on;
+}
+
+
+// リセット（GM・GS・XG）を受けたら、firmware がそれを処理し終えるまで
+// こちらの発音を待たせる（issue #51）。ここまでに並んでいた分（リセット自身を含む）は
+// そのまま流してよい。解くのは native_pump の呼び出し元（run_sample）
+void mu2000::hold_after_reset(u64 fire)
+{
+	if (reset_debug())
+		std::fprintf(stderr, "[reset] 待たせ始め fire=%llu ne_clock=%llu 並び=%zu\n",
+		             (unsigned long long)fire, (unsigned long long)m_ne_clock, m_nq.size());
+	m_ne_reset_hold = true;
+	m_ne_reset_free = m_nq.size();
+	const u64 now = fire > m_ne_clock ? fire : m_ne_clock;
+	const u64 deadline = now + RESET_HOLD_MAX;
+	if (deadline > m_ne_reset_deadline)
+		m_ne_reset_deadline = deadline;
+	m_fw_swp_at = now;                       // まだ静かになっていない、から始める
+}
+
+
 void mu2000::native_sysex(u64 fire)
 {
 	// **リセットは native にも効かせる**（6.136）。GM システムオン
@@ -2317,11 +2346,13 @@ void mu2000::native_sysex(u64 fire)
 	// **ヤマハの判定より前に見る**（GM と GS は 43 で始まらない）
 	if (m_sx_pos >= 3 && m_sx[0] == 0x7e && m_sx[2] == 0x09) {
 		m_nq.push_back({ fire, 6, 0, 0, 0 });
+		hold_after_reset(fire);
 		return;
 	}
 	if (m_sx_pos >= 7 && m_sx[0] == 0x41 && m_sx[2] == 0x42 &&
 	    m_sx[4] == 0x40 && m_sx[6] == 0x7f) {
 		m_nq.push_back({ fire, 6, 0, 0, 0 });
+		hold_after_reset(fire);
 		return;
 	}
 	if (m_sx_pos < 7)
@@ -2331,6 +2362,7 @@ void mu2000::native_sysex(u64 fire)
 	const u8 hh = m_sx[3], mm = m_sx[4], ll = m_sx[5];
 	if (hh == 0x00 && mm == 0x00 && (ll == 0x7e || ll == 0x7f)) {
 		m_nq.push_back({ fire, 6, 0, 0, 0 });
+		hold_after_reset(fire);
 		return;
 	}
 	// **ドラムのセットアップは SysEx（3n rr pp）では渡さない**（6.180）。
@@ -2359,11 +2391,20 @@ void mu2000::native_sysex(u64 fire)
 void mu2000::native_pump()
 {
 	while (!m_nq.empty() && m_nq.front().at <= m_ne_clock) {
+		// リセットが効き終わるまでは、そのあとに並んだものを止めておく
+		if (m_ne_reset_hold) {
+			if (m_ne_reset_free == 0)
+				break;
+			m_ne_reset_free--;
+		}
 		const nev e = m_nq.front();
 		m_nq.pop_front();
 		switch (e.kind) {
 		case 0: m_ndrv.note_off(e.part, e.d0); break;
 		case 1:
+			if (reset_debug())
+				std::fprintf(stderr, "[reset] 打鍵 part=%d note=%d ne_clock=%llu\n",
+				             e.part, e.d0, (unsigned long long)m_ne_clock);
 			if (m_ndrv.note_on(e.part, e.d0, e.d1))
 				m_ne_stats.note_native++;
 			break;
@@ -3044,6 +3085,25 @@ void mu2000::run_sample(s32 &left, s32 &right)
 			}
 		}
 		m_ne_clock++;
+		// **リセットが効き終わったら解く**（issue #51）。firmware が SWP30 を
+		// 20ms 触らなくなったら終わったとみなす。取り逃しても 400ms で必ず解く
+		if (m_ne_reset_hold &&
+		    (m_ne_clock >= m_ne_reset_deadline ||
+		     (m_ne_clock > m_fw_swp_at && m_ne_clock - m_fw_swp_at >= RESET_QUIET))) {
+			m_ne_reset_hold = false;
+			// **間隔を保ったままずらす**。溜めた分を一度に鳴らすと、線の上で
+			// 1 ミリ秒ずつずれていた和音が完全に揃ってしまい、音が大きくなる
+			// （firmware の道より +1.7dB になった）
+			if (!m_nq.empty() && m_nq.front().at < m_ne_clock) {
+				const u64 delta = m_ne_clock - m_nq.front().at;
+				for (nev &e : m_nq)
+					e.at += delta;
+			}
+			if (reset_debug())
+				std::fprintf(stderr, "[reset] 解いた ne_clock=%llu（期限=%llu 最後の SWP=%llu）残り=%zu\n",
+				             (unsigned long long)m_ne_clock, (unsigned long long)m_ne_reset_deadline,
+				             (unsigned long long)m_fw_swp_at, m_nq.size());
+		}
 		if (!m_nq.empty())
 			native_pump();
 		if (m_profile)
