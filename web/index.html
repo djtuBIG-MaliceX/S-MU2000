@@ -330,6 +330,7 @@ async function micToggle() {
 let midiAccess = null;
 const INSEL = ['inA', 'inB', 'inC', 'inD'];
 function selOf(id) { return document.getElementById(id); }
+const rxStat = {};   // WebMIDI port id -> {msgs, got, notd}
 function midiBind() {
   // Listeners attach to the current port OBJECTS. A statechange hands us
   // fresh ones, so re-bind on every refresh -- otherwise the input goes
@@ -338,9 +339,28 @@ function midiBind() {
   if (!midiAccess) return;
   for (const p of midiAccess.inputs.values())
     p.onmidimessage = (e) => {
+      // first-byte-per-device proof that the WebMIDI hook is live
+      const st = rxStat[e.port.id] ||
+                 (rxStat[e.port.id] = { msgs: 0, got: false, notd: false });
+      st.msgs++;
+      if (!st.got) {
+        st.got = true;
+        logLine('midi: LIVE bytes from "' + (e.port.name || e.port.id) +
+                '" (hook works; first msg status 0x' +
+                (e.data[0] | 0).toString(16) + ')');
+      }
       if (!started) return;
+      let routed = false;
       for (let port = 0; port < 4; port++)
-        if (selOf(INSEL[port]).value === e.port.id) midiPushBytes(port, e.data);
+        if (selOf(INSEL[port]).value === e.port.id) {
+          midiPushBytes(port, e.data);
+          routed = true;
+        }
+      if (!routed && !st.notd) {
+        st.notd = true;
+        logLine('midi: "' + (e.port.name || e.port.id) +
+                '" is streaming but no IN dropdown selects it');
+      }
     };
 }
 let midiSig = '';
@@ -396,7 +416,20 @@ function registerLists() {
   }
   X.setOuts(oname);
 }
-function midiRegister() { if (started) registerLists(); }
+function midiRegister() {
+  if (!started) return;
+  registerLists();
+  // proof at the moment of selection: what the dropdown now points at,
+  // and a fresh bind so a swapped port object can't leave the hook behind
+  for (let i = 0; i < 4; i++) {
+    const v = selOf(INSEL[i]).value;
+    if (v === 'off') continue;
+    const p = midiAccess && midiAccess.inputs.get(v);
+    logLine(p ? 'midi: IN ' + 'ABCD'[i] + ' → "' + (p.name || v) + '" selected'
+              : 'midi: IN ' + 'ABCD'[i] + ' value is stale (device gone?) — pick again');
+  }
+  midiBind();
+}
 function midiInit() {
   if (!navigator.requestMIDIAccess) {
     document.getElementById('midihint').textContent = 'WebMIDI unavailable in this browser.';
@@ -413,11 +446,16 @@ function midiInit() {
     midiRefresh();
   }, () => { document.getElementById('midihint').textContent = 'WebMIDI access denied.'; });
 }
+let pushErr = false;
 function midiPushBytes(port, bytes) {
-  const ptr = Module._malloc(bytes.length);
-  Module.HEAPU8.set(bytes, ptr);
-  X.midiPush(port, ptr, bytes.length);
-  Module._free(ptr);
+  try {
+    const ptr = Module._malloc(bytes.length);
+    Module.HEAPU8.set(bytes, ptr);
+    X.midiPush(port, ptr, bytes.length);
+    Module._free(ptr);
+  } catch (e) {
+    if (!pushErr) { pushErr = true; logLine('midi push into wasm failed: ' + e); }
+  }
 }
 
 // ---------------------------------------------------------------- panels / canvases
@@ -694,6 +732,19 @@ async function startup() {
     else if (!romsReady()) setStatus('Waiting for ROM files…', false);
     else setStatus('Booting… (about a minute the first time)', false);
   }, 700);
+  setInterval(() => {   // MIDI hook survival: a port object can be swapped
+    if (!midiAccess || !started) return;   // without a statechange event
+    for (const id of INSEL) {
+      const v = selOf(id).value;
+      if (v === 'off') continue;
+      const p = midiAccess.inputs.get(v);
+      if (p && !p.onmidimessage) {
+        logLine('midi: hook vanished on ' + id + ' — reattaching');
+        midiBind();
+        break;
+      }
+    }
+  }, 4000);
   audioStart();
   logLine('ready — upload the roms/ folder to start (kept in this browser)');
 }
@@ -708,9 +759,10 @@ document.getElementById('fontfile').addEventListener('change', async (e) => {
   logLine('font uploaded — re-upload ROMs or reload to re-render text');
 });
 document.getElementById('micbtn').addEventListener('click', micToggle);
-for (const id of INSEL.concat('outsel'))
-  selOf(id).addEventListener('change', midiRegister);
+// (IN/OUT dropdown change handlers live in midiInit: onchange = midiRegister)
 addEventListener('pointerdown', () => audioStart(), { once: true });
+// if the MIDI permission prompt was dismissed at load, give it one retry
+addEventListener('pointerdown', () => { if (!midiAccess) midiInit(); }, { once: true });
 
 if (!Module.calledRun) {
   // Emscripten already ran (script loaded before startup defined) or not:
