@@ -339,26 +339,29 @@ function midiBind() {
   if (!midiAccess) return;
   for (const p of midiAccess.inputs.values())
     p.onmidimessage = (e) => {
-      // first-byte-per-device proof that the WebMIDI hook is live
-      const st = rxStat[e.port.id] ||
-                 (rxStat[e.port.id] = { msgs: 0, got: false, notd: false });
+      // NB: use the CLOSED-OVER port p, never e.port -- Chrome implements
+      // MIDIMessageEvent without the spec's `port` attribute, so e.port is
+      // undefined there and touching it threw on every single inbound
+      // message (live input died silently while SMF playback worked).
+      const st = rxStat[p.id] ||
+                 (rxStat[p.id] = { msgs: 0, got: false, notd: false });
       st.msgs++;
       if (!st.got) {
         st.got = true;
-        logLine('midi: LIVE bytes from "' + (e.port.name || e.port.id) +
+        logLine('midi: LIVE bytes from "' + (p.name || p.id) +
                 '" (hook works; first msg status 0x' +
                 (e.data[0] | 0).toString(16) + ')');
       }
       if (!started) return;
       let routed = false;
       for (let port = 0; port < 4; port++)
-        if (selOf(INSEL[port]).value === e.port.id) {
+        if (selOf(INSEL[port]).value === p.id) {
           midiPushBytes(port, e.data);
           routed = true;
         }
       if (!routed && !st.notd) {
         st.notd = true;
-        logLine('midi: "' + (e.port.name || e.port.id) +
+        logLine('midi: "' + (p.name || p.id) +
                 '" is streaming but no IN dropdown selects it');
       }
     };
