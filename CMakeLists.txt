@@ -242,6 +242,12 @@ if(EMSCRIPTEN)
     "-sASYNCIFY_REMOVE=[\"smu_frame*\",\"smu_audio_render*\",\"smu_midi_push*\",\"smu_gl_*\",\"smu_mouse_*\",\"smu_wheel\",\"smu_hand_cursor\",\"smu_key\",\"smu_pane_*\",\"smu_panel_*\",\"smu_state\",\"smu_message\",\"smu_set_*\",\"smu_set_mic\",\"smu_audio_in_push\"]"
     # GUI.ini and the boot cache survive reloads
     -lidbfs.js
+    # IDBFS is only linked here (render-wasm has NODERAWFS instead), so
+    # the export list must be repeated target-scoped with it; CMake puts
+    # target options last on the link line and the last -s flag wins.
+    # Without exporting IDBFS, Module.IDBFS is undefined and the page's
+    # FS.mount() throws -> nothing persists across reloads.
+    -sEXPORTED_RUNTIME_METHODS=ccall,cwrap,FS,IDBFS,UTF8ToString,stringToUTF8,lengthBytesUTF8,HEAPU8,callMain
   )
 
   # Ship the page next to the binary (index.html beside smu2000.js/.wasm so

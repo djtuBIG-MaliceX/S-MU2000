@@ -373,6 +373,12 @@ function midiRefresh() {
     midiSig = sig;
     const ins = [...midiAccess.inputs.values()], outs = [...midiAccess.outputs.values()];
     if (rebuild) {
+      // snapshot of who's here and whether Chrome could actually hold the
+      // port (a 'closed' IN means another app owns it -- Windows MIDI IN
+      // allows exactly one reader and WebMIDI fails silently)
+      const who = (p) => (p.name || p.id) + '[' + p.state + '/' + p.connection + ']';
+      logLine('midi: devices — IN ' + (ins.map(who).join(', ') || '(none)') +
+              ' | OUT ' + (outs.map(who).join(', ') || '(none)'));
       for (const id of INSEL) {
         const sel = selOf(id), keep = sel.value;
         sel.innerHTML = '<option value="off">— off —</option>';
@@ -425,8 +431,15 @@ function midiRegister() {
     const v = selOf(INSEL[i]).value;
     if (v === 'off') continue;
     const p = midiAccess && midiAccess.inputs.get(v);
-    logLine(p ? 'midi: IN ' + 'ABCD'[i] + ' → "' + (p.name || v) + '" selected'
-              : 'midi: IN ' + 'ABCD'[i] + ' value is stale (device gone?) — pick again');
+    if (!p) {
+      logLine('midi: IN ' + 'ABCD'[i] + ' value is stale (device gone?) — pick again');
+      continue;
+    }
+    logLine('midi: IN ' + 'ABCD'[i] + ' → "' + (p.name || v) +
+            '" selected (port ' + p.state + ', connection ' + p.connection + ')');
+    if (p.connection !== 'open')
+      logLine('midi: "' + (p.name || v) + '" input is ' + p.connection +
+              ' — Windows MIDI IN is single-reader; close other apps/tabs holding it');
   }
   midiBind();
 }
@@ -437,6 +450,8 @@ function midiInit() {
   }
   navigator.requestMIDIAccess({ sysex: true }).then((acc) => {
     midiAccess = acc;
+    logLine('midi: WebMIDI access granted (' + acc.inputs.size + ' in, ' +
+            acc.outputs.size + ' out)');
     acc.onstatechange = midiRefresh;
     // routing choices reach C++ the moment the user changes one, and the
     // OUT stays merely listed until then (nothing opens on page start)
