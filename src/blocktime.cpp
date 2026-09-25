@@ -70,7 +70,10 @@ int main(int argc, char **argv)
 	std::string err;
 	if (!smf::load(argv[2], events, err)) { std::fprintf(stderr, "%s\n", err.c_str()); return 1; }
 
-	mu2000 mu;
+	// The mu2000 object is large (two SWP30s with their RAM images inline);
+	// wasm's 64KB stack can't hold it as a local, so own it from the heap.
+	auto mu_own = std::make_unique<mu2000>();
+	mu2000 &mu = *mu_own;
 	if (!mu.load_program(dir + "/mu2000_flash.bin")) { std::fprintf(stderr, "%s\n", mu.error().c_str()); return 1; }
 	if (!mu.load_wave(dir + "/dump")) { std::fprintf(stderr, "%s\n", mu.error().c_str()); return 1; }
 	mu.load_sintab(dir + "/standin/sin-table.bin");

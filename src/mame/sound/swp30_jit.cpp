@@ -36,9 +36,23 @@
 #define SMU2000_MEG_JIT 0
 #endif
 
+// Emscripten（wasm）: 機械語は作れないが、WebAssembly を実行時に作って instantiate できる。
+// SMU2000_MEG_JIT（ネイティブ機械語）は 0 のままにして x86/arm64 の経路は全部対象外にし、
+// 別の SMU2000_MEG_JIT_WASM で wasm 専用の emit 経路だけを生やす
+#if defined(__EMSCRIPTEN__)
+#define SMU2000_MEG_JIT_WASM 1
+#else
+#define SMU2000_MEG_JIT_WASM 0
+#endif
+
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+
+#if SMU2000_MEG_JIT_WASM
+#include <emscripten.h>
+#include "wasmasm.h"
+#endif
 
 #if SMU2000_MEG_JIT
 #include "compat/exec_mem.h"
@@ -261,15 +275,63 @@ void emit_revram_decode(emitter &a)
 
 } // namespace
 
+#if SMU2000_MEG_JIT_WASM
+// ---- wasm 用の継ぎ目（JS 側） ----
+//
+// 訳した WebAssembly は JS 側の配列に預けて、番号だけをやり取りする。
+// instantiate は同期（new WebAssembly.Module/Instance）でやる。blocktime のように
+// C++ のループが JS のイベントループを返さない場所でも動かないといけないので、
+// Promise を返す WebAssembly.instantiate は使えない
+// インスタンスは本体と同じ線形メモリ（wasmMemory）を import するので、
+// メモリが大きくなっても（memory growth）ポインタはそのまま有効
+EM_JS(int, smu_megjit_load, (const void *bytes, int len), {
+	if (typeof Module.__megjit === 'undefined')
+		Module.__megjit = [];
+	const p = bytes >>> 0;
+	const copy = HEAPU8.slice(p, p + len);        // C++ 側の vector は解放されるので写しておく
+	try {
+		const mod = new WebAssembly.Module(copy.buffer);
+		const inst = new WebAssembly.Instance(mod, { env: {
+			memory: wasmMemory,                   // 本体の Memory そのもの。ArrayBuffer は写さない
+			lfo: (ms, idx) => _smu_meg_lfo(ms, idx),  // meg_state::get_lfo（EXPORTED_FUNCTIONS で出した C++）
+		}});
+		Module.__megjit.push(inst.exports.run);
+		return Module.__megjit.length - 1;
+	} catch (e) {
+		console.error('megjit: instantiate failed', e);
+		try { FS.writeFile('megjit-crash.wasm', copy); } catch (e2) {}
+		return -1;
+	}
+});
+EM_JS(void, smu_megjit_free, (int h), {
+	if (Module.__megjit)
+		Module.__megjit[h] = null;
+});
+EM_JS(void, smu_megjit_runh, (int h, int ms, int swp, int ram), {
+	Module.__megjit[h](ms >>> 0, swp >>> 0, ram >>> 0);
+});
+
+// wasm からは _smu_meg_lfo として呼ばれる。meg_state は swp30_device の private なので、
+// 中身は public の static メンバに任せる
+extern "C" EMSCRIPTEN_KEEPALIVE u32 smu_meg_lfo(void *ms, u32 lfo)
+{
+	return swp30_device::meg_lfo_glue(ms, lfo);
+}
+#endif
+
 
 struct swp30_device::meg_jit {
 	using fn_t = void (*)(meg_state *, swp30_device *, u16 *);
 
-	// 訳した機械語 1 本
+	// 訳した機械語 1 本（wasm では訳した WebAssembly モジュール 1 本）
 	struct code {
 		fn_t fn = nullptr;
 		void *buf = nullptr;
 		size_t buf_size = 0;
+#if SMU2000_MEG_JIT_WASM
+		// JS 側のインスタンス配列の番号。-1 は「無い」
+		int32_t wasm = -1;
+#endif
 		u32 d3 = 0, d2 = 0;
 		// S-MU2000: 訳したときのリバーブ RAM の区画の有効・無効（0x80e）。
 		// 無効な区画への出し入れは訳すときに省くので、変わったら訳し直す
@@ -279,6 +341,10 @@ struct swp30_device::meg_jit {
 #if SMU2000_MEG_JIT
 			if (buf)
 				exec_mem::free_mem(buf, buf_size);
+#endif
+#if SMU2000_MEG_JIT_WASM
+			if (wasm >= 0)
+				smu_megjit_free(wasm);
 #endif
 		}
 	};
@@ -298,8 +364,44 @@ struct swp30_device::meg_jit {
 	static u32 call_lfo(meg_state *ms, u32 lfo) { return ms->get_lfo(int(lfo)); }
 #endif
 
+	// 「訳した物が有るか / 無効にする / 呼ぶ」の-platform 差をここに寄せる。
+	// wasm は fn を使わず、インスタンスが揃うかどうかが build() の成否とは別にある
+	static bool jit_built(code &c);
+	static void jit_forget(code &c)
+	{
+		c.fn = nullptr;
+#if SMU2000_MEG_JIT_WASM
+		if (c.wasm >= 0) {
+			smu_megjit_free(c.wasm);
+			c.wasm = -1;
+		}
+#endif
+	}
+	static void jit_call(code &c, meg_state *ms, swp30_device *swp, u16 *ram)
+	{
+#if SMU2000_MEG_JIT_WASM
+		smu_megjit_runh(c.wasm, u32(uintptr_t(ms)), u32(uintptr_t(swp)), u32(uintptr_t(ram)));
+#else
+		c.fn(ms, swp, ram);
+#endif
+	}
+
 	bool build(code &c, meg_state &ms, const meg_state::op *ops, swp30_device &swp, bool bake);
 };
+
+bool swp30_device::meg_jit::jit_built(code &c)
+{
+#if SMU2000_MEG_JIT_WASM
+	return c.wasm >= 0;                           // load が同期なので、番号があれば走れる
+#else
+	return c.fn != nullptr;
+#endif
+}
+
+u32 swp30_device::meg_lfo_glue(void *ms, u32 lfo)
+{
+	return static_cast<meg_state *>(ms)->get_lfo(int(lfo));
+}
 
 void swp30_device::meg_jit_delete(meg_jit *j)
 {
@@ -345,7 +447,7 @@ u32 meg_jit_upto()
 
 bool swp30_device::meg_jit_enabled()
 {
-#if SMU2000_MEG_JIT
+#if SMU2000_MEG_JIT || SMU2000_MEG_JIT_WASM
 	static const bool on = [] {
 		const char *e = std::getenv("SMU2000_MEG_JIT");
 		return !(e && e[0] == '0');
@@ -367,10 +469,10 @@ void swp30_device::meg_jit_rebuild()
 	meg_jit &j = *m_jit;
 	j.ops = m_meg_ops.data();
 	if (!j.build(j.gen, *m_meg, j.ops, *this, false))
-		j.gen.fn = nullptr;
+		meg_jit::jit_forget(j.gen);
 	j.gen.revram_enable = m_revram_enable;
 	// プログラムか番地が変わったので、焼き込んだ版は作り直す
-	j.spec.fn = nullptr;
+	meg_jit::jit_forget(j.spec);
 	j.spec_tried = false;
 	j.seen_const_gen = m_meg_const_gen;
 	j.stable = 0;
@@ -380,15 +482,15 @@ void swp30_device::meg_jit_rebuild()
 void swp30_device::meg_jit_invalidate()
 {
 	if (m_jit) {
-		m_jit->gen.fn = nullptr;
-		m_jit->spec.fn = nullptr;
+		meg_jit::jit_forget(m_jit->gen);
+		meg_jit::jit_forget(m_jit->spec);
 	}
 }
 
 bool swp30_device::meg_jit_run()
 {
 	meg_jit *j = m_jit.get();
-	if (!j || !j->gen.fn)
+	if (!j || !meg_jit::jit_built(j->gen))
 		return false;
 
 	// S-MU2000: 区画の有効・無効が訳したときと変わっていたら、訳し直すまで解釈実行で回す。
@@ -408,7 +510,7 @@ bool swp30_device::meg_jit_run()
 			j->spec_tried = false;
 		} else if (j->stable < meg_jit::STABLE)
 			j->stable++;
-		if (j->spec.fn && j->spec_const_gen == cg)
+		if (meg_jit::jit_built(j->spec) && j->spec_const_gen == cg)
 			c = &j->spec;
 		else if (j->stable >= meg_jit::STABLE && !j->spec_tried) {
 			j->spec_tried = true;
@@ -416,7 +518,7 @@ bool swp30_device::meg_jit_run()
 				j->spec_const_gen = cg;
 				c = &j->spec;
 			} else
-				j->spec.fn = nullptr;
+				meg_jit::jit_forget(j->spec);
 		}
 	}
 
@@ -431,7 +533,7 @@ bool swp30_device::meg_jit_run()
 		std::vector<u16> ram0(m_reverb_ram);
 		u32 seed0 = m_rand_seed;
 		bool fn0 = m_meg_flag_n, fz0 = m_meg_flag_z;
-		c->fn(m_meg, this, m_reverb_ram.data());
+		meg_jit::jit_call(*c, m_meg, this, m_reverb_ram.data());
 		const meg_state jit(*m_meg);
 		const std::vector<u16> ramj(m_reverb_ram);
 		const u32 seedj = m_rand_seed;
@@ -509,7 +611,7 @@ bool swp30_device::meg_jit_run()
 				if (jit.m_t_value[i] != m_meg->m_t_value[i]) std::fprintf(stderr, "  tv[%d] jit %d interp %d\n", i, jit.m_t_value[i], m_meg->m_t_value[i]);
 		}
 	}
-	c->fn(m_meg, this, m_reverb_ram.data());
+	meg_jit::jit_call(*c, m_meg, this, m_reverb_ram.data());
 	m_meg->m_pc = 0;
 	m_meg->m_icount -= 0x180;
 	return true;
@@ -586,7 +688,543 @@ u64 swp30_device::meg_jit_selftest()
 
 // build(): JIT を使わなければ空（解釈実行）。使うなら x86-64 / x86-32 共用の 1 本
 // （命令の出し分けは中の #if SMU_X64ASM_MODE == 32 で行う。x86-64 の出す機械語は従来と 1 バイトも同じ）
-#if !SMU2000_MEG_JIT
+#if SMU2000_MEG_JIT_WASM
+
+// wasm build(): 384 段をまっすぐな WebAssembly 関数 1 本に訳す。
+// 組み立ては上の x86-64 版と同じ（何を焼き込んで何を実行時に読むかも同じ）。主な違い:
+//   * 前倒し書き込み（early）はしない。値は必ず遅れの輪の枠に戻し、読む場所の
+//     3/2 命令あとから枠ごと写す（枠の番号は訳すときに決める）。ビット単位では同じ
+//   * LFO はサンプルのあいだ変わらないので、番号ごとに頭の 1 回だけ C++ の
+//     get_lfo（インポート）を呼んで局所に置く（x64 はインライン版を持つ）
+//   * p・乱数の種・sample_counter・skip は局所に持つ。p と乱数の種は出口で本体へ戻す。
+//     m_pc / m_icount は触らない（x64 と同じく meg_jit_run 側が引く）
+//   * 分岐のあるプログラムは解釈実行と同じく遅れの輪を毎命令読み書きし、skip は局所
+bool swp30_device::meg_jit::build(code &c, meg_state &ms, const meg_state::op *ops, swp30_device &swp, bool bake)
+{
+	// 定数を焼き込んだ版は桌面だけ。false を返せば meg_jit_run が
+	// 一般版のまま回すので音は変わらない
+	if (bake)
+		return false;
+	if (swp.m_reverb_ram.size() < 0x40000)
+		return false;
+
+	bool branchy = false;
+	for (u32 pc = 0; pc != 0x180; pc++)
+		if (ops[pc].jump)
+			branchy = true;
+
+	c.d3 = ms.m_delay_3;
+	c.d2 = ms.m_delay_2;
+	const auto slot3 = [&](u32 k) { return (c.d3 + k) % 3; };
+	const auto slot2 = [&](u32 k) { return (c.d2 + k) % 2; };
+
+	// 要素の位置（meg_state と swp30_device の中）
+	const auto off = [](const void *base, const void *field) { return s32(intptr_t(field) - intptr_t(base)); };
+	const s32 o_m        = off(&ms, ms.m_m.data());
+	const s32 o_r        = off(&ms, ms.m_r.data());
+	const s32 o_t        = off(&ms, ms.m_t.data());
+	const s32 o_p        = off(&ms, &ms.m_p);
+	const s32 o_const    = off(&ms, ms.m_const.data());
+	const s32 o_offset   = off(&ms, ms.m_offset.data());
+	const s32 o_mw_value = off(&ms, ms.m_mw_value.data());
+	const s32 o_mw_reg   = off(&ms, ms.m_mw_reg.data());
+	const s32 o_rw_value = off(&ms, ms.m_rw_value.data());
+	const s32 o_rw_reg   = off(&ms, ms.m_rw_reg.data());
+	const s32 o_ix_value = off(&ms, ms.m_index_value.data());
+	const s32 o_ix_act   = off(&ms, ms.m_index_active.data());
+	const s32 o_memw_val = off(&ms, ms.m_memw_value.data());
+	const s32 o_memr_val = off(&ms, ms.m_memr_value.data());
+	const s32 o_t_value  = off(&ms, ms.m_t_value.data());
+	const s32 o_memw_act = off(&ms, ms.m_memw_active.data());
+	const s32 o_memr_act = off(&ms, ms.m_memr_active.data());
+	const s32 o_ram_read  = off(&ms, &ms.m_ram_read);
+	const s32 o_ram_write = off(&ms, &ms.m_ram_write);
+	const s32 o_ram_index = off(&ms, &ms.m_ram_index);
+	const s32 o_sample    = off(&ms, &ms.m_sample_counter);
+	const s32 o_seed      = off(&swp, &swp.m_rand_seed);
+	const s32 o_flag_n    = off(&swp, &swp.m_meg_flag_n);
+	const s32 o_flag_z    = off(&swp, &swp.m_meg_flag_z);
+	const s32 o_ix2_value  = off(&swp, swp.m_meg_ix2_value.data());
+	const s32 o_ix2_act    = off(&swp, swp.m_meg_ix2_act.data());
+	const s32 o_ram_index2 = off(&swp, &swp.m_meg_ram_index2);
+
+	// エミッタは固定幅の読み書きしか出さない（組み立てもその前提）。食い違っていたら
+	// 訳さない（解釈実行のまま。音は正しいまま遅い）
+	if (sizeof(ms.m_mw_reg[0]) != 1 || sizeof(ms.m_index_active[0]) != 1 || sizeof(ms.m_memw_active[0]) != 1 ||
+	    sizeof(swp.m_meg_flag_n) != 1 || sizeof(ms.m_t_value[0]) != 2 || sizeof(ms.m_const[0]) != 2 ||
+	    sizeof(ms.m_offset[0]) != 2 || sizeof(ms.m_m[0]) != 4 || sizeof(ms.m_r[0]) != 4)
+		return false;
+
+	// DEBUG: SMU2000_MEG_JIT_UPTO で訳す段数を止められる（g_meg_check と一緒に使う）
+	const u32 upto = meg_jit_upto();
+
+	// t の値を書いておく必要がある命令: 2 命令あとが p から t に書くか、最後の 2 段
+	// （次のサンプルが前回の出口の枠を読むので、そこは必ず本体へ戻す）
+	bool need_tval[0x180] = {};
+	for (u32 k = 0; k < upto; k++) {
+		if (k + 2 >= upto)
+			need_tval[k] = true;
+		if (k + 2 < upto && ops[k + 2].t_write && ops[k + 2].t_from_p)
+			need_tval[k] = true;
+	}
+
+	// dm_src が LFO の命令が使う番号だけ、頭で C++ のインポートを 1 回呼ぶ
+	// （get_lfo はサンプルのあいだ値が変わらない。x64 はインライン版を持つ）
+	bool lfo_used[0x18] = {};
+	for (u32 k = 0; k < upto; k++)
+		if (ops[k].dm && ops[k].dm_src <= 3 && ops[k].lfo < 0x18)
+			lfo_used[ops[k].lfo] = true;
+
+	wasmasm::emitter a;
+	const u32 L_MS = 0, L_SWP = 1, L_RAM = 2;
+	// st* の積み替えと select クランプの作業場（wasmasm.h）
+	const u32 L_S32 = a.add_local(wasmasm::i32_t);
+	const u32 L_S64 = a.add_local(wasmasm::i64_t);
+	a.set_scratch(L_S32, L_S64);
+	const u32 L_P = a.add_local(wasmasm::i64_t);
+	const u32 L_SC = a.add_local(wasmasm::i32_t);
+	const u32 L_SEED = a.add_local(wasmasm::i32_t);
+	const u32 L_FN = a.add_local(wasmasm::i32_t);
+	const u32 L_FZ = a.add_local(wasmasm::i32_t);
+	const u32 L_A = a.add_local(wasmasm::i64_t);
+	const u32 L_B = a.add_local(wasmasm::i64_t);
+	const u32 L_C = a.add_local(wasmasm::i32_t);
+	const u32 L_D = a.add_local(wasmasm::i32_t);
+	const u32 L_E = a.add_local(wasmasm::i32_t);
+	u32 L_SKIP = 0;
+	if (branchy)
+		L_SKIP = a.add_local(wasmasm::i32_t);
+	u32 lfo_slot[0x18] = {};
+	for (u32 i = 0; i != 0x18; i++)
+		if (lfo_used[i])
+			lfo_slot[i] = a.add_local(wasmasm::i32_t);
+
+	// ---- 入口（p・種・sample_counter・ flags は局所に、LFO は番号ごとに 1 回）----
+	a.ld64(L_MS, o_p); a.set(L_P);
+	a.ld32(L_MS, o_sample); a.set(L_SC);
+	a.ld32(L_SWP, o_seed); a.set(L_SEED);
+	a.ld8u(L_SWP, o_flag_n); a.set(L_FN);
+	a.ld8u(L_SWP, o_flag_z); a.set(L_FZ);
+	if (branchy) { a.i32_const(0); a.set(L_SKIP); }
+	for (u32 i = 0; i != 0x18; i++)
+		if (lfo_used[i]) {
+			a.get(L_MS); a.i32_const(s32(i)); a.call_lfo();
+			a.set(lfo_slot[i]);
+		}
+
+	// ---- 部分式（run_program の部品と同じ。スタック machine なので積む順に注意）----
+
+	// 乱数を 1 つ引く（swp30_device::rand）。i32 が積もる
+	const auto rnd = [&]() {
+		a.get(L_SEED); a.i32_const(1664525); a.i32_mul();
+		a.i32_const(1013904223); a.i32_add(); a.tee(L_SEED);
+		a.i32_const(16); a.i32_rotl();
+	};
+	// meg_pack24 と同じ（0 の側へ切り捨てて 24bit 符号拡張）。入口はスタックの i64、出るのは i32
+	const auto pack24 = [&]() {
+		a.set(L_A);
+		// q = (p + 負のとき 0x7fff) >> 15（C の /32768 と同じ切り捨て）
+		a.get(L_A); a.i64_const(63); a.i64_shr_s();
+		a.i64_const(0x7fff); a.i64_and();
+		a.get(L_A); a.i64_add();
+		a.i64_const(15); a.i64_shr_s();
+		// 0x800000 -> 0x7fffff
+		a.tee(L_A);
+		a.i64_const(0x7fffff);
+		a.get(L_A); a.i64_const(0x800000); a.i64_eq(); a.i32_eqz();
+		a.select();
+		// -0x800001 -> -0x800000
+		a.tee(L_A);
+		a.i64_const(s64(-0x800000));
+		a.get(L_A); a.i64_const(s64(-0x800001)); a.i64_eq();
+		a.select();
+		a.i32_wrap_i64();
+		a.i32_const(8); a.i32_shl();
+		a.i32_const(8); a.i32_shr_s();
+	};
+	// p（+ 雑音）を詰めた値 i32（dm の 6 番と dr）
+	const auto p_packed = [&](bool noise) {
+		if (noise) {
+			rnd();
+			a.i32_const(0x07e0); a.i32_and();
+			a.i64_extend_i32_s();
+			a.get(L_P); a.i64_add();
+		} else
+			a.get(L_P);
+		pack24();
+	};
+	// meg_state::m1_expand と同じ（i64 -> i64。下 16bit が s16 の値）
+	const auto m1_expand = [&]() {
+		a.i32_wrap_i64(); a.tee(L_C);
+		a.i32_const(0); a.i32_lt_s(); a.if_void();
+		a.i32_const(0); a.set(L_C);
+		a.else_op();
+		a.get(L_C); a.i32_const(12); a.i32_shr_u(); a.set(L_E);       // s
+		a.get(L_C); a.i32_const(0xfff); a.i32_and();
+		a.i32_const(0x1000); a.i32_or(); a.set(L_D);                 // v
+		a.get(L_D);
+		a.i32_const(5); a.get(L_E); a.i32_sub(); a.i32_max_c(0);
+		a.i32_shr_u();                                                // s<5 のときだけ >>（他は 0 シフト）
+		a.i32_const(5); a.get(L_E); a.i32_sub(); a.i32_max_c(0);
+		a.i32_shl();                                                  // s>5 のときだけ <<
+		a.set(L_C);
+		a.end();
+		a.get(L_C); a.i64_extend_i32_s();
+	};
+	// meg_state::revram_encode と同じ（i32 -> i32。C=s, D=v', E=clz+10）
+	const auto revram_encode = [&]() {
+		a.tee(L_D);
+		a.i32_const(26); a.i32_shr_u(); a.i32_const(1); a.i32_and(); a.set(L_C);  // s
+		a.get(L_D); a.i32_const(0x7ffffff); a.i32_and(); a.set(L_D);              // v &= 0x7ffffff
+		a.i32_const(0); a.get(L_C); a.i32_sub();                                  // 負なら -1
+		a.i32_const(0x7ffffff); a.i32_and();                                      // 負なら 0x7ffffff
+		a.get(L_D); a.i32_xor(); a.set(L_D);                                      // 負なら反転
+		a.get(L_D); a.i32_const(0x400); a.i32_or(); a.i32_clz();
+		a.i32_const(10); a.i32_add(); a.set(L_E);                                 // E = clz+10（e = 31-E）
+		a.get(L_D);
+		a.i32_const(30); a.get(L_E); a.i32_sub(); a.i32_max_c(0);
+		a.i32_shr_u();
+		a.i32_const(0x7ff); a.i32_and();                                          // m（e=0 なら v' そのもの）
+		a.i32_const(31); a.get(L_E); a.i32_sub(); a.i32_const(12); a.i32_shl(); a.i32_or();
+		a.get(L_C); a.i32_const(11); a.i32_shl(); a.i32_or();
+	};
+	// meg_state::revram_decode と同じ（i32 -> i32。C=v, E=e, D=vb）
+	const auto revram_decode = [&]() {
+		a.tee(L_C);
+		a.i32_const(12); a.i32_shr_u(); a.set(L_E);                   // e
+		a.get(L_C); a.i32_const(0x7ff); a.i32_and();                  // m
+		a.get(L_E); a.i32_eqz(); a.i32_eqz(); a.i32_const(0x800); a.i32_mul();
+		a.i32_or();                                                   // e ? m|0x800 : m
+		a.i32_const(30); a.get(L_E); a.i32_sub(); a.i32_max_c(0);
+		a.i32_shl(); a.tee(L_D);                                      // vb（シフトは max(e-1,0)）
+		a.get(L_C); a.i32_const(11); a.i32_shr_u(); a.i32_const(1); a.i32_and();
+		a.if_void();
+		a.i32_const(-1);
+		a.i32_const(30); a.get(L_E); a.i32_sub(); a.i32_max_c(0);
+		a.i32_shl();                                                  // -1 << max(e-1,0)（e=0 なら全部）
+		a.i32_xor(); a.set(L_D);
+		a.end();
+		a.get(L_D);
+	};
+	// meg_cond と同じ条件を i32 で積む（flags は局所）
+	const auto emit_cond = [&](u8 cond) {
+		if (!(cond & 0x08))
+			a.i32_const(1);
+		else {
+			a.get(L_FN);
+			if (!(cond & 0x04))
+				a.i32_eqz();
+			if (cond & 0x02) {
+				a.get(L_FZ);
+				a.i32_or();
+			}
+		}
+	};
+	// m_t_value[d2] への書き込み（step() の 2 か所と同じ）
+	const auto emit_tv = [&](u32 s2, bool idx16) {
+		if (idx16) {
+			a.get(L_P); a.i64_const(8); a.i64_shr_s(); a.i32_wrap_i64();
+			a.i32_const(0x7fff); a.i32_and();
+		} else {
+			a.get(L_P); a.i64_const(23); a.i64_shr_s();
+			a.i64_max_c(-0x8000);
+			a.i64_min_c(0x7fff);
+			a.i32_wrap_i64();
+		}
+		a.st16(L_MS, o_t_value + 2 * s32(s2));
+	};
+
+	// ---- 遅れの輪の反映（run_program 頭の並びと同じ）----
+	const auto ring_m = [&](u32 s3) {
+		a.ld8u(L_MS, o_mw_reg + s32(s3)); a.if_void();
+		a.get(L_MS); a.ld8u(L_MS, o_mw_reg + s32(s3));
+		a.i32_const(2); a.i32_shl(); a.i32_const(o_m); a.i32_add(); a.i32_add();
+		a.ld32(L_MS, o_mw_value + 4 * s32(s3));
+		a.st32_at();
+		a.end();
+	};
+	const auto ring_r = [&](u32 s3) {
+		a.ld8u(L_MS, o_rw_reg + s32(s3)); a.if_void();
+		a.get(L_MS); a.ld8u(L_MS, o_rw_reg + s32(s3));
+		a.i32_const(2); a.i32_shl(); a.i32_const(o_r); a.i32_add(); a.i32_add();
+		a.ld32(L_MS, o_rw_value + 4 * s32(s3));
+		a.st32_at();
+		a.end();
+	};
+	const auto ring_ix = [&](u32 s3) {
+		a.ld8u(L_MS, o_ix_act + s32(s3)); a.if_void();
+		a.ld32(L_MS, o_ix_value + 4 * s32(s3));
+		a.st32(L_MS, o_ram_index);
+		a.end();
+	};
+	const auto ring_ix2 = [&](u32 s3) {
+		a.ld8u(L_SWP, o_ix2_act + s32(s3)); a.if_void();
+		a.ld32(L_SWP, o_ix2_value + 4 * s32(s3));
+		a.st32(L_SWP, o_ram_index2);
+		a.end();
+	};
+	const auto ring_memw = [&](u32 s2) {
+		a.ld8u(L_MS, o_memw_act + s32(s2)); a.if_void();
+		a.ld32(L_MS, o_memw_val + 4 * s32(s2));
+		a.st32(L_MS, o_ram_write);
+		a.i32_const(0); a.st8(L_MS, o_memw_act + s32(s2));
+		a.end();
+	};
+	const auto ring_memr = [&](u32 s2) {
+		a.ld8u(L_MS, o_memr_act + s32(s2)); a.if_void();
+		a.ld32(L_MS, o_memr_val + 4 * s32(s2));
+		a.st32(L_MS, o_ram_read);
+		a.i32_const(0); a.st8(L_MS, o_memr_act + s32(s2));
+		a.end();
+	};
+	// 分岐のとき輪を止める（run_program の分岐路と同じ 5 つ）
+	const auto zero_ring = [&](u32 s3, u32 s2) {
+		a.i32_const(0); a.st8(L_MS, o_mw_reg + s32(s3));
+		a.i32_const(0); a.st8(L_MS, o_rw_reg + s32(s3));
+		a.i32_const(0); a.st8(L_MS, o_memw_act + s32(s2));
+		a.i32_const(0); a.st8(L_MS, o_ix_act + s32(s3));
+		a.i32_const(0); a.st8(L_SWP, o_ix2_act + s32(s3));
+	};
+
+	// ---- 本体：384 段をまっすぐに出す（枠の番号は訳すときに決まっている）----
+	for (u32 k = 0; k < upto; k++) {
+		const meg_state::op &o = ops[k];
+		const u32 s3 = slot3(k), s2 = slot2(k);
+
+		if (branchy) {
+			// if (skip && k >= skip) skip = 0;
+			a.get(L_SKIP); a.if_void();
+			a.i32_const(s32(k)); a.get(L_SKIP); a.i32_ge_u(); a.if_void();
+			a.i32_const(0); a.set(L_SKIP);
+			a.end(); a.end();
+
+			if (o.jump) {
+				// skip でないときだけ条件を見て飛び先を覚える（target > k）
+				if (o.target > k) {
+					a.get(L_SKIP); a.i32_eqz(); a.if_void();
+					emit_cond(o.cond); a.if_void();
+					a.i32_const(s32(o.target)); a.set(L_SKIP);
+					a.end(); a.end();
+				}
+				if (o.t_write) {
+					if (o.t_from_p)
+						a.ld16s(L_MS, o_t_value + 2 * s32(s2));
+					else
+						a.ld16s(L_MS, o_const + 2 * s32(k));
+					a.st16(L_MS, o_t + 2 * s32(o.t));
+				}
+				zero_ring(s3, s2);
+				emit_tv(s2, false);
+				continue;
+			}
+			// 飛び越された段は輪を止めて t だけ（run_program の skip 路と同じ）
+			a.get(L_SKIP); a.if_void();
+			zero_ring(s3, s2);
+			emit_tv(s2, false);
+			a.else_op();
+		}
+
+		ring_m(s3);
+		ring_r(s3);
+		ring_ix(s3);
+		ring_ix2(s3);
+		ring_memw(s2);
+		ring_memr(s2);
+
+		// ---- ALU（asel/mmode/rop/shift/clamp は命令ごとに決まっているので分岐しない）----
+		if (o.alu) {
+			switch (o.m1_from_t) {
+			case 1:
+				a.ld16s(L_MS, o_t + 2 * s32(o.t));
+				break;
+			case 2:
+				a.get(L_FN); a.if_i32();
+				a.ld16s(L_MS, o_t + 2 * s32(o.t));
+				a.else_op();
+				a.ld16s(L_MS, o_const + 2 * s32(k));
+				a.end();
+				break;
+			default:
+				a.ld16s(L_MS, o_const + 2 * s32(k));
+				break;
+			}
+			a.i64_extend_i32_s();
+			if (o.m1_expand)
+				m1_expand();
+			a.set(L_A);                                         // m1
+			if (o.m2_from_m)
+				a.ld32(L_MS, o_m + 4 * s32(o.sm));
+			else
+				a.ld32(L_MS, o_r + 4 * s32(o.sr));
+			a.i64_extend_i32_s(); a.set(L_B);                   // m2
+			switch (o.mmode) {
+			case 0:  a.i64_const(0); break;
+			case 1:  a.get(L_A); a.i64_const(8 + 15); a.i64_shl(); break;
+			case 2:  a.get(L_A); a.get(L_B); a.i64_mul(); break;
+			default: a.get(L_B); a.i64_const(15); a.i64_shl(); break;
+			}
+			a.set(L_B);                                         // m
+			switch (o.asel) {
+			case 1:  a.ld32(L_MS, o_r + 4 * s32(o.sr)); a.i64_extend_i32_s();
+			         a.i64_const(15); a.i64_shl(); break;
+			case 2:  a.ld32(L_MS, o_m + 4 * s32(o.sm)); a.i64_extend_i32_s();
+			         a.i64_const(15); a.i64_shl(); break;
+			case 3:  a.get(L_P); a.i64_const(15); a.i64_shr_s(); break;
+			case 4:  a.i64_const(0); break;
+			default: a.get(L_P); break;
+			}
+			if (o.rop == 2) {                                   // |a|
+				a.tee(L_A); a.i64_const(63); a.i64_shr_s(); a.i64_add(); a.set(L_A);
+				a.get(L_A); a.i64_const(63); a.i64_shr_s(); a.i64_xor();
+			}
+			switch (o.rop) {
+			case 1:  a.i64_sub(); break;
+			case 3:  a.i64_and(); break;
+			default: a.i64_add(); break;
+			}
+			if (o.shift) {
+				a.i64_const(s32(o.shift)); a.i64_shl();
+			}
+			switch (o.clamp) {
+			case 1:  a.i64_max_c(s64(-0x4000000000LL));
+			         a.i64_min_c(s64(0x3fffffffffLL)); break;
+			case 2:  a.i64_max_c(0);
+			         a.i64_min_c(s64(0x3fffffffffLL)); break;
+			case 3:  a.tee(L_A); a.i64_const(63); a.i64_shr_s(); a.i64_add(); a.set(L_A);
+			         a.get(L_A); a.i64_const(63); a.i64_shr_s(); a.i64_xor();
+			         a.i64_min_c(s64(0x3fffffffffLL)); break;
+			default: a.i64_const(22); a.i64_shl(); a.i64_const(22); a.i64_shr_s(); break;
+			}
+			a.set(L_P);
+			if (o.latch) {
+				a.get(L_P); a.i64_const(0); a.i64_lt_s(); a.set(L_FN);
+				a.get(L_P); a.i64_eqz(); a.set(L_FZ);
+			}
+		}
+
+		// ---- dm（値は輪に入れて 3 段あとで m へ）----
+		a.i32_const(s32(o.dm)); a.st8(L_MS, o_mw_reg + s32(s3));
+		if (o.dm) {
+			switch (o.dm_src) {
+			case 4:  a.ld32(L_MS, o_ram_read); break;
+			case 5:
+				rnd();
+				a.i32_const(0xffffff); a.i32_and(); a.tee(L_C);
+				a.i32_const(0x800000); a.i32_and(); a.if_void();
+				a.get(L_C); a.i32_const(-16777216); a.i32_or(); a.set(L_C);
+				a.end();
+				a.get(L_C);
+				break;
+			case 6:  p_packed(!o.no_noise); break;
+			case 7:  a.ld32(L_MS, o_m + 4 * s32(o.sm)); break;
+			default: a.get(lfo_slot[o.lfo]); break;
+			}
+			a.st32(L_MS, o_mw_value + 4 * s32(s3));
+		}
+
+		// ---- dr（r への書き込み。p からなら dm と同じ詰め方）----
+		a.i32_const(s32(o.dr)); a.st8(L_MS, o_rw_reg + s32(s3));
+		if (o.dr) {
+			if (o.dr_from_r)
+				a.ld32(L_MS, o_r + 4 * s32(o.sr));
+			else
+				p_packed(!o.no_noise);
+			a.st32(L_MS, o_rw_value + 4 * s32(s3));
+		}
+
+		a.i32_const(s32(o.memw)); a.st8(L_MS, o_memw_act + s32(s2));
+		if (o.memw) {
+			a.get(L_P); a.i64_const(15); a.i64_shr_s(); a.i32_wrap_i64();
+			a.st32(L_MS, o_memw_val + 4 * s32(s2));
+		}
+		a.i32_const(s32(o.index)); a.st8(L_MS, o_ix_act + s32(s3));
+		if (o.index) {
+			a.get(L_P); a.i64_const(15 + 8); a.i64_shr_s(); a.i32_wrap_i64();
+			a.st32(L_MS, o_ix_value + 4 * s32(s3));
+		}
+		a.i32_const(s32(o.index2)); a.st8(L_SWP, o_ix2_act + s32(s3));
+		if (o.index2) {
+			a.get(L_P); a.i64_const(15 + 8); a.i64_shr_s(); a.i32_wrap_i64();
+			a.st32(L_SWP, o_ix2_value + 4 * s32(s3));
+		}
+
+		if (o.t_write) {
+			if (o.t_from_p)
+				a.ld16s(L_MS, o_t_value + 2 * s32(s2));
+			else
+				a.ld16s(L_MS, o_const + 2 * s32(k));
+			a.st16(L_MS, o_t + 2 * s32(o.t));
+		}
+		if (need_tval[k] || branchy)
+			emit_tv(s2, o.index || o.index2);
+
+		// ---- RAM の出し入れ（区画と番地は build_ops が解いたもの）----
+		if (o.memop >= 2 && o.mem_table) {
+			a.ld16u(L_MS, o_offset + 2 * s32(o.offset_index));
+			if (o.mem_use_index) { a.ld32(L_MS, o_ram_index); a.i32_add(); }
+			if (o.mem_use_index2) { a.ld32(L_SWP, o_ram_index2); a.i32_add(); }
+			if (o.memop == 3) { a.i32_const(1); a.i32_add(); }
+			a.i32_const(0x3ffff); a.i32_and(); a.set(L_C);
+			a.get(L_RAM); a.get(L_C); a.i32_const(1); a.i32_shl(); a.i32_add();
+			a.ld16u_at();
+			revram_decode();
+			a.st32(L_MS, o_memr_val + 4 * s32(s2));
+			a.i32_const(1); a.st8(L_MS, o_memr_act + s32(s2));
+		} else if (o.memop) {
+			// S-MU2000: 区画が無効の間は、書き込みは落ち、読み出しは 0（step() と同じ）。
+			// 区画は訳すときの 0x80e を焼き込んであるので、変わったら meg_jit_run が無効化する
+			const bool enabled = (swp.m_revram_enable >> o.region) & 1;
+			if (!enabled) {
+				if (o.memop != 1) {
+					a.i32_const(0); a.st32(L_MS, o_memr_val + 4 * s32(s2));
+					a.i32_const(1); a.st8(L_MS, o_memr_act + s32(s2));
+				}
+			} else {
+				a.ld16u(L_MS, o_offset + 2 * s32(o.offset_index));
+				if (o.mem_use_index) { a.ld32(L_MS, o_ram_index); a.i32_add(); }
+				if (o.mem_use_index2) { a.ld32(L_SWP, o_ram_index2); a.i32_add(); }
+				a.ld32(L_MS, o_sample); a.i32_sub();
+				if (o.memop == 3) { a.i32_const(1); a.i32_add(); }
+				a.i32_const(s32(o.addr_mask)); a.i32_and();
+				a.i32_const(s32(o.addr_base)); a.i32_add();
+				a.i32_const(0x3ffff); a.i32_and(); a.set(L_C);
+				if (o.memop == 1) {
+					a.get(L_RAM); a.get(L_C); a.i32_const(1); a.i32_shl(); a.i32_add();
+					a.ld32(L_MS, o_ram_write);
+					revram_encode();
+					a.st16_at();
+				} else {
+					a.get(L_RAM); a.get(L_C); a.i32_const(1); a.i32_shl(); a.i32_add();
+					a.ld16u_at();
+					revram_decode();
+					a.st32(L_MS, o_memr_val + 4 * s32(s2));
+					a.i32_const(1); a.st8(L_MS, o_memr_act + s32(s2));
+				}
+			}
+		}
+
+		if (branchy)
+			a.end();                    // skip でない腕の end
+	}
+
+	// ---- 出口（p と乱数の種と flags を本体へ戻す。m・r・t・輪は段ごとに書いてある。
+	// m_pc / m_icount は触らない — x64 と同じく meg_jit_run 側が引く）----
+	a.get(L_P); a.st64(L_MS, o_p);
+	a.get(L_SEED); a.st32(L_SWP, o_seed);
+	a.get(L_FN); a.st8(L_SWP, o_flag_n);
+	a.get(L_FZ); a.st8(L_SWP, o_flag_z);
+
+	std::vector<u8> bin;
+	a.finish(bin);
+	const s32 h = smu_megjit_load(bin.data(), s32(bin.size()));
+	if (h < 0)
+		return false;
+	c.wasm = h;
+	return true;
+}
+
+
+#elif !SMU2000_MEG_JIT
 
 bool swp30_device::meg_jit::build(code &, meg_state &, const meg_state::op *, swp30_device &, bool)
 {

@@ -68,10 +68,22 @@ foreach(tool verify boot render panel statetest blocktime)
   endif()
   add_executable(${tool} src/${tool}.cpp)
   target_link_libraries(${tool} PRIVATE smu2000_core)
+  if(EMSCRIPTEN)
+    # node runs these directly: NODERAWFS maps the real filesystem so the
+    # ROM dir and MIDI paths in argv resolve (see doc/wasm.md).
+    # _smu_meg_lfo is the MEG wasm JIT's LFO import; the wasm glue looks
+    # it up on the module exports, so it must survive -O3 stripping.
+    target_link_options(${tool} PRIVATE -sNODERAWFS=1
+      -sEXPORTED_FUNCTIONS=_main,_malloc,_free,_smu_meg_lfo)
+  endif()
 endforeach()
 foreach(tool xgtest samptest)
   add_executable(${tool} src/${tool}.cpp src/xg/model.cpp)
   target_link_libraries(${tool} PRIVATE smu2000_core)
+  if(EMSCRIPTEN)
+    target_link_options(${tool} PRIVATE -sNODERAWFS=1
+      -sEXPORTED_FUNCTIONS=_main,_malloc,_free,_smu_meg_lfo)
+  endif()
 endforeach()
 
 # Regression suite entry point: ctest runs what `make test` runs without ROMs.
@@ -198,7 +210,8 @@ if(EMSCRIPTEN)
   add_link_options(
     -sEXPORTED_RUNTIME_METHODS=ccall,cwrap,FS,UTF8ToString,stringToUTF8,lengthBytesUTF8,HEAPU8,callMain
     # the page marshals MIDI/mic bytes with Module._malloc/_free directly
-    -sEXPORTED_FUNCTIONS=_main,_malloc,_free
+    # _smu_meg_lfo: the MEG wasm JIT's LFO import (see swp30_jit.cpp)
+    -sEXPORTED_FUNCTIONS=_main,_malloc,_free,_smu_meg_lfo
     -sSTACK_SIZE=8MB
   )
 

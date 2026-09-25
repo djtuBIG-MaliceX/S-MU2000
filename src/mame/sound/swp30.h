@@ -546,6 +546,9 @@ private:
 	static bool meg_jit_enabled();
 public:
 	static u64 meg_jit_selftest();
+	// wasm JIT の継ぎ目（swp30_jit.cpp）: meg_state::get_lfo を呼ぶ口。
+	// meg_state が private なので、型を隠して void * で受ける
+	static u32 meg_lfo_glue(void *ms, u32 lfo);
 private:
 	void meg_jit_rebuild();
 	void meg_jit_invalidate();
