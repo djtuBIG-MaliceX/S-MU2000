@@ -954,6 +954,7 @@ void mu2000::start_devices()
 
 void mu2000::reset()
 {
+	std::memset(m_cc_last, 0xff, sizeof(m_cc_last));
 	// 実機の M37640 は、PC に繋がっていると「ホストが居る」を知らせてくる
 	// （状態の bit6 を立てて F4 03 01 01 01。0x43810 が受け、0x43DAD1 を 1 にする）。
 	// これが来ないと、HOST SELECT が USB のとき firmware は起動の途中（0x1167CE）で
@@ -2450,6 +2451,7 @@ void mu2000::native_pump()
 				m_prog_seen[p][0] = m_prog_seen[p][1] = m_prog_seen[p][2] = 0xff;
 			}
 			std::memset(m_nown, 0, sizeof(m_nown));
+			std::memset(m_cc_last, 0xff, sizeof(m_cc_last));   // CC の控えも忘れる
 			m_ndrv.reset_parts();
 			// **音色の記録も引き直す**。m_prog_sel を戻すだけでは、
 			// 口が持っている記録（`set_record`）が古いままになる
@@ -2649,6 +2651,16 @@ bool mu2000::native_midi(u8 byte, int port)
 	if (kind == 0xb0) {
 		m_ne_stats.other++;
 		const int cc = n.d0 & 0x7f;
+		// **値の変わらない CC は firmware を起こし直さない**。
+		// 受けるたびに意味が変わるもの（データ入力・RPN/NRPN の指定・増減・
+		// チャンネルモード）は対象にしない。バイトは下でいつもどおり流すので、
+		// 線の時間も firmware の状態も変わらない
+		const bool cc_stateful = cc == 6 || cc == 38 || (cc >= 96 && cc <= 101) || cc >= 120;
+		bool cc_same = false;
+		if (!cc_stateful) {
+			cc_same = m_cc_last[part][cc] == (byte & 0x7f);
+			m_cc_last[part][cc] = u8(byte & 0x7f);
+		}
 		if (cc == 0x00) m_nq.push_back({ fire, 4, u8(part), 0, u8(byte & 0x7f) });
 		if (cc == 0x20) m_nq.push_back({ fire, 4, u8(part), 1, u8(byte & 0x7f) });
 		const bool mine = m_ndrv.handles_cc(n.d0 & 0x7f);
@@ -2665,7 +2677,8 @@ bool mu2000::native_midi(u8 byte, int port)
 		// まだ写し取っていないパートは、1 音目を firmware が鳴らすので、
 		// CC も firmware に効かせてもらう
 		const bool quick = mine && !m_fw_notes[part] && m_ndrv.part_learned(part);
-		m_fw_hold = std::max(m_fw_hold, u32(quick ? 44100 / 500 : 44100 / 50));
+		if (!cc_same)
+			m_fw_hold = std::max(m_fw_hold, u32(quick ? 44100 / 500 : 44100 / 50));
 		replay_note(n.status, n.d0, byte, port);
 		return true;
 	}
@@ -3307,6 +3320,8 @@ std::vector<u8> mu2000::save_state() const
 
 bool mu2000::load_state(const u8 *p, size_t n, std::string &err)
 {
+	// 読み戻したら CC の控えは忘れる（線で見た値と、機械の中身が合わなくなるので）
+	std::memset(m_cc_last, 0xff, sizeof(m_cc_last));
 	state_io s(p, n);
 	u32 magic = 0, ver = 0;
 	s.v(magic);

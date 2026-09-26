@@ -417,6 +417,12 @@ private:
 	size_t m_ne_reset_free = 0;          // 待たせる前から並んでいた分（これだけは流す）
 	u64    m_ne_reset_deadline = 0;      // これを過ぎたら必ず解く
 	u64    m_fw_swp_at = 0;              // firmware が最後に SWP30 を触った時刻
+	// **同じ値の CC が続いたときに firmware を起こし直さないため**の控え。
+	// CC は 1 つ来るたびに firmware を 2〜20ms 全速で回すので、同じ値が並ぶ曲
+	// （実測: 実曲の CC の 2 割が「直前と同じ番号・同じ値」）では回りっぱなしになる。
+	// **バイトは今までどおり線に流す**ので、実機の時間の進み方は変わらない。
+	// 0xff は「まだ見ていない」。リセットで忘れる
+	u8     m_cc_last[64][128];
 	static constexpr u64 RESET_QUIET = 44100 / 50;    // 20ms 触らなければ「終わった」
 	static constexpr u64 RESET_HOLD_MAX = 44100 * 2 / 5;   // 400ms で必ず解く
 	void hold_after_reset(u64 fire);

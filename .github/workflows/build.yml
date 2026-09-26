@@ -82,6 +82,33 @@ jobs:
       - run: python3 tools/check_texts.py
       - run: make test
 
+  readme:
+    # **README は英語が表**（README.md）で、日本語が README.ja.md。
+    # 片方だけ直すと、もう片方が静かに古くなる。**止めはしないが知らせる**
+    # （英語のつづり直しのような、片方で足りる変更も普通にあるため）。
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: README の両言語が揃っているか
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base=$(git merge-base "origin/${{ github.base_ref }}" HEAD)
+          else
+            base=$(git rev-parse HEAD^ 2>/dev/null || true)
+          fi
+          [ -n "$base" ] || exit 0
+          changed=$(git diff --name-only "$base" HEAD)
+          en=$(printf '%s\n' "$changed" | grep -cx 'README.md' || true)
+          ja=$(printf '%s\n' "$changed" | grep -cx 'README.ja.md' || true)
+          if [ "$en" != "$ja" ]; then
+            echo "::warning::README.md（英語）と README.ja.md（日本語）の片方だけが変わっています。もう片方も要りませんか"
+            printf '%s\n' "$changed" | grep '^README' || true
+          else
+            echo "README はそろっています"
+          fi
+
   windows-32bit:
     # 32 bit (MSYS2 mingw32). It has its own arm of the MEG JIT and its own
     # linker flags, and it is the path that broke unnoticed in #48 because
