@@ -646,6 +646,7 @@ void program_menu(int part, xg::model &m, const xg_snapshot *ram, bridge &br)
 	int msb = 0, lsb = 0, prog = 0;
 	const bool known = m.get(P("part.bank_msb"), part, msb) && m.get(P("part.bank_lsb"), part, lsb) &&
 	                   m.get(P("part.program"), part, prog);
+	msb = shown_bank_msb(part, m, msb);          // GS のドラム（issue #52）
 	const int mode = ram ? ram->voice_mode : 1;
 	const int set  = ram ? ram->voice_set : 1;
 	const xg::voice_rom *vr = voices();
@@ -735,6 +736,20 @@ void program_menu(int part, xg::model &m, const xg_snapshot *ram, bridge &br)
 // 分類は自分で選べるが、外から音色が変わったときは今の音色の分類へ移す
 // いまのピッチベンド。入ってきた MIDI から取る（xg_ui.h の注記）。
 // 受信チャンネルの分からないパートでは何も出さない
+// 見かけのバンク MSB（xg_ui.h の注記）。GS のドラムは MSB 0 のまま来るので、
+// パートの MODE がドラムなら 127 として扱う。実測（GS リセット → B9 00 00 → C9 18）で
+// MSB は 0、MODE は 2 のままになることを確かめてある
+int shown_bank_msb(int part, xg::model &m, int msb)
+{
+	if (msb == 126 || msb == 127)
+		return msb;
+	int mode = 0;
+	if (m.get(P("part.mode"), part, mode) && mode != 0)
+		return 127;
+	return msb;
+}
+
+
 void bend_now_line(int part, xg::model &m, const xg_snapshot *ram)
 {
 	if (!ram)
@@ -758,6 +773,7 @@ void program_pane(int part, xg::model &m, const xg_snapshot *ram, bridge &br)
 	int msb = 0, lsb = 0, prog = 0;
 	const bool known = m.get(P("part.bank_msb"), part, msb) && m.get(P("part.bank_lsb"), part, lsb) &&
 	                   m.get(P("part.program"), part, prog);
+	msb = shown_bank_msb(part, m, msb);          // GS のドラム（issue #52）
 	const int mode = ram ? ram->voice_mode : 1;
 	const int set  = ram ? ram->voice_set : 1;
 	const xg::voice_rom *vr = voices();

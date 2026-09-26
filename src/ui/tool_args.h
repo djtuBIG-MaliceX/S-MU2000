@@ -148,8 +148,8 @@ inline int parse_tool_args(int argc, char **argv, tool_args &a,
 		else if (a.dir.empty()) a.dir = argv[i];
 	}
 	if (win_opts.lcd_only && !a.size_given) {
-		a.win_w = 898;
-		a.win_h = 290;
+		a.win_w = 878;
+		a.win_h = 270;
 	}
 
 	// Without --layout, look through the usual places in order

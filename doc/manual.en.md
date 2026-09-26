@@ -31,7 +31,7 @@ Contents
 
 **Never upload or share anything taken from the hardware (ROM images, firmware, `.ydl` files containing it).**
 Hashes, logs, MIDI files and recordings are enough for bug reports. See the
-[notice in the README](../README.md#実機由来のデータは配らない載せない).
+[notice in the README](../README.md#hardware-derived-data-do-not-distribute-or-post).
 
 ## 2. Preparing the ROMs
 
@@ -111,7 +111,7 @@ It is remembered afterwards.
 | `--latency 10` | Buffer length in milliseconds. Increase it if audio drops out |
 
 Setting the audio interface to 44100Hz with a 256-sample buffer avoids resampling and extra delay.
-Details: [README, 待ち時間 (latency)](../README.md#待ち時間).
+Details: [README, 待ち時間 (latency)](../README.md#latency).
 
 ### Playing MIDI files
 

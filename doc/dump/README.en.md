@@ -12,7 +12,7 @@ procedure and the tools. The ROMs themselves are not distributed.
 > Do not redistribute them on GitHub, and do not attach them to Issues, Pull
 > Requests, Discussions or Releases. Publishing the tools (source code) and
 > sharing what they produce or extract are two different things. See the
-> [notice in the README](../../README.md#実機由来のデータは配らない載せない).
+> [notice in the README](../../README.md#hardware-derived-data-do-not-distribute-or-post).
 
 Two things are needed.
 

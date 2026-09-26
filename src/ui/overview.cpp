@@ -2613,6 +2613,7 @@ void overview::row(int part, xg::model &m, const xg_snapshot &ram, bridge &br, f
 		int msb = 0, lsb = 0, prog = 0, rcv = 0;
 		const bool voice = m.get(P("part.bank_msb"), part, msb) && m.get(P("part.bank_lsb"), part, lsb) &&
 		                   m.get(P("part.program"), part, prog);
+		msb = shown_bank_msb(part, m, msb);      // GS のドラム（issue #52）
 		bool has_rcv = m.get(P("part.rcv_channel"), part, rcv);
 		const bool silenced = m_saved_rcv[part] >= 0;
 		if (silenced) {

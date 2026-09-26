@@ -733,10 +733,10 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 	// p(s64)・seed・sample・一時的な acc 退避は esp 基準の置き場。限界値は全部即値（load_p_limits 不要）
 	const u8 MS = EBX, SWP = EDI, RAM = EBP;
 	const s32 F_PLO = 0, F_PHI = 4, F_SEED = 8, F_SC = 12, F_ALO = 16, F_AHI = 20;
-	const s32 LFO_SLOT_BASE = 24;                    // x86-32 では巻き上げをしない（使わない）
+	[[maybe_unused]] const s32 LFO_SLOT_BASE = 24;                    // x86-32 では巻き上げをしない（使わない）
 	const auto M = [&](s32 disp) { return mem{MS, NOREG, 1, disp}; };
 	const auto FM = [&](s32 disp) { return mem{RSP, NOREG, 1, disp}; };
-	const auto load_p_limits = [&]() {};
+	[[maybe_unused]] const auto load_p_limits = [&]() {};
 
 	// 入口（cdecl）。push4(16) + subrsp(24) = 40 → ms/swp/ram は esp+44/48/52（retaddr を含む引数は押し出し分ずれる）
 	a.push(RBX); a.push(RSI); a.push(RDI); a.push(RBP);
@@ -819,6 +819,47 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 	a.imm64(K_MAX, 0x7fffff);                            // pack24 の限界（即値を毎回積まないため）
 	a.imm64(K_MIN, u64(s64(-0x800000)));
 	load_p_limits();
+
+	if (branchy)
+		a.store32i(mem{SWP, NOREG, 1, o_skip}, 0);
+
+	// p を 24bit に詰める（meg_pack24）。入力 rax、出力 eax
+	const auto pack24 = [&]() {
+		// meg_pack24 と同じく 0 の側へ切り捨てる（負なら 0x7fff を足してから右へ）
+		a.mov64(RCX, RAX);
+		a.sar64(RCX, 63);
+		a.and32i(RCX, 0x7fff);
+		a.add64(RAX, RCX);
+		a.sar64(RAX, 15);
+		// 1 つだけはみ出したときは限界に止め、ほかは 24bit で折り返す（meg_pack24 と同じ）
+		a.cmp64ri(RAX, 0x800000);
+		a.cmove64(RAX, K_MAX);
+		a.cmp64ri(RAX, u32(s32(-0x800001)));
+		a.cmove64(RAX, K_MIN);
+		a.shl32(RAX, 8);
+		a.sar32(RAX, 8);
+	};
+	// 乱数を 1 つ引く（swp30_device::rand）。出力 eax
+	const auto rnd = [&]() {
+		a.imul32i(RAX, SEED, 1664525);
+		a.add32i(RAX, 1013904223);
+		a.mov32(SEED, RAX);
+		a.rol32(RAX, 16);
+	};
+	// p に雑音を足して詰める（dm の 6 番、dr の p）。出力 eax
+	const auto p_packed = [&](bool noise) {
+		if (noise) {
+			rnd();
+			a.and32i(RAX, 0x07e0);                    // 雑音（正の小さな値）
+			a.add64(RAX, P);                          // そのまま p を足す（写しを 2 つ省く）
+		} else
+			a.mov64(RAX, P);
+		pack24();
+	};
+	// p を acc(rax) へ／acc を n 右（算術）
+	const auto AccFromP = [&]() { a.mov64(RAX, P); };
+	const auto ShrAcc = [&](u8 n) { a.sar64(RAX, n); };
+#endif
 
 	// **LFO の値はプログラムを回している間ずっと変わらない**。数えるのを進める
 	// lfo_step() はプログラムを回し終えた後に呼ばれ、設定（m_lfo）を書くのは CPU、
@@ -920,47 +961,6 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 			}
 #endif
 	}
-
-	if (branchy)
-		a.store32i(mem{SWP, NOREG, 1, o_skip}, 0);
-
-	// p を 24bit に詰める（meg_pack24）。入力 rax、出力 eax
-	const auto pack24 = [&]() {
-		// meg_pack24 と同じく 0 の側へ切り捨てる（負なら 0x7fff を足してから右へ）
-		a.mov64(RCX, RAX);
-		a.sar64(RCX, 63);
-		a.and32i(RCX, 0x7fff);
-		a.add64(RAX, RCX);
-		a.sar64(RAX, 15);
-		// 1 つだけはみ出したときは限界に止め、ほかは 24bit で折り返す（meg_pack24 と同じ）
-		a.cmp64ri(RAX, 0x800000);
-		a.cmove64(RAX, K_MAX);
-		a.cmp64ri(RAX, u32(s32(-0x800001)));
-		a.cmove64(RAX, K_MIN);
-		a.shl32(RAX, 8);
-		a.sar32(RAX, 8);
-	};
-	// 乱数を 1 つ引く（swp30_device::rand）。出力 eax
-	const auto rnd = [&]() {
-		a.imul32i(RAX, SEED, 1664525);
-		a.add32i(RAX, 1013904223);
-		a.mov32(SEED, RAX);
-		a.rol32(RAX, 16);
-	};
-	// p に雑音を足して詰める（dm の 6 番、dr の p）。出力 eax
-	const auto p_packed = [&](bool noise) {
-		if (noise) {
-			rnd();
-			a.and32i(RAX, 0x07e0);                    // 雑音（正の小さな値）
-			a.add64(RAX, P);                          // そのまま p を足す（写しを 2 つ省く）
-		} else
-			a.mov64(RAX, P);
-		pack24();
-	};
-	// p を acc(rax) へ／acc を n 右（算術）
-	const auto AccFromP = [&]() { a.mov64(RAX, P); };
-	const auto ShrAcc = [&](u8 n) { a.sar64(RAX, n); };
-#endif
 
 	// 命令ごとに出したバイト数を、どの仕事のぶんかで数える（統計のときだけ）
 	size_t sz_ring = 0, sz_alu = 0, sz_dm = 0, sz_dr = 0, sz_ix = 0, sz_t = 0, sz_mark = a.code.size();
@@ -1232,7 +1232,9 @@ bool swp30_device::meg_jit::build(code &cd, meg_state &ms, const meg_state::op *
 			}
 			// 足す相手を置くレジスタ。x86-64 で asel==0（p そのもの）のときは
 			// **p の居るレジスタを直に使い**、rcx への写しを 1 つ省く
+#if SMU_X64ASM_MODE != 32
 			u8 B = RCX;
+#endif
 			switch (o.asel) {
 #if SMU_X64ASM_MODE == 32
 			// acc=(eax,edx)。相手 b を (ecx,esi) に

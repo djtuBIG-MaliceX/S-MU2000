@@ -233,7 +233,7 @@ void pc_editor::part_list(xg::model &m, bridge &br)
 		ImGui::TableNextColumn();
 		int msb = 0, lsb = 0, prog = 0;
 		if (m.get(P("part.bank_msb"), i, msb) && m.get(P("part.bank_lsb"), i, lsb) && m.get(P("part.program"), i, prog))
-			ImGui::TextUnformatted(voice_text(msb, lsb, prog).c_str());
+			ImGui::TextUnformatted(voice_text(shown_bank_msb(i, m, msb), lsb, prog).c_str());
 		else
 			ImGui::TextUnformatted("--");
 		ImGui::TableNextColumn();

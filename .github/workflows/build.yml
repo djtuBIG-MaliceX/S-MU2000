@@ -1,0 +1,128 @@
+# Build every target on every platform, on each commit.
+#
+# ROMs are local-only and never committed, so the audio tests skip
+# themselves here (run_tests.py says so out loud); what CI does check on
+# every commit is: full compilation with -Wformat-security clean, the
+# localization tables (tools/check_texts.py, no ROM needed), and whatever
+# ROM-free test steps exist. Anything needing ROMs stays local.
+
+name: build
+
+on: [push, pull_request]
+
+jobs:
+  macos:
+    # macOS needs nothing beyond Xcode: SDL is Linux-only, CoreAudio and
+    # friends ship with the OS. auv3/clap are not in `all`, so they build
+    # explicitly (AUV3_ROMS=none: no ROMs in the bundle; running anything
+    # still needs them, like everywhere else).
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make -j$(sysctl -n hw.ncpu) all
+      - run: make auv3 AUV3_ROMS=none clap
+      - run: python3 tools/check_texts.py
+      - run: make test
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: >
+          sudo apt-get update -qq &&
+          sudo apt-get install -y -qq build-essential pkg-config cmake ninja-build git
+          libasound2-dev libfontconfig-dev libcairo2-dev
+      # No libsdl3-dev on Ubuntu 24.04: build the documented release
+      # (doc/porting-linux-gui.md) from source, video/audio backends
+      # off except what headless --selftest needs (dummy + software).
+      - name: Cache SDL3
+        uses: actions/cache@v4
+        with:
+          path: ~/sdl3
+          key: sdl3-3.4.16-ubuntu24
+      - name: Build SDL3
+        run: |
+          test -f ~/sdl3/lib/libSDL3.so -o -f ~/sdl3/lib/x86_64-linux-gnu/libSDL3.so && exit 0
+          git clone --depth 1 --branch release-3.4.16 https://github.com/libsdl-org/SDL /tmp/SDL
+          cmake -S /tmp/SDL -B /tmp/SDL/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=$HOME/sdl3 \
+            -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TESTS=OFF \
+            -DSDL_UNIX_CONSOLE_BUILD=ON \
+            -DSDL_X11=OFF -DSDL_WAYLAND=OFF -DSDL_KMSDRM=OFF -DSDL_OPENGL=OFF -DSDL_OPENGLES=OFF \
+            -DSDL_PULSEAUDIO=OFF -DSDL_PIPEWIRE=OFF -DSDL_JACK=OFF -DSDL_SNDIO=OFF \
+            -DSDL_JOYSTICK=OFF -DSDL_HAPTIC=OFF -DSDL_HIDAPI=OFF -DSDL_SENSOR=OFF \
+            -DSDL_CAMERA=OFF
+          cmake --build /tmp/SDL/build
+          cmake --install /tmp/SDL/build
+      - run: |
+          export PKG_CONFIG_PATH="$HOME/sdl3/lib/pkgconfig:$HOME/sdl3/lib/x86_64-linux-gnu/pkgconfig"
+          export LD_LIBRARY_PATH="$HOME/sdl3/lib:$HOME/sdl3/lib/x86_64-linux-gnu"
+          make -j$(nproc) all
+      - run: python3 tools/check_texts.py
+      - run: |
+          export PKG_CONFIG_PATH="$HOME/sdl3/lib/pkgconfig:$HOME/sdl3/lib/x86_64-linux-gnu/pkgconfig"
+          export LD_LIBRARY_PATH="$HOME/sdl3/lib:$HOME/sdl3/lib/x86_64-linux-gnu"
+          SDL_VIDEODRIVER=dummy make test
+
+  windows:
+    # The owner's own setup (MSYS2 mingw64): native build, texts, and the
+    # ROM-free test steps, exactly as verified locally before merging.
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: mingw64
+          update: true
+          install: mingw-w64-x86_64-toolchain mingw-w64-x86_64-make mingw-w64-x86_64-python make
+      - run: make -j$(nproc) all
+      - run: python3 tools/check_texts.py
+      - run: make test
+
+  readme:
+    # **README は英語が表**（README.md）で、日本語が README.ja.md。
+    # 片方だけ直すと、もう片方が静かに古くなる。**止めはしないが知らせる**
+    # （英語のつづり直しのような、片方で足りる変更も普通にあるため）。
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: README の両言語が揃っているか
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base=$(git merge-base "origin/${{ github.base_ref }}" HEAD)
+          else
+            base=$(git rev-parse HEAD^ 2>/dev/null || true)
+          fi
+          [ -n "$base" ] || exit 0
+          changed=$(git diff --name-only "$base" HEAD)
+          en=$(printf '%s\n' "$changed" | grep -cx 'README.md' || true)
+          ja=$(printf '%s\n' "$changed" | grep -cx 'README.ja.md' || true)
+          if [ "$en" != "$ja" ]; then
+            echo "::warning::README.md（英語）と README.ja.md（日本語）の片方だけが変わっています。もう片方も要りませんか"
+            printf '%s\n' "$changed" | grep '^README' || true
+          else
+            echo "README はそろっています"
+          fi
+
+  windows-32bit:
+    # 32 bit (MSYS2 mingw32). It has its own arm of the MEG JIT and its own
+    # linker flags, and it is the path that broke unnoticed in #48 because
+    # only x86-64 gets compiled on the maintainer's machine. Build only:
+    # the audio tests need ROMs, which never enter the repo.
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: mingw32
+          update: true
+          install: mingw-w64-i686-toolchain mingw-w64-i686-make mingw-w64-i686-python make
+      - run: make -j$(nproc) all

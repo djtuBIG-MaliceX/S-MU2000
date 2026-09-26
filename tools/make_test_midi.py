@@ -1650,6 +1650,32 @@ def case_xgsys():
     return [track(seq(ev))], t + 2.0
 
 
+def case_headrace():
+    """**曲頭にリセットと打鍵が同時に並ぶ**（issue #51）。
+
+    GM・GS・XG のリセットと、音色・つまみ・打鍵が全部 1 拍目の頭に詰まっている
+    曲は珍しくない。実機（firmware）は MIDI を順番に処理するので、打鍵はリセットが
+    終わってから鳴る。式だけの口は打鍵を自分でさばくため、待たせないと**先に鳴って
+    しまい、あとから終わる firmware のリセットに消される**（曲頭が数十 ms 鳴って、
+    以後ずっと無音になっていた）"""
+    ev = [(0.0, b'\xff\x51\x03' + struct.pack('>I', BPM120)[1:])]
+    # 3 つのリセットを隙間なく（報告と同じ形）
+    ev.append((0.0, sysex([0x7e, 0x7f, 0x09, 0x01, 0xf7])))                       # GM On
+    ev.append((0.0, sysex([0x41, 0x10, 0x42, 0x12, 0x40, 0x00, 0x7f, 0x00, 0x41, 0xf7])))  # GS
+    ev.append((0.0, XG_RESET))                                                     # XG On
+    # 同じ時刻に音色・音量・送り、そして打鍵。**1 声だけ**にしてある（音色ごとの
+    # 音量差が積み上がると、見たいもの＝曲頭が消えるかどうかが埋もれる。6.222）
+    ev.append((0.0, bytes([0xb0, 0x00, 0x00])))
+    ev.append((0.0, bytes([0xb0, 0x20, 0x00])))
+    ev.append((0.0, bytes([0xc0, 48])))                 # Strings
+    ev.append((0.0, bytes([0xb0, 0x07, 110])))
+    ev.append((0.0, bytes([0xb0, 0x5b, 60])))
+    ev += note(0, 60, 100, 0.0, 3.0)
+    # 落ち着いたころにもう一度（リセットの待ちが解けたあとも普通に鳴るか）
+    ev += note(0, 55, 100, 4.0, 1.5)
+    return [track(seq(ev))], 6.0
+
+
 def case_calshort():
     """**写し取りが足りないまま鳴らす**（doc/native-engine.md の 6.219）。
 
@@ -1683,6 +1709,7 @@ def case_calshort():
 CASES = {
     "piano":   case_piano,
     "calshort": case_calshort,
+    "headrace": case_headrace,
     "chord":   case_chord,
     "drums":   case_drums,
     "effects": case_effects,

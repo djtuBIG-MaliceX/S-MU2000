@@ -62,7 +62,7 @@ bool title_toggle(const char *title, const char *id, bool knobs, bool &toggle_ho
 	const bool pressed = ImGui::InvisibleButton(id, ImVec2(total, line_h));
 	toggle_hovered = ImGui::IsItemHovered();
 	if (toggle_hovered)
-		hint(knobs ? UI_TEXT(ps_hint_knobs, "Showing knobs (drag the value bars). Click to switch to the graph.")
+		hint("%s", knobs ? UI_TEXT(ps_hint_knobs, "Showing knobs (drag the value bars). Click to switch to the graph.")
 		           : UI_TEXT(ps_hint_graph, "Showing the graph (drag the picture). Click to switch to knobs."));
 	const ImU32 on = ImGui::GetColorU32(ImGuiCol_Text), off = ImGui::GetColorU32(ImGuiCol_TextDisabled);
 	float sx = p.x;
@@ -706,7 +706,7 @@ void fx_cell(int slot, bool part_only, int part, xg::model &m, bridge &br, float
 	if (ImGui::SmallButton(UI_TEXT(ps_fx_details, "Details")))
 		request_fx(slot);
 	if (ImGui::IsItemHovered())
-		hint(UI_TEXT(ps_fx_details_hint, "Effect settings window\nA window with big knobs and explanations for this effect"));
+		hint("%s", UI_TEXT(ps_fx_details_hint, "Effect settings window\nA window with big knobs and explanations for this effect"));
 	ImGui::EndDisabled();
 	// このパートのインサーションにしていないバリエーションで触れるのは、このパートの送り（Var Send）だけ。
 	// つまみの並びに足すと段が増えて全部が縮むので、種類の欄の右に横長の棒で置く
@@ -1217,6 +1217,7 @@ void part_shapes::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 	int msb = 0, lsb = 0, prog = 0;
 	std::string voice = "--";
 	if (m.get(P("part.bank_msb"), part, msb) && m.get(P("part.bank_lsb"), part, lsb) && m.get(P("part.program"), part, prog)) {
+		msb = shown_bank_msb(part, m, msb);      // GS のドラム（issue #52）
 		voice = voice_text(msb, lsb, prog);
 		if (const xg::voice_rom *vr = voices()) {
 			const std::string real = vr->name(ram.parts[part], msb, prog);
@@ -1283,7 +1284,7 @@ void part_shapes::draw(xg::model &m, const xg_snapshot &ram, bridge &br)
 		if (pressed)
 			set_shapes_knobs(FOLD_BIT, !folded);
 		if (hov)
-			hint(folded ? UI_TEXT(ps_fold_open_hint, "Open the voice panel\nShow category, voice and bank columns on the left")
+			hint("%s", folded ? UI_TEXT(ps_fold_open_hint, "Open the voice panel\nShow category, voice and bank columns on the left")
 			            : UI_TEXT(ps_fold_close_hint, "Fold the voice panel\nFold category, voice and bank columns to the left edge, giving the width to the right tabs"));
 		ImDrawList *dl = ImGui::GetWindowDrawList();
 		const ImVec2 b(a.x + hw, a.y + body_h);
