@@ -89,12 +89,7 @@ public:
 	// 起動が終わっていない間に来たものは**落さず**溜めておいて、終わってから
 	// fill() が順番どおりに流す（issue #19）
 	// port は 0 が MIDI IN A（パート 1-16）、1 が B（17-32）、2 が C（33-48）、3 が D（49-64）
-	// 重複落し（ui/midi_filter.h）が入っていると、音源がすでに持っている値の
-	// 再送はこの口で弾かれる。plugin.ini の midi_filter=1 で入れて、fast_midi=1 と
-	// 自動で一緒に入る
 	void midi(const uint8_t *bytes, size_t n, int port = 0);
-	// 重複落しが弹いたバイト数。0 なら何も落としていない
-	size_t midi_dedup_dropped() const { return m_dedup_n.load(std::memory_order_relaxed); }
 	// オールサウンドオフ + オールノートオフを流す。mask は口ごとのチャンネルのビット
 	// （bit 0 が 1ch）で、ports 個ぶん並べて渡す。全チャンネルに流すと 1 口あたり
 	// 192 バイト＝31250bps で 61ms かかり、そのあとに続く音が丸ごと遅れるので、
@@ -291,10 +286,6 @@ private:
 	// 起動待ちや、機械を他が使っている間に来た MIDI。落さず溜めて fill が流す。
 	// 口ごとに持つ。音声スレッドしか触らない
 	std::vector<uint8_t> m_pending[mu2000::MIDI_PORTS];
-	// 重複落し（ui/midi_filter.h）。boot() が plugin.ini から決めて、state が
-	// ready になってから読むので release/acquire で見える。デバッグ用 switch
-	bool m_dedup = false;
-	std::atomic<size_t> m_dedup_n{0};   // 弹いたバイト数（どの糸からでも）
 };
 
 } // namespace vst3

@@ -273,13 +273,6 @@ $(BUILD)/statetest$(EXE): $(OBJS) $(BUILD)/src/mu2000.o $(BUILD)/src/smf.o $(BUI
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
 
-# 重複落し（ui/midi_filter.h）の口ばしの試験。ROM 不要。機械をリンクしない
-$(BUILD)/filtertest$(EXE): src/filtertest.cpp src/ui/midi_filter.h src/mu2000.h
-	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) -o $@ $< $(LDFLAGS)
-
-filtertest: $(BUILD)/filtertest$(EXE)
-
 # panel はフロントパネル（LCD とボタン）を文字だけで動かす
 $(BUILD)/panel$(EXE): $(OBJS) $(BUILD)/src/mu2000.o $(BUILD)/src/smf.o $(BUILD)/src/panel.o
 	@mkdir -p $(dir $@)
@@ -1108,7 +1101,7 @@ endif
 # The test names are the same on both platforms: run_tests.py is the one that
 # knows whether the binaries carry an .exe suffix (tools/run_tests.py)
 TEST_EXES := $(BUILD)/verify$(EXE) $(BUILD)/statetest$(EXE) $(BUILD)/render$(EXE) $(BUILD)/xgtest$(EXE) \
-             $(BUILD)/samptest$(EXE) $(BUILD)/filtertest$(EXE)
+             $(BUILD)/samptest$(EXE)
 
 test: $(TEST_EXES)
 	SMU_BUILD=$(BUILD) $(PYTHON) tools/run_tests.py $(if $(T),--only $(T),)
@@ -1127,4 +1120,8 @@ clean:
 # 別の場所を触りに行っていた）。だから build の下にある .d を全部拾う
 -include $(shell find $(BUILD) -name '*.d' 2>/dev/null)
 
+<<<<<<< HEAD
 .PHONY: all clean regen check test test-update vst3 install-vst3 probe clap install-clap vsti install-vsti vsti-probe au install-au au-probe check-au
+=======
+.PHONY: all clean regen check test test-update vst3 install-vst3 probe clap install-clap au install-au au-probe check-au
+>>>>>>> parent of 6873df3 (Qwen3.8-flash-next-oQ5: add duplicate filter to reduce pressure for fast_midi)

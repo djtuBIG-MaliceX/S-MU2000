@@ -189,19 +189,6 @@ def step_verify(rep, update):
                 print("    今: %s" % b)
 
 
-def step_filtertest(rep):
-    """ROM 不要。重複落し（ui/midi_filter.h）: 落としてはいけないものを
-    落とさず、Automation の洪水が本当に落ちているか。表の上げ下げだけを見る"""
-    exe = tool("filtertest")
-    if not exe.exists():
-        rep.add("filtertest", False, "build/filtertest%s が無い。make を先に" % EXE)
-        return
-    r = subprocess.run([str(exe)], capture_output=True, text=True,
-                       encoding="utf-8")
-    ok = r.returncode == 0
-    rep.add("filtertest", ok, "" if ok else r.stdout.strip())
-
-
 def step_statetest(rep, roms, midi):
     exe = tool("statetest")
     if not exe.exists():
@@ -913,7 +900,6 @@ def main():
 
     print("== 1. verify（ROM 不要）")
     step_verify(rep, a.update)
-    step_filtertest(rep)
 
     print()
     print("== 1b. 画面の言葉（ROM 不要）")
