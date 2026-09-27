@@ -198,12 +198,18 @@ void hd44780_device::data_w(u8 data)
 	if (m_active_ram == DDRAM) {
 		// **native の持ち物のマスは表示を変えない**（6.188）
 		m_fw[m_ac] = m_dr;
-		if (!owned(u32(m_ac)))
+		if (!owned(u32(m_ac))) {
+			if (m_ddram[m_ac] != m_dr)
+				note_change(false, m_ac, m_ddram[m_ac], m_dr);
 			m_ddram[m_ac] = m_dr;
+		}
 	} else {
 		m_cg_fw[m_ac] = m_dr;
-		if (!cg_owned(u32(m_ac)))
+		if (!cg_owned(u32(m_ac))) {
+			if (m_cgram[m_ac] != m_dr)
+				note_change(true, m_ac, m_cgram[m_ac], m_dr);
 			m_cgram[m_ac] = m_dr;
+		}
 	}
 
 	set_busy(10);

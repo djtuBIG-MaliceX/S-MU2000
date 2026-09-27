@@ -353,7 +353,7 @@ VST3_SDK_SRCS := 	third_party/vst3/pluginterfaces/base/funknown.cpp 	third_party
 
 VST3_SRCS := src/vst3/plugin.cpp src/vst3/engine.cpp src/vst3/iids.cpp src/vst3/automation.cpp \
              src/vst3/view.cpp src/vst3/view_win.cpp \
-             src/ui/panel.cpp src/ui/layout.cpp src/ui/svg.cpp src/ui/editor.cpp \
+             src/ui/panel.cpp src/ui/layout.cpp src/ui/svg.cpp src/ui/png.cpp src/ui/editor.cpp \
              src/ui/effects.cpp src/xg/model.cpp $(VST3_SDK_SRCS)
 VST3_OBJS := $(VST3_SRCS:%.cpp=$(BUILD)/vst3obj/%.o)
 
@@ -361,7 +361,14 @@ $(BUILD)/vst3obj/%.o: %.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $(VST3_INC) $(IMGUI_FLAGS) -c -o $@ $<
 
-vst3: $(VST3_BIN)
+# 写真調のパネルの絵（art/real）を束の中へ。プラグインは自分の場所から
+# ../Resources/panel/panel.txt を探す（doc/panel-editing.md）
+VST3_PANEL := $(VST3_DIR)/Contents/Resources/panel/panel.txt
+vst3: $(VST3_BIN) $(VST3_PANEL)
+
+$(VST3_PANEL): $(wildcard art/real/*.png) art/real/panel.txt
+	@mkdir -p $(dir $@)
+	@cp -f art/real/*.png art/real/panel.txt $(dir $@)
 
 # PC で触る窓（一覧・エディタ）はプラグインからも開ける。gui.exe と同じ
 # ui::pc_window なので、ImGui と PC 側の絵を一式こちらにも入れる
@@ -377,7 +384,7 @@ $(VST3_BIN): $(OBJS) $(BUILD)/src/mu2000.o $(VST3_OBJS) $(PC_OBJS)
 # 既定の置き場へ入れる。管理者権限が要ることがある
 VST3_INSTALL ?= $(PROGRAMFILES)/Common Files/VST3
 
-install-vst3: $(VST3_BIN)
+install-vst3: $(VST3_BIN) $(VST3_PANEL)
 ifdef CROSS_WINDOWS
 ifeq ($(PROGRAMFILES),)
 	$(error CROSS=windows: there is no Program Files here -- pass VST3_INSTALL=<dir> to copy the bundle somewhere you can pick it up from)
@@ -566,7 +573,7 @@ VST3_SDK_SRCS := \
 	third_party/vst3/pluginterfaces/base/ustring.cpp
 
 LINUX_PANEL_SRCS := src/compat/gdi_linux.cpp \
-              src/ui/panel.cpp src/ui/layout.cpp src/ui/svg.cpp src/ui/editor.cpp \
+              src/ui/panel.cpp src/ui/layout.cpp src/ui/svg.cpp src/ui/png.cpp src/ui/editor.cpp \
               src/ui/effects.cpp src/xg/model.cpp \
               src/ui/xg_ui.cpp src/ui/fx_help.cpp src/ui/fx_icons.cpp $(IMGUI_CORE)
 
@@ -579,7 +586,14 @@ $(BUILD)/vst3obj/%.o: %.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $(VST3_INC) $(IMGUI_FLAGS) $(LINUX_SDL_CFLAGS) -c -o $@ $<
 
-vst3: $(VST3_BIN)
+# 写真調のパネルの絵（art/real）を束の中へ。プラグインは自分の場所から
+# ../Resources/panel/panel.txt を探す（doc/panel-editing.md）
+VST3_PANEL := $(VST3_DIR)/Contents/Resources/panel/panel.txt
+vst3: $(VST3_BIN) $(VST3_PANEL)
+
+$(VST3_PANEL): $(wildcard art/real/*.png) art/real/panel.txt
+	@mkdir -p $(dir $@)
+	@cp -f art/real/*.png art/real/panel.txt $(dir $@)
 
 $(VST3_BIN): $(OBJS) $(BUILD)/src/mu2000.o $(VST3_OBJS) $(IMGUI_SDL_OBJS)
 	@mkdir -p $(dir $@)
@@ -591,7 +605,7 @@ $(VST3_BIN): $(OBJS) $(BUILD)/src/mu2000.o $(VST3_OBJS) $(IMGUI_SDL_OBJS)
 
 VST3_INSTALL ?= $(HOME)/.vst3
 
-install-vst3: $(VST3_BIN)
+install-vst3: $(VST3_BIN) $(VST3_PANEL)
 	rm -rf "$(VST3_INSTALL)/S-MU2000.vst3"
 	mkdir -p "$(VST3_INSTALL)"
 	cp -r $(VST3_DIR) "$(VST3_INSTALL)/"
@@ -656,6 +670,17 @@ else # macOS
 #
 # The GUI additionally needs a window, which is AppKit (Cocoa) plus CoreText
 # for the panel's labels.
+#
+# packaging/auv3-app-Info.plist and packaging/auv3-appex-Info.plist both say
+# LSMinimumSystemVersion 11.0, so that is the floor this project has always
+# claimed. Saying the same thing to the compiler keeps the binaries honest: left
+# unset, the toolchain stamps whatever SDK is installed (27.2 at the time of
+# writing) into minos, and a VST3 or AU built on a new Mac then refuses to load
+# on the very machines the plists promise to support. Exported rather than added
+# to CXXFLAGS so the driver applies it to the link steps too, and to anything
+# the recipes shell out to.
+export MACOSX_DEPLOYMENT_TARGET := 11.0
+
 MAC_FRAMEWORKS := -framework CoreAudio -framework AudioToolbox \
                   -framework CoreMIDI -framework AudioUnit \
                   -framework CoreFoundation -framework CoreGraphics \
@@ -750,7 +775,7 @@ VST3_SDK_SRCS := \
 # view_win.cpp in place of view_mac.mm)
 PANEL_VIEW_SRCS := src/vst3/view.cpp src/vst3/view_mac.mm
 PANEL_SRCS := src/compat/gdi_mac.cpp \
-              src/ui/panel.cpp src/ui/layout.cpp src/ui/svg.cpp src/ui/editor.cpp \
+              src/ui/panel.cpp src/ui/layout.cpp src/ui/svg.cpp src/ui/png.cpp src/ui/editor.cpp \
               src/ui/effects.cpp src/xg/model.cpp
 
 VST3_SRCS := src/vst3/plugin.cpp src/vst3/engine.cpp src/vst3/iids.cpp src/vst3/automation.cpp \
@@ -766,7 +791,14 @@ $(BUILD)/vst3obj/%.o: %.mm
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $(VST3_INC) $(IMGUI_FLAGS) -fobjc-arc -c -o $@ $<
 
-vst3: $(VST3_BIN)
+# 写真調のパネルの絵（art/real）を束の中へ。プラグインは自分の場所から
+# ../Resources/panel/panel.txt を探す（doc/panel-editing.md）
+VST3_PANEL := $(VST3_DIR)/Contents/Resources/panel/panel.txt
+vst3: $(VST3_BIN) $(VST3_PANEL)
+
+$(VST3_PANEL): $(wildcard art/real/*.png) art/real/panel.txt
+	@mkdir -p $(dir $@)
+	@cp -f art/real/*.png art/real/panel.txt $(dir $@)
 
 # -bundle, not -shared: a VST3 is read with CFBundle, not dlopen
 # The overview/editor PC windows open from the plug-in too, so the ImGui
@@ -785,7 +817,7 @@ $(VST3_BIN): $(OBJS) $(BUILD)/src/mu2000.o $(VST3_OBJS) $(MAC_PC_OBJS)
 # Install into the default location. No admin rights needed on macOS
 VST3_INSTALL ?= $(HOME)/Library/Audio/Plug-Ins/VST3
 
-install-vst3: $(VST3_BIN)
+install-vst3: $(VST3_BIN) $(VST3_PANEL)
 	rm -rf "$(VST3_INSTALL)/S-MU2000.vst3"
 	mkdir -p "$(VST3_INSTALL)"
 	cp -r $(VST3_DIR) "$(VST3_INSTALL)/"
@@ -973,7 +1005,8 @@ AUV3_ROMS ?= roms
 AUV3_FLAGS := -fobjc-arc
 AUV3_FW    := -framework Foundation -framework AudioToolbox -framework AVFoundation \
               -framework CoreAudio -framework CoreMIDI -framework Cocoa -framework CoreAudioKit \
-              -framework Metal -framework QuartzCore
+              -framework Metal -framework QuartzCore \
+              -framework UniformTypeIdentifiers
 
 $(BUILD)/auv3obj/%.o: %.cpp
 	@mkdir -p $(dir $@)

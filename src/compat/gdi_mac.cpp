@@ -658,6 +658,36 @@ BOOL Polyline(HDC hdc, const POINT *pts, int n)
 	return TRUE;
 }
 
+BOOL smu_blit_premul(HDC hdc, int x, int y, int w, int h, const uint32_t *px)
+{
+	gdi_dc *dc = static_cast<gdi_dc *>(hdc);
+	if (!dc || !dc->ctx || !px || w <= 0 || h <= 0)
+		return FALSE;
+
+	// A copy, so the image does not depend on px outliving the draw
+	cf_holder<CFDataRef> data(CFDataCreate(nullptr, reinterpret_cast<const UInt8 *>(px),
+	                                       CFIndex(size_t(w) * size_t(h) * 4)));
+	cf_holder<CGDataProviderRef> prov(CGDataProviderCreateWithCFData(data.get()));
+	// The alpha and the byte order are separate enum types, so the combining
+	// bitwise op is only spelled through uint32_t; see CreateCompatibleDC below.
+	cf_holder<CGImageRef> img(CGImageCreate(size_t(w), size_t(h), 8, 32, size_t(w) * 4,
+	                                        rgb_space(),
+	                                        CGBitmapInfo(uint32_t(kCGImageAlphaPremultipliedFirst) |
+	                                                     uint32_t(kCGBitmapByteOrder32Little)),
+	                                        prov.get(), nullptr, false,
+	                                        kCGRenderingIntentDefault));
+	if (!img.get())
+		return FALSE;
+	// Our contexts run y downwards; CGContextDrawImage assumes y upwards, so
+	// flip around the target rectangle or the picture lands upside down
+	CGContextSaveGState(dc->ctx);
+	CGContextTranslateCTM(dc->ctx, x, y + h);
+	CGContextScaleCTM(dc->ctx, 1, -1);
+	CGContextDrawImage(dc->ctx, CGRectMake(0, 0, w, h), img.get());
+	CGContextRestoreGState(dc->ctx);
+	return TRUE;
+}
+
 // ---- State ---------------------------------------------------------------
 
 COLORREF SetTextColor(HDC hdc, COLORREF color)

@@ -26,21 +26,40 @@ double lcd_aspect()
 	return h > 0.0 ? g_win->panel.lay().lcd[2] / h : 1.0;
 }
 
-// Keep the client area, excluding the title bar and resize frame, at the LCD ratio.
-void constrain_lcd_sizing(HWND hwnd, WPARAM edge, RECT &r)
+// What the window keeps at a fixed ratio: the LCD alone, or the whole panel
+// picture (1000:400, the same ratio the VST3 view keeps). The toolbar strip
+// on top is added, not scaled, so it stays out of the ratio
+double body_aspect()
+{
+	return g_win->lcd_only ? lcd_aspect() : double(LOGICAL_W) / LOGICAL_H;
+}
+
+// Client height for a client width, strip included
+int client_h_for(int client_w)
+{
+	return int(std::lround(client_w / body_aspect())) + g_win->panel.top_inset();
+}
+
+// Keep the client area, excluding the title bar and resize frame, at the
+// body ratio. Without it the panel letterboxes, and a short, wide window
+// shrinks the LCD dots to fit the height, leaving gaps at the LCD's sides
+void constrain_sizing(HWND hwnd, WPARAM edge, RECT &r)
 {
 	RECT wr{}, cr{};
 	GetWindowRect(hwnd, &wr);
 	GetClientRect(hwnd, &cr);
 	const int frame_w = (wr.right - wr.left) - (cr.right - cr.left);
 	const int frame_h = (wr.bottom - wr.top) - (cr.bottom - cr.top);
+	const int inset = g_win->panel.top_inset();
+	const int min_w = g_win->lcd_only ? 200 : 500;
 	int outer_w = r.right - r.left;
 	int outer_h = r.bottom - r.top;
 
 	if (edge == WMSZ_TOP || edge == WMSZ_BOTTOM) {
-		const int client_h = std::max(60, outer_h - frame_h);
-		outer_h = client_h + frame_h;
-		outer_w = int(std::lround(client_h * lcd_aspect())) + frame_w;
+		const int body_h = std::max(int(std::lround(min_w / body_aspect())),
+		                            outer_h - frame_h - inset);
+		outer_h = body_h + inset + frame_h;
+		outer_w = int(std::lround(body_h * body_aspect())) + frame_w;
 		if (edge == WMSZ_TOP)
 			r.top = r.bottom - outer_h;
 		else
@@ -49,9 +68,9 @@ void constrain_lcd_sizing(HWND hwnd, WPARAM edge, RECT &r)
 		return;
 	}
 
-	const int client_w = std::max(200, outer_w - frame_w);
+	const int client_w = std::max(min_w, outer_w - frame_w);
 	outer_w = client_w + frame_w;
-	outer_h = int(std::lround(client_w / lcd_aspect())) + frame_h;
+	outer_h = client_h_for(client_w) + frame_h;
 	if (edge == WMSZ_LEFT || edge == WMSZ_TOPLEFT || edge == WMSZ_BOTTOMLEFT)
 		r.left = r.right - outer_w;
 	else
@@ -86,8 +105,9 @@ bool make_window(const char *title, int w, int h)
 
 	const DWORD style = g_win->lcd_only ? (WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX)
 	                                      : WS_OVERLAPPEDWINDOW;
-	if (g_win->lcd_only)
-		h = std::max(60, int(std::lround(w / lcd_aspect())));
+	// The first size follows the same ratio as dragging does; --size's
+	// width wins, the height is worked out from it
+	h = std::max(60, client_h_for(w));
 	RECT want{ 0, 0, w, h };
 	AdjustWindowRect(&want, style, FALSE);
 	HWND hwnd = CreateWindowA("SMU2000Panel", title, style,
@@ -164,11 +184,8 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 		return 0;
 
 	case WM_SIZING:
-		if (g_win->lcd_only) {
-			constrain_lcd_sizing(hwnd, wp, *reinterpret_cast<RECT *>(lp));
-			return TRUE;
-		}
-		break;
+		constrain_sizing(hwnd, wp, *reinterpret_cast<RECT *>(lp));
+		return TRUE;
 
 	case WM_ERASEBKGND:
 		return 1;                               // 全部自分で描く

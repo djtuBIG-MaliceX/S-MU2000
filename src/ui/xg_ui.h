@@ -193,10 +193,14 @@ void bend_now_line(int part, xg::model &m, const xg_snapshot *ram);
 int shown_bank_msb(int part, xg::model &m, int msb);
 // 試聴で鳴らしている音を止める（窓を閉じたとき）
 void audition_stop(bridge &br);
-// 試聴で鳴らす鍵。パートの音色の窓の鍵盤を右クリックして決める（目印が付く）。
-// -1 なら決まっていない（ドラムキットはスネア、ほかは C3 = 60）。editor.ini に覚える
-int  audition_note();
-void set_audition_note(int note);
+// **試聴で鳴らす鍵**。パートの音色の窓の鍵盤を右クリックすると印が付き、
+// もう一度右クリックすると消える。**何鍵でも付けられる**ので、和音で試聴できる。
+// パートごとに別に持つ。**覚えない**ので、開き直すと印は無し
+// ＝ その状態では音色を替えても鳴らない（鳴らすかどうかを自分で決められる）
+bool audition_key(int part, int note);
+void toggle_audition_key(int part, int note);
+// 印の付いた鍵を若い順に集める。戻りは数（out には最大 max 個）
+int  audition_keys(int part, int *out, int max);
 
 // ---- 説明（ヘルプ）。見出しや名前にカーソルを当てると、何に効くのかを出す（日本語・英語）。
 // 邪魔な人もいるので、窓の上のチェックボックスで消せる。選んだ状態は

@@ -286,6 +286,16 @@ public:
 	enum scope_fx : int { SCOPE_INS1, SCOPE_INS2, SCOPE_INS3, SCOPE_INS4, SCOPE_VAR, SCOPE_CHO, SCOPE_REV, SCOPE_MIX, SCOPE_FX_N };
 	void scope_read_fx(int fx, bool out, float *dst, size_t n) const;
 
+	// ---- S-MU2000: 全パートの音と最終の出力（一覧の小さなスペクトラム用）
+	// 上の 1 パートぶんと同じく、声の出力を混ぜる前に拾ってパートごとに足す。こちらは 64 パート
+	// 全部を同時に、短い輪（PSCOPE_N）で持つ。最終の出力はマスタの DAC に出る左右の平均。
+	// 一覧が見えている間だけ動かす（set_part_scopes(false) で止まる）。音には触らない
+	static constexpr size_t PSCOPE_N = 1024;
+	void set_part_scopes(bool on);
+	// part 0-63 はそのパートの声の和、PSCOPE_OUT は最終の出力。直近の n サンプル（n ≤ PSCOPE_N、古い順）
+	static constexpr int PSCOPE_OUT = 64;
+	void part_scope_read(int part, float *out, size_t n) const;
+
 	sh7043a_device &cpu()  { return *m_cpu; }
 	swp30_device   &swpm() { return m_swpm; }
 
@@ -328,6 +338,9 @@ public:
 
 	// パネルの LED 10 個。MAME の mulcd_device::set_leds と同じ並び
 	u16 leds() const;
+	// UTIL > SYS の Contrast（1-8）。firmware が d80000 の下 3bit に
+	// 「値 − 1」を書く。まだ書かれていなければ工場出荷の 2
+	int lcd_contrast() const { return m_d80 ? (m_d80 & 7) + 1 : 2; }
 
 	const std::string &error() const { return m_error; }
 
@@ -344,6 +357,10 @@ public:
 	// 1: 鍵の上げ下げを native driver でさばき、CPU はその間止める
 	void set_native_engine(int mode);
 	int native_engine() const { return m_native_engine; }
+
+	// 画面へ渡す液晶の絵（hd44780::render と同じ並び）。native の口で
+	// firmware を細く回している間は、覚えた点滅をこちらで切り替えて描く
+	const u8 *lcd_render();
 	// native の口の内訳（調べ用）
 	// SH-2 を回したのはなぜか（サンプル数）。doc/native-engine.md の 6.21
 	std::atomic<u64> m_ne_by_note{0};    // firmware が鳴らしている音がある
@@ -427,6 +444,28 @@ private:
 	static constexpr u64 RESET_HOLD_MAX = 44100 * 2 / 5;   // 400ms で必ず解く
 	void hold_after_reset(u64 fire);
 	u32  m_fw_hold = 0;            // このサンプル数だけ firmware を回す
+
+	// **液晶の点滅を native で受け持つ**。点滅（カーソル・値・▼）は firmware が
+	// 時間を数えて書き換えるので、firmware を細く回すと 20 分の 1 の速さになり
+	// 止まって見える。firmware が全速のときに「2 つの値を一定の間隔で行き来する
+	// マス」を覚え、細く回している間はその間隔でこちらが切り替えて描く。
+	// マスは DDRAM 0x00-0x7F と CGRAM 0x80-0xBF
+	// 点いている時間と消えている時間は同じとは限らない（演奏画面の ▼ は
+	// 点いて 325ms・消えて 75ms）ので、2 つの値それぞれの長さを覚える
+	struct blink_cell {
+		u8  v[2] = {};             // 行き来する 2 つの値
+		u64 dur[2] = {};           // それぞれが続く長さ（firmware の時刻、サンプル）
+		u8  count = 0;             // 同じ長さで続いた回数
+		bool on = false;           // 点滅とみなしている
+		u64 last_fw = 0;           // 最後に書き換わった firmware の時刻
+		u64 anchor = 0;            // 切り替えの起点（実時間 = m_ne_clock）
+		u8  anchor_i = 0;          // 起点で出ていた値（v の添字）
+	};
+	blink_cell m_blink[0xC0];
+	u64  m_fw_clock = 0;           // firmware を回したサンプル数（firmware の時刻）
+	u64  m_thr_fw0 = 0;            // 細く回しているかを測る窓の頭の m_fw_clock
+	bool m_throttled = false;      // いま firmware を細く回している
+	void blink_learn();
 	// 調べ用の切り替えは**作るときに 1 回だけ読む**。run_sample から
 	// `std::getenv` を呼ぶと、それだけで 1 サンプルあたり 1µs 以上かかる
 	// （環境の表を毎回なめるため。doc/native-dsp.md「測るときの注意」と同じ罠）
@@ -744,7 +783,7 @@ private:
 	// firmware が、こちらが鳴らしているスロットに書いた回数
 	u32  m_ne_fw_stomp = 0;
 	void note_fw_swp(bool master, u32 reg, u16 value);
-	u64  m_fw_keymask = 0;     // firmware がつぎに鳴らすスロットのマスク
+	u64  m_fw_keymask[2] = { 0, 0 };  // firmware がつぎに鳴らすスロットのマスク（マスタ・スレーブ）
 	// firmware を細く回し続ける刻み（100ms ごとに 5ms）。止めきると液晶・
 	// ボタン・firmware 自身の後始末が全部止まる
 	// **パネルを触っている間は firmware を全速で回す**（doc/native-engine.md の 6.119）。
@@ -808,6 +847,12 @@ private:
 	std::array<std::atomic<u32>, 2> m_fx_w{};
 	static void scope_meg_fn(void *ctx, const s32 *in, const s32 *out);
 	void scope_refresh_owner();
+	// 全パートの輪（[chip][k][part]）と最終の出力の輪
+	std::atomic<bool> m_pscope_on{false};
+	std::vector<float> m_pscope = std::vector<float>(2 * PSCOPE_N * 64);
+	std::array<std::atomic<u32>, 2> m_pscope_w{};
+	std::vector<float> m_oscope = std::vector<float>(PSCOPE_N);
+	std::atomic<u32> m_oscope_w{0};
 	required_device<sci4_device> m_sci4_finder;
 	sci4_device *m_sci4 = nullptr;   // PLG ボード用 0xf00000
 	mem_bus      m_bus;
@@ -834,6 +879,8 @@ private:
 	// ビジーフラグが立つのを確かめており、常に空いていると先へ進まない
 	hd44780_device m_lcd;
 	u8  m_ledsw1 = 0, m_ledsw2 = 0;
+	// d80000: LCD のコントラストほか（MAME の地図では "contrast, levels"）
+	u8  m_d80 = 0;
 	// 押されているボタン。行 6 × 桁 8。押すと 0 になる
 	u8  m_sws[6] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
 	u8   ledsw_r() const;
@@ -858,6 +905,11 @@ private:
 	// 記録に入れるサンプル番号（0 起点。run_sample の頭で進めるので 1 引く）
 	u64 trace_sample() const { return m_sample_count ? m_sample_count - 1 : 0; }
 	u64         m_sample_count = 0;  // 電源投入から数えたサンプル数（記録と再生の目印）
+	// **MU の表示灯の点滅**（native の口。leds()）。firmware は MIDI を受けると MU の灯を
+	// 一瞬消すが、native の口では firmware を間引いて回すので点いたままになる。
+	// 受けた時刻から、消す区間を m_ne_clock の目盛りで持つ
+	u64         m_led_off_from = 0, m_led_off_until = 0;
+	void        led_blink(u64 at);
 	swp_watch_fn m_swp_watch;
 	std::FILE  *m_swp_trace = nullptr;
 	bool        m_swp_trace_reads = false;

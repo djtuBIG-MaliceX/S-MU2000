@@ -1,8 +1,10 @@
 // license:BSD-3-Clause
 
 #include "svg.h"
+#include "png.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -231,6 +233,15 @@ std::string shape_to_d(const std::string &name, const std::string &tag)
 
 bool svg_art::load_file(const std::string &path)
 {
+	if (path.size() > 4) {
+		std::string ext = path.substr(path.size() - 4);
+		for (char &c : ext)
+			c = char(std::tolower(static_cast<unsigned char>(c)));
+		if (ext == ".png") {
+			clear();
+			return load_png(path);
+		}
+	}
 	FILE *f = std::fopen(path.c_str(), "rb");
 	if (!f)
 		return false;
@@ -445,6 +456,10 @@ bool svg_art::load_text(const std::string &text)
 
 void svg_art::draw(HDC dc, const RECT &dst, double deg) const
 {
+	if (!m_mips.empty()) {
+		draw_image(dc, dst, deg);
+		return;
+	}
 	if (m_shapes.empty())
 		return;
 
@@ -513,6 +528,177 @@ void svg_art::draw(HDC dc, const RECT &dst, double deg) const
 			DeleteObject(pen);
 		}
 	}
+}
+
+
+// ---- 画像のとき
+
+void blit_premul(HDC dc, int x, int y, int w, int h, const uint32_t *px, bool opaque)
+{
+#if defined(_WIN32)
+	BITMAPINFO bi{};
+	bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+	bi.bmiHeader.biWidth = w;
+	bi.bmiHeader.biHeight = -h;                        // 上から下へ
+	bi.bmiHeader.biPlanes = 1;
+	bi.bmiHeader.biBitCount = 32;
+	bi.bmiHeader.biCompression = BI_RGB;
+	if (opaque) {
+		StretchDIBits(dc, x, y, w, h, 0, 0, w, h, px, &bi, DIB_RGB_COLORS, SRCCOPY);
+		return;
+	}
+	void *bits = nullptr;
+	HBITMAP bm = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+	if (!bm)
+		return;
+	std::memcpy(bits, px, size_t(w) * size_t(h) * 4);
+	HDC mem = CreateCompatibleDC(dc);
+	HGDIOBJ old = SelectObject(mem, bm);
+	BLENDFUNCTION bf{ AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+	GdiAlphaBlend(dc, x, y, w, h, mem, 0, 0, w, h, bf);
+	SelectObject(mem, old);
+	DeleteDC(mem);
+	DeleteObject(bm);
+#else
+	(void)opaque;
+	smu_blit_premul(dc, x, y, w, h, px);
+#endif
+}
+
+namespace {
+
+uint32_t premul(uint32_t c)
+{
+	const uint32_t a = c >> 24;
+	if (a == 255)
+		return c;
+	auto m = [&](int sh) { return (((c >> sh) & 0xff) * a + 127) / 255; };
+	return (a << 24) | (m(16) << 16) | (m(8) << 8) | m(0);
+}
+
+} // namespace
+
+
+bool svg_art::load_png(const std::string &path)
+{
+	int w = 0, h = 0;
+	std::vector<u32> raw;
+	if (!read_png(path, w, h, raw))
+		return false;
+	return load_pixels(w, h, raw);
+}
+
+bool svg_art::load_pixels(int w, int h, const std::vector<uint32_t> &raw)
+{
+	clear();
+	if (w <= 0 || h <= 0 || raw.size() < size_t(w) * size_t(h))
+		return false;
+
+	level l0;
+	l0.w = w;
+	l0.h = h;
+	l0.px.resize(raw.size());
+	for (size_t i = 0; i < raw.size(); i++)
+		l0.px[i] = premul(raw[i]);
+	m_mips.push_back(std::move(l0));
+
+	// 半分ずつ縮めた段。2 × 2 の平均（端の余りは端の画素を使い回す）
+	while (m_mips.back().w > 1 || m_mips.back().h > 1) {
+		const level &a = m_mips.back();
+		level b;
+		b.w = std::max(1, (a.w + 1) / 2);
+		b.h = std::max(1, (a.h + 1) / 2);
+		b.px.resize(size_t(b.w) * size_t(b.h));
+		for (int y = 0; y < b.h; y++)
+			for (int x = 0; x < b.w; x++) {
+				const int x0 = std::min(2 * x, a.w - 1), x1 = std::min(2 * x + 1, a.w - 1);
+				const int y0 = std::min(2 * y, a.h - 1), y1 = std::min(2 * y + 1, a.h - 1);
+				const uint32_t q[4] = { a.px[size_t(y0) * a.w + x0], a.px[size_t(y0) * a.w + x1],
+				                        a.px[size_t(y1) * a.w + x0], a.px[size_t(y1) * a.w + x1] };
+				uint32_t out = 0;
+				for (int sh = 0; sh < 32; sh += 8) {
+					uint32_t sum = 0;
+					for (uint32_t v : q)
+						sum += (v >> sh) & 0xff;
+					out |= ((sum + 2) / 4) << sh;
+				}
+				b.px[size_t(y) * b.w + x] = out;
+			}
+		m_mips.push_back(std::move(b));
+	}
+	m_vb[0] = m_vb[1] = 0;
+	m_vb[2] = w;
+	m_vb[3] = h;
+	return true;
+}
+
+void svg_art::draw_image(HDC dc, const RECT &dst, double deg) const
+{
+	const int dw = dst.right - dst.left, dh = dst.bottom - dst.top;
+	if (dw <= 0 || dh <= 0)
+		return;
+
+	if (m_cache.w != dw || m_cache.h != dh || m_cache.deg != deg || m_cache.px.empty()) {
+		const level &base = m_mips[0];
+		// 縦横比は保つ。余りは真ん中に
+		const double k = std::min(double(dw) / base.w, double(dh) / base.h);
+		const double ix0 = (dw - base.w * k) / 2, iy0 = (dh - base.h * k) / 2;
+
+		// 1 画素が元の 1-2 画素に当たる段を選ぶ
+		double s = 1.0 / k;
+		size_t li = 0;
+		while (li + 1 < m_mips.size() && s >= 2.0) {
+			s /= 2.0;
+			li++;
+		}
+		const level &L = m_mips[li];
+		const double to_l = 1.0 / double(1u << li);
+
+		const double cx = dw / 2.0, cy = dh / 2.0;
+		const double rad = deg * 3.14159265358979 / 180.0;
+		const double cs = std::cos(rad), sn = std::sin(rad);
+
+		auto fetch = [&](int x, int y) -> uint32_t {
+			x = std::max(0, std::min(x, L.w - 1));
+			y = std::max(0, std::min(y, L.h - 1));
+			return L.px[size_t(y) * L.w + x];
+		};
+
+		m_cache.w = dw;
+		m_cache.h = dh;
+		m_cache.deg = deg;
+		m_cache.px.assign(size_t(dw) * size_t(dh), 0);
+		bool opaque = true;
+		for (int y = 0; y < dh; y++)
+			for (int x = 0; x < dw; x++) {
+				double px = x + 0.5, py = y + 0.5;
+				if (deg != 0.0) {
+					// 描くときに回すのと逆向きに戻して、元の絵のどこかを探す
+					const double dx = px - cx, dy = py - cy;
+					px = cx + dx * cs + dy * sn;
+					py = cy - dx * sn + dy * cs;
+				}
+				const double u = (px - ix0) / k, v = (py - iy0) / k;
+				uint32_t out = 0;
+				if (u >= 0 && v >= 0 && u < base.w && v < base.h) {
+					const double fu = u * to_l - 0.5, fv = v * to_l - 0.5;
+					const int x0 = int(std::floor(fu)), y0 = int(std::floor(fv));
+					const double tx = fu - x0, ty = fv - y0;
+					const uint32_t a = fetch(x0, y0), b = fetch(x0 + 1, y0);
+					const uint32_t c = fetch(x0, y0 + 1), d = fetch(x0 + 1, y0 + 1);
+					for (int sh = 0; sh < 32; sh += 8) {
+						const double top = ((a >> sh) & 0xff) * (1 - tx) + ((b >> sh) & 0xff) * tx;
+						const double bot = ((c >> sh) & 0xff) * (1 - tx) + ((d >> sh) & 0xff) * tx;
+						out |= uint32_t(std::lround(top * (1 - ty) + bot * ty)) << sh;
+					}
+				}
+				if ((out >> 24) != 255)
+					opaque = false;
+				m_cache.px[size_t(y) * dw + x] = out;
+			}
+		m_cache.opaque = opaque;
+	}
+	blit_premul(dc, dst.left, dst.top, dw, dh, m_cache.px.data(), m_cache.opaque);
 }
 
 } // namespace ui

@@ -55,7 +55,7 @@ enum : int {
 };
 
 // 触れる場所
-enum class spot_kind { none, button, wheel, volume, knob, tab, action, part, list };
+enum class spot_kind { none, button, wheel, volume, knob, tab, action, part, list, adgain };
 
 struct spot {
 	spot_kind      kind = spot_kind::none;
@@ -142,11 +142,45 @@ private:
 	void paint_editor(HDC dc, const char *status) const;
 	void paint_effects(HDC dc, const char *status) const;
 
+	// LCD の中の寸法。点の間隔 d（画素）と、上の面の左上 x0 y0、下の面の上端 sy。
+	// 窓の下と右の札も同じ値で置くので、描く側と札の側で分けて計算しない。
+	// df fx0 fy0 fsy は端数つきの本当の値（点が小さく、拡大して描くときだけ
+	// 整数と違う）。k は拡大して描く倍率
+	struct lcd_geom {
+		int d, pad, x0, y0, tick_h, line_h, scale_h, sy;
+		double df, fx0, fy0, fsy;
+		int k;
+	};
+	lcd_geom lcd_grid() const;
+
 	void draw_lcd(HDC dc, const snapshot &s) const;
+	// 点とセグメント。area を LCD の背景で塗ってから g の寸法で描く。
+	// px は出来上がりの 1 画素がこの座標で何単位か（拡大して描くときは倍率）
+	// LCD の決まった形のセグメント（扇・パンの円弧と針・7 セグ・▶ ▼）。
+	// 本体はここへ溜めるだけで、描き上がった LCD の上に縁をぼかして塗る
+	struct lcd_shape {
+		std::vector<double> xy;          // x0 y0 x1 y1 …（本体を描いた座標）
+		COLORREF ink;
+	};
+	void draw_lcd_body(HDC dc, const snapshot &s, const lcd_geom &g,
+	                   const RECT &area, double px, std::vector<lcd_shape> &shapes) const;
+	void draw_lcd_labels(HDC dc, const snapshot &s, const lcd_geom &g) const;
+	// MIC と LINE の箱（上が MIC）。目盛りの番号と下の面のあいだに収める
+	void lcd_tag_boxes(const lcd_geom &g, RECT out[2]) const;
+	// 目盛りの帯の中の高さ。f は帯の上端 0、下端 1 の割合
+	int band_y(const lcd_geom &g, double f) const;
+	void draw_lcd_message(HDC dc, const snapshot &s) const;
+#ifdef _WIN32
+	bool supersample_lcd(HDC dc, const snapshot &s, const lcd_geom &g, int k,
+	                     std::vector<lcd_shape> &shapes) const;
+#endif
 	void draw_grid(HDC dc) const;
 	void draw_button(HDC dc, const spot &sp, bool down) const;
+	void draw_key_print(HDC dc, const RECT &key, const char *label, const char *sub,
+	                    mu2000::button b, bool down) const;
 	void draw_wheel(HDC dc, int angle) const;
 	void draw_volume(HDC dc, double v) const;
+	void draw_adgain(HDC dc) const;
 	void draw_tabs(HDC dc) const;
 	void draw_knob(HDC dc, const spot &sp) const;
 	void draw_list(HDC dc, const spot &sp) const;
@@ -169,6 +203,7 @@ private:
 
 	page m_page = page::front;
 	std::vector<spot> m_spots;
+	RECT m_adgain{};
 	RECT m_lcd{}, m_wheel{}, m_volume{}, m_status{}, m_hint{}, m_leds[6]{};
 
 	// 掴んでいるもの
@@ -191,6 +226,8 @@ private:
 	// ダイヤルを掴んで上下に動かしているとき（editor.cpp の press / drag）。まだ目盛りにならない端の画素
 	double m_dial_rest = 0.0;
 	double m_volume_now = 1.0;
+	// A/D INPUT のつまみ（0-1）。まだ音には効かせず、回るだけ
+	double m_adgain_now = 0.45;
 
 	// ---- エディタとエフェクトの面の値。**画面では覚えない**。
 	// 音源に問い合わせた返事をパラメータの層（doc/params.md）が持っていて、
@@ -203,6 +240,19 @@ private:
 	HFONT m_font_label = nullptr, m_font_small = nullptr;
 	// 目盛りの番号用。バー 1 本ぶんの幅に 2 桁を収める
 	HFONT m_font_tiny  = nullptr;
+	// LCD の MIC / LINE の札用。箱の高さから決めるので LCD の寸法しだい
+	HFONT m_font_tag   = nullptr;
+	HFONT m_font_num   = nullptr;   // LCD のパート番号（A1 A2 1-32）
+	HFONT m_font_key   = nullptr;   // キートップの印刷（絵の組みを使うとき）
+	int   m_font_key_em = 9;
+	// キートップの記号（− ＋ ◀ ▶）。縁をぼかした絵を大きさが変わるたびに作る
+	std::shared_ptr<svg_art> m_key_sym[4];
+	// LCD のセグメントの重ね絵。形が変わったときだけ作り直す（draw_lcd）
+	mutable std::vector<uint32_t> m_seg_px;
+	mutable int m_seg_x = 0, m_seg_y = 0, m_seg_w = 0, m_seg_h = 0;
+	mutable u64 m_seg_hash = 0;
+	int m_key_sym_px = 0;
+	int   m_font_tag_em = 8;        // m_font_tag の大きさ（字を箱の真ん中に置くのに使う）
 	bool   m_grid = false;
 	bool   m_lcd_only = false;
 	layout m_lay;

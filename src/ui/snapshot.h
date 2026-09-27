@@ -39,6 +39,7 @@ struct snapshot {
 	u8   dots[LCD_ROWS * LCD_COLS * CELL_H] = {};   // 各バイトの下位 5bit
 	u16  leds = 0;
 	bool lcd_on = false;
+	u8   contrast = 2;           // UTIL > SYS の Contrast（1-8）
 	bool ready = false;          // 起動が終わったか
 	char message[96] = {};       // 起動中／ROM が無い等。空なら出さない
 	// 鳴っている声の数（SWP30 のマスタとスレーブ、それぞれ 64 スロット）

@@ -48,10 +48,11 @@ cat.art   "../parts/cat.svg" "../parts/cat-down.svg"
 round.art "../parts/rnd.svg" "../parts/rnd-down.svg"
 plg.art   "../parts/plg.svg" "../parts/plg-on.svg"
 columns.y 184.6
+modes.x 652
 
 # LCD 下段の並びはこちらの実測のまま（doc/lcd-segments.md）
-low.x 0 12 30 48 55 61 70 78 86 93 0
-low.w 10 15 15 2 2 8 7 7 7 8 3
+low.x 0 11.96 30.5 48.5 56.1 62.2 70.3 78.3 86.1 92.5 102.9
+low.w 10.12 15.64 15 4 4 7.2 6.8 6.7 6.8 8.1 1.3
 
 # ---- 飾り。まず MAME の絵、そのうえに字を置く
 art 0 0 1000 385 "mu2000-mame.svg"
@@ -66,9 +67,6 @@ text 66.3 279.7 58.1 12.5 small left ink "STANDBY"
 text 74.2 291 21.9 12.5 small left ink "ON"
 text 152.9 291 60.9 12.5 small left ink "MIDI IN A"
 text 228.8 291 51.9 12.5 small left ink "PHONES"
-text 653.4 135.3 17.9 12.5 small left ink "XG"
-text 653.4 144.4 17.9 12.5 small left ink "GS"
-text 650.6 154 47.9 12.5 small left ink "PERFORM"
 text 879.3 43 26.4 12.5 small left ink "ALL"
 text 162.6 312 20.7 10.8 small left ink "3.3V"
 text 174.4 312 38.3 12.5 small left ink "CARD"

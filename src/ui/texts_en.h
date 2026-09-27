@@ -272,7 +272,8 @@ inline const ui_texts &en_texts()
 		.ov_solo_off_word = "not soloed",
 		.ov_rcv_fmt = "Receive %s   M %d  L %d",
 		.ov_range_fmt = "%s %s (%d-%d)",
-		.ov_kb_audition_tip = "Left-click to play (lower is louder). Right-click to set the key used for voice audition\n"
+		.ov_kb_audition_tip = "Left-click to play (lower is louder). Right-click to mark a key for voice audition, right-click again to clear it\n"
+		                      "Mark as many keys as you like for a chord; with no mark, changing voice plays nothing. Marks are per part and are not remembered\n"
 		                      "PC keyboard plays too: A W S E D F T G Y H U J K O L P ; from C (Z / X for octave)",
 		.ov_kb_play_tip = "Press to play (either mouse button). Lower is louder",
 		.ov_mod_tip_fmt = "Modulation (CC1)  %d\nWheel (Ctrl for coarse), or drag up/down",

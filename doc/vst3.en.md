@@ -199,6 +199,55 @@ So the plug-in implements `IUnitInfo`.
 16 channels connects "unit → 128-voice list → flagged parameter (the same as
 `IMidiMapping` number 130)". Not yet tried in Cubase itself.
 
+### In SONAR, program changes for ports B-D arrive on port A (checked 2026-09-27)
+
+SONAR delivers program changes through `getUnitByBus` like Cubase, but it
+**only ever asks about port A (bus 0)**. A program change sent from a track on
+port B arrives as if it were for the same channel on port A, so the part on
+port A changes voice instead of the one on port B. Notes, control changes and
+pitch bend do reach ports B-D correctly.
+
+The plug-in has no way to tell which port such a program change was really
+meant for, so this cannot be fixed on our side. REAPER uses `IMidiMapping`
+number 130 and is not affected. To use ports B-D in SONAR, pick one of these:
+
+1. **Send voice selections as SysEx.** XG parameter changes
+   (`F0 43 10 4C 08 pp 01 msb F7`, `… 02 lsb F7`, `… 03 prog F7`, where pp is the
+   part number 0x10-0x3F) arrive as events on their own bus, so the port is not
+   lost. **`tools/pc2sysex.py` rewrites a MIDI file for you:**
+
+   ```
+   python tools/pc2sysex.py song.mid          # writes song_pc2sx.mid
+   ```
+
+   Program changes on port B and later (told apart by each track's port
+   meta event `FF 21`) become three SysEx messages to every part receiving that
+   channel. The bank is whatever CC0/CC32 arrived before (MSB 127 for drums also
+   switches the part to drums when set by SysEx; checked). If the song reassigns
+   XG receive channels (08 pp 04), that is followed. Port A is left alone
+   (`--all` converts it too). On a two-port song from a user, the converted and
+   original files rendered through the firmware agree within 1.4 dB in every band
+2. **Leave program changes out of the MIDI and choose voices on the plug-in's
+   panel.** What you set there is saved with the project. Changing voices in
+   the middle of a song then needs a DAW that can automate the plug-in's state
+3. **Insert one S-MU2000 per port and route each track to its own instance.**
+   Every instance receives on its port A as 16 parts, so the problem does not
+   arise. Each instance costs CPU, so `native_engine=1` (see "Several
+   instances") is a good companion
+
+When the plug-in is stopped (`setActive(false)`) it writes one "per-port"
+line to the log (`%LOCALAPPDATA%\S-MU2000\log.txt`): how many times the host
+asked about CC mappings and units for each port, and how many CCs, program
+changes and note events arrived on each. If something looks wrong in a host
+that uses several ports, look there first. SONAR gives:
+
+```
+CC mapping queries [A 2080 / B 2080 / C 2080 / D 2080], program-change unit queries [A 144 / B 0 / C 0 / D 0],
+CCs received [A 207 / B 63 / …], program changes received [A 23 / B 0 / …], events received (notes etc.) [A 21172 / B 696 / …]
+```
+
+(The log line itself is in Japanese.)
+
 ### Hosts that do not follow the table
 
 Some hosts do not deliver as the table says. VSTHost 1.58 puts program

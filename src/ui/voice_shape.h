@@ -309,6 +309,25 @@ inline int vib_ramp_settled(const u8 *rom, const u8 *el, int dpt)
 	return vib_ramp_value(rom, dpt, xg::nv::vib_ramp_target(el), 127);
 }
 
+// **絵の横幅（ミリ秒）をパートに合わせて決める**（6.232）。Vib Delay は
+// つまみ 127 で 206 目盛り ＝ 4.1 秒まで伸びるので、1.5 秒に固定していると
+// 「掛かり始め」が窓の外に出て、絵が平らなだけになる。掛かり始めのうしろに
+// 揺れが 2 つ 3 つ見えるだけの余白を足す
+inline float vib_span_ms(const u8 *rom, u32 rec, const u8 *part, float base_ms = 1500.0f)
+{
+	namespace nv = xg::nv;
+	if (!rom || !rec)
+		return base_ms;
+	float dly = 0.0f;
+	const int n = nv::element_count(rom, rec);
+	for (int e = 0; e < n; e++) {
+		const u8 *el = nv::element(rom, rec, e);
+		const int t = nv::vib_delay(nv::vib_delay_ticks(el), int(part[0x17]));
+		dly = std::max(dly, float(t) * float(nv::VIB_TICK) / float(RATE) * 1000.0f);
+	}
+	return std::max(base_ms, dly * 1.25f + 400.0f);
+}
+
 inline std::vector<vib_line> vib_lines(const u8 *rom, u32 rec, const u8 *part, float span_ms)
 {
 	namespace nv = xg::nv;
@@ -336,12 +355,17 @@ inline std::vector<vib_line> vib_lines(const u8 *rom, u32 rec, const u8 *part, f
 		// 表[c] = VIB_REG_TAB[VIB_CNT_TAB[c]]。前はせり上がりを音色の小さな表で止め、bit7 も落としていたので、
 		// Vib Depth を上げても絵が数セントのまま動かなかった
 		const int dpt = part[0x16];
+		// **遅れのつまみ**（08 pp 17。6.232）も絵に入れる。前は音色自身の
+		// 遅れ（byte12）だけを見ていたので、Vib Delay を動かしても
+		// 「掛かり始め」の線が動かなかった。つまみで遅れが付いた音色は、
+		// 自身がせり上がらなくても遅れて掛かる（native の口と同じ判断）
+		const int dly_t = nv::vib_delay(nv::vib_delay_ticks(el), int(part[0x17]));
 		int dly = 0, step = 0, tgt = 0;
-		const bool ramps = nv::vib_ramps(el);
+		const bool ramps = nv::vib_ramps(el) || dly_t > 0;
 		if (ramps) {
 			tgt  = nv::vib_ramp_target(el);
 			step = nv::vib_ramp_step(el);
-			dly  = nv::vib_delay_ticks(el);
+			dly  = dly_t;
 		}
 		// bit7 を落とした深さ 127 で回して、深さの比（と bit7 なら 8 倍）で伸び縮みさせる（get_pitch は深さに比例）
 		swp30_device::lfo_pitch_trace(u16((reg & 0xff00) | 0x7f), wave.data(), N);
@@ -350,7 +374,9 @@ inline std::vector<vib_line> vib_lines(const u8 *rom, u32 rec, const u8 *part, f
 		auto scale = [](int d) { return double(d & 0x7f) / 127.0 * ((d & 0x80) ? 8.0 : 1.0); };
 		int depth = ramps ? 0 : (reg & 0xff);
 		int c1 = 0, c2 = 0, left = dly;
-		bool started = false;
+		// **絵の外まで遅れることがある**（つまみ 127 で 206 目盛り ＝ 4.1 秒）。
+		// 輪の中で入れていると、窓に入らない遅れが 0 に見えるので先に入れる
+		line.delay_ms = float(dly) * float(nv::VIB_TICK) / float(RATE) * 1000.0f;
 		float peak = 0;
 		for (int i = 0; i < N; i += 32) {
 			if (ramps && i > 0 && i % tick < 32) {
@@ -360,9 +386,6 @@ inline std::vector<vib_line> vib_lines(const u8 *rom, u32 rec, const u8 *part, f
 					c1 = std::min(tgt, c1 + step);
 					c2 = std::min(127, c2 + 5);
 					depth = vib_ramp_value(rom, dpt, c1, c2);
-					if (!started && dly > 0)
-						line.delay_ms = float(i / RATE * 1000.0);
-					started = true;
 				}
 			}
 			const float c = float(double(wave[size_t(i)]) * scale(depth) * unit);
