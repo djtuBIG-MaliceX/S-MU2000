@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <functional>
+#include <initializer_list>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -52,6 +53,39 @@ inline int midi_length(uint8_t status)
 		}
 	default: return 3;
 	}
+}
+
+// **音源を初期値に戻す SysEx か**（GM・GM2 On、GS リセット、XG System On・All Parameter Reset）。
+// 頭の F0 はあってもなくてもよい。
+//
+// プラグインは、同じ時刻に来たメッセージのうち**リセットを先に**流す（issue #51）。
+// VST3 にはコントロールチェンジ・プログラムチェンジのイベントが無く、ホストはパラメータの
+// 変化として別に渡してくる。foo_midi のように SysEx をチャンネルメッセージと別に渡すホストもある。
+// どちらも同じ時刻での前後が失われ、曲頭の「XG System On → 音色の指定」が
+// 「音色の指定 → XG System On」になって、リセットが音色を全部消していた（全パートがピアノになる）。
+// 曲の中でリセットが同じ時刻のほかのメッセージより後ろに来る意味はまず無いので、先に出してよい
+inline bool is_reset_sysex(const uint8_t *p, size_t n)
+{
+	if (n && p[0] == 0xf0) {
+		p++;
+		n--;
+	}
+	auto is = [&](std::initializer_list<int> want, int any_low_nibble_at = -1) {
+		if (n < want.size())
+			return false;
+		size_t i = 0;
+		for (int w : want) {
+			const uint8_t v = int(i) == any_low_nibble_at ? uint8_t(p[i] & 0xf0) : p[i];
+			if (w >= 0 && v != w)
+				return false;
+			i++;
+		}
+		return true;
+	};
+	return is({ 0x7e, -1, 0x09, 0x01 }) || is({ 0x7e, -1, 0x09, 0x03 }) ||          // GM / GM2 On
+	       is({ 0x43, 0x10, 0x4c, 0x00, 0x00, 0x7e, 0x00 }, 1) ||                     // XG System On
+	       is({ 0x43, 0x10, 0x4c, 0x00, 0x00, 0x7f, 0x00 }, 1) ||                     // XG All Parameter Reset
+	       is({ 0x41, -1, 0x42, 0x12, 0x40, 0x00, 0x7f, 0x00, 0x41 });                // GS Reset
 }
 
 enum class status {

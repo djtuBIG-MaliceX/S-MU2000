@@ -272,7 +272,8 @@ inline const ui_texts &ja_texts()
 		.ov_solo_off_word = "ソロの外",
 		.ov_rcv_fmt = "受信 %s   M %d  L %d",
 		.ov_range_fmt = "%s %s（%d-%d）",
-		.ov_kb_audition_tip = "左クリックで鳴らす（下ほど強く）。右クリックで、音色を替えたときに試聴で鳴らす鍵を決める\n"
+		.ov_kb_audition_tip = "左クリックで鳴らす（下ほど強く）。右クリックで試聴の鍵に印、もう一度右クリックで印を消す\n"
+		                      "何鍵でも付けられる（和音で試聴）。印が無ければ音色を替えても鳴らない。印はパートごとで、覚えない\n"
 		                      "PC のキーボードでも弾ける: A W S E D F T G Y H U J K O L P ; が C から（Z / X でオクターブ）",
 		.ov_kb_play_tip = "押すと鳴らす（左右どちらのボタンでも）。下ほど強く",
 		.ov_mod_tip_fmt = "モジュレーション（CC1）  %d\nホイールで回す（Ctrl で大きく）・上下にドラッグ",

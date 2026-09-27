@@ -282,10 +282,11 @@ across both rows, and a gap would break them. Columns are one dot apart.
 
 The lower face is arranged differently from the upper.
 
-* "01" and "A01" have **their columns packed within each block**, with two dots between blocks
-* three dots on, the instrument picture. **Only this area has finer, non-square dots**: a 20-wide by 16-high image squeezed into one text row's height
+* the five characters of "01" and "A01" are spaced 1, 2, 1, 1 dots apart from the left (the 2-dot gap is where the blocks meet)
+* half a dot on, the instrument picture. **Only this area has finer, non-square dots**: a 20-wide by 16-high image squeezed into one text row's height
 * to its right, the VOL / EXP / PAN / REV / CHO / VAR / KEY segments
-* at the far right, three small `▶` marks for XG / TG300B / PERFORM
+* at the far right, four small `▶` marks. The top one has no label; the rest are XG / GS (TG300B) / PERFORM.
+  The labels beside the window are drawn at these marks' heights (`modes.x` in panel.txt sets only their x)
 
 **Column 23 is not a picture but 64 bits that switch fixed-shape segments
 on and off.** The pan knob, the reverb/chorus/variation fans, the note-shift

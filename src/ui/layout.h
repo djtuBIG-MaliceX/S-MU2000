@@ -58,12 +58,13 @@ struct layout
 	double round_[2][4];                   // SELECT と AUDITION
 	double dial[3];                        // 大きなダイヤル x y 半径
 	double volume[3];                      // 音量つまみ x y 半径（中心）
+	double adgain[3];                      // A/D INPUT のつまみ x y 半径（半径 0 なら無い）
 
 	// つまみの絵。SVG を渡すと、組み込みの絵の代わりに**回して**描く。
 	//   dial   893 268 58 "dial.svg"
 	//   volume 141 154 30 "knob.svg"
-	std::string dial_art_path, volume_art_path;
-	std::shared_ptr<svg_art> dial_art, volume_art;
+	std::string dial_art_path, volume_art_path, adgain_art_path;
+	std::shared_ptr<svg_art> dial_art, volume_art, adgain_art;
 
 	// ボタンと表示灯の絵。**ようす（消えている／点いている／押している）
 	// ごとに 1 枚**渡す。押しているぶんを省くと、点いているぶんで代える
@@ -86,10 +87,17 @@ struct layout
 		}
 	};
 	art_set mode_art, nav_art, cat_art, round_art, plg_art;
+	// ボタンごとの点灯の絵（mode.on <名前> "絵"）。実機は SAMPLING だけ赤く光る
+	std::shared_ptr<svg_art> mode_on[6];
+	std::string mode_on_path[6];
 
-	int    low_x[11], low_w[11];           // LCD 下段の並び（点の単位）
+	double low_x[11], low_w[11];           // LCD 下段の並び（上の面の点の間隔が単位。端数も可）
 	double columns_y;                      // 窓の下の札の高さ
+	double modes_x;                        // 右の札（XG / GS / PERFORM）の左端。負なら描かない
 	double plg[3];                         // MU / PLG-1..3 の表示灯 左端 間隔 y
+	double plg_size[2];                    // 表示灯の絵の幅と高さ
+	bool   labels_in_art;                  // 印刷された札は絵に入っている（コードで書かない）
+	bool   lcd_frame;                      // LCD のまわりの枠をコードで描く
 
 	// 押すと品書きが出るところ。絵を描き替えたときに合わせられるよう、
 	// 当たりの四角だけ持っている

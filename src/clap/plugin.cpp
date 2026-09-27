@@ -127,7 +127,7 @@ public:
 		m_plugin.init             = [](const clap_plugin *p) { return self(p)->init(); };
 		m_plugin.destroy          = [](const clap_plugin *p) { delete self(p); };
 		m_plugin.activate         = [](const clap_plugin *p, double rate, uint32_t, uint32_t) { return self(p)->activate(rate); };
-		m_plugin.deactivate       = [](const clap_plugin *) {};
+		m_plugin.deactivate       = [](const clap_plugin *p) { self(p)->report_ports(); };
 		m_plugin.start_processing = [](const clap_plugin *p) { return self(p)->start_processing(); };
 		m_plugin.stop_processing  = [](const clap_plugin *p) { self(p)->stop_processing(); };
 		m_plugin.reset            = [](const clap_plugin *p) { self(p)->m_hush.store(true); };
@@ -145,6 +145,7 @@ public:
 
 	~mu_plugin()
 	{
+		report_ports();
 		gui_destroy();
 		m_engine.set_edit_handlers(nullptr, nullptr);
 	}
@@ -526,8 +527,139 @@ private:
 	// 出力レベルは bridge が持つ。ここは 1 サンプルずつ寄せる途中の値
 	float                  m_gain_now = 1.0f;
 	std::atomic<bool>      m_hush{false};
+	// **口ごとの内訳**（report_ports でログへ。issue #59）。ホストがノートを
+	// どの形（MIDI・CLAP のノート）・どの口番号で渡してくるかを数える。
+	// [形][口]。形 0 = MIDI のノートオン、1 = CLAP のノートオン、2 = MIDI（ノートオン以外）、
+	// 3 = SysEx。口 4 は範囲の外（-1 など）
+	std::atomic<uint32_t>  m_seen[4][kPorts + 1] = {};
+	void count_port(int kind, uint16_t index)
+	{
+		m_seen[kind][index < kPorts ? index : kPorts].fetch_add(1, std::memory_order_relaxed);
+	}
+	// 本スレッド（deactivate・消えるとき）から呼ぶ。何も来ていなければ書かない
+	void report_ports()
+	{
+		static const char *const KIND[4] = { "MIDI のノートオン", "CLAP のノートオン", "MIDI（ほか）", "SysEx" };
+		std::string line = "口ごとの内訳:";
+		bool any = false;
+		for (int k = 0; k < 4; k++) {
+			char buf[128];
+			uint32_t v[kPorts + 1];
+			for (int i = 0; i <= kPorts; i++) {
+				v[i] = m_seen[k][i].exchange(0, std::memory_order_relaxed);
+				any = any || v[i];
+			}
+			std::snprintf(buf, sizeof(buf), " %s [A %u / B %u / C %u / D %u / 範囲外 %u]",
+			              KIND[k], v[0], v[1], v[2], v[3], v[4]);
+			line += buf;
+		}
+		if (const uint64_t dropped = m_bcast_dropped.exchange(0, std::memory_order_relaxed)) {
+			char buf[128];
+			std::snprintf(buf, sizeof(buf), "。全部の口に配られていたので口 B-D の %llu 件を捨てた",
+			              (unsigned long long)dropped);
+			line += buf;
+			any = true;
+		}
+		if (any)
+			m_engine.log_line(line.c_str());
+	}
 	// 音を出したチャンネル（口ごとに 16 ビット）。止めるときに流す先を絞る
 	std::atomic<uint16_t>  m_sounded[mu2000::MIDI_PORTS] = {};
+
+	// process で時刻順（同じ時刻はリセットを先）に並べ直すための入れ物
+	struct ordered { uint32_t time, rank, index; };
+	std::vector<ordered> m_order;
+
+	// **全部の口に配られた同じメッセージは、口 A の 1 つだけ使う**（issue #59）。
+	// REAPER は CLAP のノートの口を 4 つ持つプラグインに、トラックの MIDI を
+	// 4 つの口すべてへ同じものとして配る（ログで確かめた: 1 音で A・B・C・D に 6 件ずつ）。
+	// そのままでは口 B-D のパート（初期のピアノ）も鳴って、音色が重なって聞こえる。
+	// 同じ時刻・同じ中身のものが**4 つの口すべて**に来たときだけ口 A に寄せるので、
+	// 口ごとに違うものを渡すホストや、2-3 口に重ねる使い方はそのまま
+	struct bcast { uint64_t key; uint32_t index; uint8_t port; };
+	std::vector<bcast>   m_bcast;
+	std::vector<uint8_t> m_drop;
+	std::atomic<uint64_t> m_bcast_dropped{0};
+
+	// そのイベントの「口を除いた中身」の指紋。口の無い・数えないものは 0
+	static uint64_t event_key(const clap_event_header_t *h, uint32_t time, int &port)
+	{
+		uint64_t k = 1469598103934665603ull;
+		auto mix = [&k](const void *p, size_t n) {
+			const uint8_t *b = static_cast<const uint8_t *>(p);
+			for (size_t i = 0; i < n; i++) {
+				k ^= b[i];
+				k *= 1099511628211ull;
+			}
+		};
+		mix(&time, sizeof(time));
+		mix(&h->type, sizeof(h->type));
+		switch (h->type) {
+		case CLAP_EVENT_MIDI: {
+			const auto *e = reinterpret_cast<const clap_event_midi_t *>(h);
+			port = e->port_index;
+			mix(e->data, 3);
+			break;
+		}
+		case CLAP_EVENT_MIDI_SYSEX: {
+			const auto *e = reinterpret_cast<const clap_event_midi_sysex_t *>(h);
+			port = e->port_index;
+			if (e->buffer)
+				mix(e->buffer, e->size);
+			mix(&e->size, sizeof(e->size));
+			break;
+		}
+		case CLAP_EVENT_NOTE_ON:
+		case CLAP_EVENT_NOTE_OFF:
+		case CLAP_EVENT_NOTE_CHOKE: {
+			const auto *e = reinterpret_cast<const clap_event_note_t *>(h);
+			port = e->port_index;
+			mix(&e->channel, sizeof(e->channel));
+			mix(&e->key, sizeof(e->key));
+			mix(&e->velocity, sizeof(e->velocity));
+			break;
+		}
+		default:
+			port = -1;
+			return 0;
+		}
+		return k ? k : 1;
+	}
+
+	// 4 つの口すべてに同じものが来ていたら、口 B-D のものに印を付ける（m_drop）
+	void mark_broadcast(const clap_input_events_t *ev, uint32_t count, uint32_t n)
+	{
+		m_drop.assign(count, 0);
+		m_bcast.clear();
+		for (uint32_t i = 0; i < count; i++) {
+			const clap_event_header_t *h = ev->get(ev, i);
+			if (!h || h->space_id != CLAP_CORE_EVENT_SPACE_ID)
+				continue;
+			int port = -1;
+			const uint64_t k = event_key(h, std::min(h->time, n), port);
+			if (k && port >= 0 && port < kPorts)
+				m_bcast.push_back({ k, i, uint8_t(port) });
+		}
+		if (m_bcast.size() < size_t(kPorts))
+			return;
+		std::sort(m_bcast.begin(), m_bcast.end(), [](const bcast &a, const bcast &b) {
+			return a.key != b.key ? a.key < b.key : a.index < b.index;
+		});
+		for (size_t g = 0; g < m_bcast.size();) {
+			size_t e = g;
+			unsigned mask = 0;
+			while (e < m_bcast.size() && m_bcast[e].key == m_bcast[g].key)
+				mask |= 1u << m_bcast[e++].port;
+			if (mask == (1u << kPorts) - 1) {
+				for (size_t j = g; j < e; j++)
+					if (m_bcast[j].port != 0) {
+						m_drop[m_bcast[j].index] = 1;
+						m_bcast_dropped.fetch_add(1, std::memory_order_relaxed);
+					}
+			}
+			g = e;
+		}
+	}
 
 	// 音を作る途中の入れ物。process の間だけ有効
 	float       *m_left = nullptr, *m_right = nullptr;
@@ -752,13 +884,32 @@ clap_process_status mu_plugin::process(const clap_process_t *pr)
 	// イベントは時刻順に来る。その時刻まで音を作ってから流す
 	m_xg.begin_block();
 	if (const clap_input_events_t *ev = pr->in_events) {
+		// 同じ時刻ならリセットの SysEx を先に（engine.h の is_reset_sysex。issue #51）。
+		// ホストによっては SysEx をチャンネルメッセージの後ろにまとめて渡してくる
 		const uint32_t count = ev->size(ev);
+		m_order.clear();
+		mark_broadcast(ev, count, n);
 		for (uint32_t i = 0; i < count; i++) {
 			const clap_event_header_t *h = ev->get(ev, i);
-			if (!h || h->space_id != CLAP_CORE_EVENT_SPACE_ID)
+			if (!h || h->space_id != CLAP_CORE_EVENT_SPACE_ID || m_drop[i])
 				continue;
-			fill_to(std::min(h->time, n));
-			event(h);
+			bool reset = false;
+			if (h->type == CLAP_EVENT_MIDI_SYSEX) {
+				const auto *e = reinterpret_cast<const clap_event_midi_sysex_t *>(h);
+				reset = e->buffer && smu2000::vst3::is_reset_sysex(e->buffer, e->size);
+			}
+			m_order.push_back({ std::min(h->time, n), reset ? 0u : 1u, i });
+		}
+		std::sort(m_order.begin(), m_order.end(), [](const ordered &a, const ordered &b) {
+			if (a.time != b.time)
+				return a.time < b.time;
+			if (a.rank != b.rank)
+				return a.rank < b.rank;
+			return a.index < b.index;
+		});
+		for (const ordered &o : m_order) {
+			fill_to(o.time);
+			event(ev->get(ev, o.index));
 		}
 	}
 	fill_to(n);
@@ -794,6 +945,7 @@ void mu_plugin::event(const clap_event_header_t *h)
 	case CLAP_EVENT_MIDI: {
 		const auto *e = reinterpret_cast<const clap_event_midi_t *>(h);
 		const int port = port_of(e->port_index);
+		count_port((e->data[0] & 0xf0) == 0x90 && e->data[2] ? 0 : 2, e->port_index);
 		if ((e->data[0] & 0xf0) == 0x90 && e->data[2])
 			m_sounded[port] |= uint16_t(1u << (e->data[0] & 15));
 		m_engine.midi(e->data, size_t(midi_length(e->data[0])), port);
@@ -801,6 +953,7 @@ void mu_plugin::event(const clap_event_header_t *h)
 	}
 	case CLAP_EVENT_MIDI_SYSEX: {
 		const auto *e = reinterpret_cast<const clap_event_midi_sysex_t *>(h);
+		count_port(3, e->port_index);
 		if (e->buffer && e->size)
 			m_engine.midi(e->buffer, e->size, port_of(e->port_index));
 		break;
@@ -810,6 +963,8 @@ void mu_plugin::event(const clap_event_header_t *h)
 	case CLAP_EVENT_NOTE_OFF:
 	case CLAP_EVENT_NOTE_CHOKE: {
 		const auto *e = reinterpret_cast<const clap_event_note_t *>(h);
+		if (h->type == CLAP_EVENT_NOTE_ON)
+			count_port(1, uint16_t(e->port_index));
 		if (e->channel < 0 || e->channel > 15 || e->key < 0 || e->key > 127)
 			break;
 		const bool on = h->type == CLAP_EVENT_NOTE_ON;

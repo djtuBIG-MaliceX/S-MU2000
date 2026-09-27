@@ -188,6 +188,11 @@ BOOL Polygon(HDC dc, const POINT *pts, int n);
 BOOL PolyPolygon(HDC dc, const POINT *pts, const INT *counts, int n);
 BOOL Polyline(HDC dc, const POINT *pts, int n);
 
+// Not GDI: pastes w x h pixels at (x, y), each 0xAARRGGBB with alpha already
+// multiplied in (the layout Cairo's ARGB32 and a little-endian CGImage use).
+// Windows does the same through GdiAlphaBlend (see ui/svg.cpp)
+BOOL smu_blit_premul(HDC dc, int x, int y, int w, int h, const uint32_t *px);
+
 COLORREF SetTextColor(HDC dc, COLORREF color);
 int      SetBkMode(HDC dc, int mode);
 int      SetBkColor(HDC dc, COLORREF color);

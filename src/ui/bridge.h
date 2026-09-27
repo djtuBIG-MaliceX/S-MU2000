@@ -214,6 +214,39 @@ public:
 		return -1;
 	}
 
+	// ---- 全パートの音と最終の出力（一覧の小さなスペクトラム）。一覧が描くたびに want_part_scopes を
+	// 呼び、音声の糸は最後に呼ばれてから 0.5 秒のあいだだけ溜めて置く（mu2000::part_scope_read）
+	static constexpr size_t PSCOPE_N = mu2000::PSCOPE_N;
+	static constexpr int PSCOPE_SRCS = 65;                 // 64 パートと最終の出力（64）
+	void want_part_scopes() { m_pscope_want_ms.store(audio_ms() + 1, std::memory_order_relaxed); }
+	bool part_scopes_wanted() const
+	{
+		const u64 t = m_pscope_want_ms.load(std::memory_order_relaxed);
+		return t && audio_ms() + 1 < t + 500;
+	}
+	void publish_part_scopes(const float *all)
+	{
+		m_pscope_seq.fetch_add(1, std::memory_order_release);
+		std::memcpy(m_pscope.data(), all, m_pscope.size() * sizeof(float));
+		m_pscope_seq.fetch_add(1, std::memory_order_release);
+	}
+	// 置いた回数（変わっていなければ読み直さなくてよい）。0 はまだ無い
+	unsigned part_scopes_serial() const { return m_pscope_seq.load(std::memory_order_acquire) / 2; }
+	bool read_part_scope(int src, float *out) const
+	{
+		if (src < 0 || src >= PSCOPE_SRCS)
+			return false;
+		for (int tries = 0; tries < 8; tries++) {
+			const unsigned a = m_pscope_seq.load(std::memory_order_acquire);
+			if (a & 1)
+				continue;
+			std::memcpy(out, m_pscope.data() + size_t(src) * PSCOPE_N, PSCOPE_N * sizeof(float));
+			if (m_pscope_seq.load(std::memory_order_acquire) == a)
+				return a != 0;
+		}
+		return false;
+	}
+
 	void publish(const snapshot &s)
 	{
 		m_seq.fetch_add(1, std::memory_order_release);
@@ -283,6 +316,9 @@ private:
 	std::atomic<unsigned> m_scope_seq{0};
 	std::vector<float>    m_scope = std::vector<float>(size_t(SCOPE_SRCS) * SCOPE_N);
 	int                   m_scope_part = -1;
+	std::atomic<u64>      m_pscope_want_ms{0};
+	std::atomic<unsigned> m_pscope_seq{0};
+	std::vector<float>    m_pscope = std::vector<float>(size_t(PSCOPE_SRCS) * PSCOPE_N);
 	xg_snapshot           m_xg;
 	std::atomic<bool>     m_want_defaults{false};
 	std::atomic<bool>     m_have_defaults{false};

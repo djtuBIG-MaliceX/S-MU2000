@@ -707,6 +707,29 @@ BOOL Polyline(HDC hdc, const POINT *pts, int n)
 	return TRUE;
 }
 
+BOOL smu_blit_premul(HDC hdc, int x, int y, int w, int h, const uint32_t *px)
+{
+	gdi_dc *dc = static_cast<gdi_dc *>(hdc);
+	if (!dc || !dc->ctx || !px || w <= 0 || h <= 0)
+		return FALSE;
+	// ARGB32 is exactly our layout: native-endian 0xAARRGGBB, premultiplied.
+	// The surface only borrows px, and is gone before we return
+	cairo_surface_t *s = cairo_image_surface_create_for_data(
+		reinterpret_cast<unsigned char *>(const_cast<uint32_t *>(px)),
+		CAIRO_FORMAT_ARGB32, w, h, w * 4);
+	if (cairo_surface_status(s) != CAIRO_STATUS_SUCCESS) {
+		cairo_surface_destroy(s);
+		return FALSE;
+	}
+	cairo_save(dc->ctx);
+	cairo_set_source_surface(dc->ctx, s, double(x), double(y));
+	cairo_rectangle(dc->ctx, double(x), double(y), double(w), double(h));
+	cairo_fill(dc->ctx);
+	cairo_restore(dc->ctx);
+	cairo_surface_destroy(s);
+	return TRUE;
+}
+
 // ---- State ----------------------------------------------------------------
 
 COLORREF SetTextColor(HDC hdc, COLORREF color)

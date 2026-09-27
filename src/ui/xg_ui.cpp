@@ -532,11 +532,19 @@ void select_voice(int part, int msb, int lsb, int prog, xg::model &m, bridge &br
 // 同じコマに送ると読み込む前の音色で鳴ることがある。ノートオンは少し遅らせる。
 // 送るのは画面のコマ（program_pane が描かれるたび）なので、窓を閉じたら audition_stop で止める
 struct audition {
-	int slot = -1, note = -1;          // 鳴らす先（口 × 16 + チャンネル）と鍵
+	int slot = -1;                     // 鳴らす先（口 × 16 + チャンネル）
+	std::vector<int> notes;            // 鳴らす鍵（印の付いたもの。和音になる）
 	double on_at = -1.0, off_at = -1.0;
 	bool sounding = false;
 };
 audition g_audition;
+
+// **試聴の鍵の印**。パートごとに持ち、**覚えない**（開き直すと空）。
+// 空のパートは音色を替えても鳴らさない ＝ 鳴らすかどうかを自分で決められる
+bool g_audition_keys[XG_PARTS][128] = {};
+
+// 一度に鳴らす数の上限。印を付けすぎても発音数を食いつぶさないように
+constexpr int AUDITION_MAX = 8;
 
 double now_seconds()
 {
@@ -546,24 +554,30 @@ double now_seconds()
 void audition_off(bridge &br)
 {
 	audition &a = g_audition;
-	if (a.sounding) {
-		const u8 off[3] = { u8(0x80 | (a.slot & 15)), u8(a.note), 64 };
-		br.send_port(a.slot / 16, off, 3);
-	}
+	if (a.sounding)
+		for (int n : a.notes) {
+			const u8 off[3] = { u8(0x80 | (a.slot & 15)), u8(n), 64 };
+			br.send_port(a.slot / 16, off, 3);
+		}
 	a = audition{};
 }
 
-// 試聴を始める。受信が OFF（ミュート中など）なら鳴らさない
+// 試聴を始める。受信が OFF（ミュート中など）なら鳴らさない。
+// **鍵盤に印が 1 つも無ければ鳴らさない**（既定はこちら）
 void audition_start(int part, int msb, xg::model &m, bridge &br)
 {
+	(void)msb;
 	audition_off(br);
 	int rcv = 127;
 	if (!m.get(P("part.rcv_channel"), part, rcv) || rcv < 0 || rcv > 63)
 		return;
+	int keys[AUDITION_MAX];
+	const int n = audition_keys(part, keys, AUDITION_MAX);
+	if (n <= 0)
+		return;
 	audition &a = g_audition;
 	a.slot = rcv;
-	// 鍵盤の右クリックで決めた鍵。決まっていなければドラムキットはスネア、ほかは C3（60）
-	a.note = audition_note() >= 0 ? audition_note() : msb == 127 ? 38 : 60;
+	a.notes.assign(keys, keys + n);
 	const double t = now_seconds();
 	a.on_at = t + 0.06;
 	a.off_at = a.on_at + 1.0;
@@ -576,8 +590,10 @@ void audition_tick(bridge &br)
 		return;
 	const double t = now_seconds();
 	if (!a.sounding && t >= a.on_at) {
-		const u8 on[3] = { u8(0x90 | (a.slot & 15)), u8(a.note), 100 };
-		br.send_port(a.slot / 16, on, 3);
+		for (int n : a.notes) {
+			const u8 on[3] = { u8(0x90 | (a.slot & 15)), u8(n), 100 };
+			br.send_port(a.slot / 16, on, 3);
+		}
 		a.sounding = true;
 	}
 	if (a.sounding && t >= a.off_at)
@@ -946,6 +962,11 @@ const help_text HELP[] = {
 	{ "INS 2", { "インサーションエフェクト 2。使い方は INS 1 と同じ", "Insertion effect 2. Works like INS 1." } },
 	{ "INS 3", { "インサーションエフェクト 3。使い方は INS 1 と同じ", "Insertion effect 3. Works like INS 1." } },
 	{ "INS 4", { "インサーションエフェクト 4。使い方は INS 1 と同じ", "Insertion effect 4. Works like INS 1." } },
+	{ "SPECTRUM", {
+		"最終の出力（スピーカーに出る音。エフェクトとマスター EQ のあと）のスペクトラム。\n"
+		"横は周波数（30Hz〜16kHz）、縦は大きさ（いちばん大きい所から 60dB）",
+		"The spectrum of the final output (what reaches the speakers, after the effects and the master EQ).\n"
+		"Frequency sideways (30 Hz to 16 kHz), level upwards (60 dB below the loudest point)." } },
 	{ "MASTER EQ", {
 		"マスター EQ。全部の音の最後に掛かる 5 つの帯のイコライザ。左が低い音、右が高い音。\n"
 		"点をつまんで、横で周波数、縦でゲイン（±12dB）。点の近くでホイールを回すと幅（Q）。\n"
@@ -973,6 +994,13 @@ const help_text HELP[] = {
 	{ "VEL", {
 		"鍵盤を弾いた強さ（ベロシティ）。音が鳴るたびに跳ねて、落ちていく",
 		"How hard the key was played (velocity). Jumps on each note and falls back." } },
+	{ "SPEC", {
+		"このパートがいま出している音のスペクトラム。横は周波数（左が低い 30Hz、右が高い 16kHz）、\n"
+		"縦は大きさ（そのパートのいちばん大きい所から 60dB）。声ごとの出力をパートに振り分けて足したもの\n"
+		"（インサーション・システムエフェクトより前）",
+		"The spectrum of what this part is playing now. Frequency sideways (30 Hz on the left to 16 kHz on the right),\n"
+		"level upwards (60 dB below this part's loudest point). The voices' outputs summed per part,\n"
+		"before insertion and system effects." } },
 	{ "VOL", {
 		"パートの音量（CC7 / Volume）。曲の中のパートどうしの大きさの釣り合いを取る",
 		"Part volume (CC7). Balances the loudness of the parts against each other." } },
@@ -1145,7 +1173,6 @@ float g_zoom = 0.625f;                 // 一覧の表示の大きさ
 float g_shapes_zoom = 0.6f;            // パートの音色の窓の表示の大きさ
 float g_master_zoom = 0.8f;            // マスターの窓の表示の大きさ
 unsigned g_shapes_knobs = 0;           // 音色の窓の区画ごとに「つまみで触る」か（ビットごと）
-int   g_audition_note = -1;            // 試聴で鳴らす鍵（-1 は決まっていない）
 bool  g_loaded = false;
 
 // Windows: %LOCALAPPDATA%\S-MU2000\editor.ini -- the same place gui.ini lives
@@ -1174,8 +1201,6 @@ void load_settings()
 			g_shapes_zoom = std::clamp(float(std::atof(line + 12)), 0.4f, 1.5f);
 		else if (!std::strncmp(line, "shapes_knobs=", 13))
 			g_shapes_knobs = unsigned(std::strtoul(line + 13, nullptr, 10));
-		else if (!std::strncmp(line, "audition_note=", 14))
-			g_audition_note = std::clamp(std::atoi(line + 14), -1, 127);
 		else if (!std::strncmp(line, "master_zoom=", 12))
 			g_master_zoom = std::clamp(float(std::atof(line + 12)), 0.4f, 1.5f);
 		else if (!std::strncmp(line, "lang=", 5))
@@ -1191,8 +1216,10 @@ void save_settings()
 		return;
 	smu2000::ensure_dir(path.substr(0, path.find_last_of("\\/")));
 	if (FILE *f = std::fopen(path.c_str(), "wb")) {
-		std::fprintf(f, "help=%d\nlang=%s\noverview_zoom=%.3f\nshapes_zoom=%.3f\nmaster_zoom=%.3f\naudition_note=%d\nshapes_knobs=%u\n",
-		             g_help ? 1 : 0, ui::lang_code(ui::get_lang()), g_zoom, g_shapes_zoom, g_master_zoom, g_audition_note,
+		// **試聴の鍵は覚えない**（開き直すと印は無し）。古い editor.ini に
+		// 残っている audition_note= の行は、読まないので消えていく
+		std::fprintf(f, "help=%d\nlang=%s\noverview_zoom=%.3f\nshapes_zoom=%.3f\nmaster_zoom=%.3f\nshapes_knobs=%u\n",
+		             g_help ? 1 : 0, ui::lang_code(ui::get_lang()), g_zoom, g_shapes_zoom, g_master_zoom,
 		             g_shapes_knobs);
 		std::fclose(f);
 	}
@@ -1316,20 +1343,30 @@ void set_shapes_zoom(float zoom)
 	}
 }
 
-int audition_note()
+// 試聴の鍵の印。**覚えない**ので ensure_loaded も save_settings も要らない
+bool audition_key(int part, int note)
 {
-	ensure_loaded();
-	return g_audition_note;
+	if (part < 0 || part >= XG_PARTS || note < 0 || note > 127)
+		return false;
+	return g_audition_keys[part][note];
 }
 
-void set_audition_note(int note)
+void toggle_audition_key(int part, int note)
 {
-	ensure_loaded();
-	note = std::clamp(note, -1, 127);
-	if (note != g_audition_note) {
-		g_audition_note = note;
-		save_settings();
-	}
+	if (part < 0 || part >= XG_PARTS || note < 0 || note > 127)
+		return;
+	g_audition_keys[part][note] = !g_audition_keys[part][note];
+}
+
+int audition_keys(int part, int *out, int max)
+{
+	if (part < 0 || part >= XG_PARTS || !out || max <= 0)
+		return 0;
+	int n = 0;
+	for (int k = 0; k < 128 && n < max; k++)
+		if (g_audition_keys[part][k])
+			out[n++] = k;
+	return n;
 }
 
 float &master_zoom()

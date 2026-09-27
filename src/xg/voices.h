@@ -133,7 +133,10 @@ public:
 	// （フィルタの第 2 係数が +20 にある。旋律は +80。doc の 6.85）
 	u32 drum_record(int kit, int note) const
 	{
-		// **bit7 が立っているときは別の道**（0x134DF0。SFX など）。まだ真似していない
+		// **bit7 が立っているときは別の道**（0x134DF0）。あちらは**ドラム
+		// セットアップ**の引き方で（4 組 × 79 鍵、DRAM の 0x01051A28 から
+		// 42 バイトずつ）、1 打の記録ではない。SFX キットはこの道を
+		// キット番号 47・48 で通る（doc/native-engine.md の 6.234）
 		if (!m_ok || (kit & 0x80))
 			return 0;
 		const u32 base = rd32(DRUM_KIT_TABLE + u32(kit & 0x7f) * 4);

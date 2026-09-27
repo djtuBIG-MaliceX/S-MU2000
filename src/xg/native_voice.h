@@ -172,6 +172,28 @@ inline wave_info read_wave(const u8 *e)
 	return w;
 }
 
+// **逆向きに鳴らすサンプル**（`0x14/0x15` の bit31）は、2 つの数を
+// **入れ替えて**書く（doc/native-engine.md の 6.233）。チップは後ろから
+// 読むので、「ループまでの数」と「ループの長さ」の役割が入れ替わる
+// （swp30.cpp の「Sample addressing, pitching and looping」の説明）。
+// 旗（上の 8bit）はそれぞれの側に残る。
+//
+// 記録のまま書くと、逆向きのまま長さ 1 で止まるので、**音程は合っているのに
+// ざらついた音**になる。実機と突き合わせて見つかったのは 2 つ:
+//   StandKit#・StandKit の鍵 47/48/50（Mid Tom L/H・High Tom）
+//     記録 pre=0x5302 loop=0x000001 → 実機 pre=0x000001 loop=0x5302
+//   AnalogKit の鍵 28
+//     記録 pre=0x5125 loop=0x002174 → 実機 pre=0x002174 loop=0x5125
+// 2 つ目は数がどちらも大きいので、「入れ替え」であって「1 を書く」ではない
+inline void wave_backwards_swap(u32 &pre, u32 &loop)
+{
+	if (!(loop & 0x80000000))
+		return;
+	const u32 a = pre & 0xffffff, b = loop & 0xffffff;
+	pre  = (pre  & 0xff000000) | b;
+	loop = (loop & 0xff000000) | a;
+}
+
 // 音程のレジスタ（0x11）。1 オクターブ = 1024、細かい調整はセント（**足す**）。
 // 実測（鍵 0-127・18 区画）と ±0.7 目盛りで合う
 // 鍵の追従率（記録の byte19）。**表は ROM の `0x1E5E58` に 6 個**
@@ -482,6 +504,39 @@ inline int vib_depth(int base, int cc)
 	const int t = int(VIB_DEPTH_TAB[c]);
 	const int v = c < 64 ? (t < base ? t : base) : (t > base ? t : base);
 	return v < 0 ? 0 : (v > 255 ? 255 : v);
+}
+
+// **ビブラートの遅れのつまみ**（08 pp 17 ＝ NRPN 01 0A）。20ms の目盛り。
+// firmware を 128 段ぜんぶ測って作った（doc/native-engine.md の 6.232）。
+// 測り方: 08 pp 17 だけを変えた MIDI を `--native-engine` 無しで鳴らし、
+// 押鍵から `0x0a` の深さが初めて増えるまでを数える
+// （押鍵からの時刻 = 5.2ms + 20ms × 目盛り。当てはめの外れは最大 0.15 目盛り）。
+//   下（0-63）は Shakuhachi（自身 33 目盛り）で「小さいほう」が勝つ側から、
+//   上（65-127）は Strings（自身 0）で「大きいほう」が勝つ側から読んだ
+constexpr u8 VIB_DLY_TAB[128] = {
+	  0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
+	  1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   1,   2,   2,   2,   2,
+	  2,   2,   2,   2,   3,   3,   3,   3,   3,   3,   3,   4,   4,   4,   4,   4,
+	  4,   5,   5,   5,   5,   5,   6,   6,   6,   6,   7,   7,   7,   8,   8,   8,
+	  0,   9,   9,  10,  10,  10,  11,  11,  11,  12,  12,  13,  14,  15,  16,  18,
+	 18,  19,  19,  19,  20,  21,  22,  23,  24,  26,  28,  30,  33,  35,  38,  38,
+	 39,  40,  41,  41,  42,  43,  44,  44,  45,  48,  51,  55,  59,  63,  68,  72,
+	 77,  81,  87,  93,  99, 107, 114, 123, 131, 138, 149, 159, 168, 183, 195, 206,
+};
+
+// **速さ・深さと同じ「大小で選ぶ」形**（6.232）。つまみが 64 なら音色のまま。
+// 64 より下なら小さいほう（＝つまみで遅れを詰められる）、上なら大きいほう。
+// 実機で確かめた例（Shakuhachi は自身 33 目盛り ＝ 665ms）:
+//   つまみ 0 → 0ms、16 → 25ms、32 → 45ms、48 → 85ms、63 → 165ms（どれも表が勝つ）
+//   つまみ 64 → 665ms、80 → 665ms（表は 18 目盛りなので自身が勝つ）
+inline int vib_delay(int base, int cc)
+{
+	if (cc < 0 || cc == 64)
+		return base;
+	const int c = cc > 127 ? 127 : cc;
+	const int t = int(VIB_DLY_TAB[c]);
+	const int v = c < 64 ? (t < base ? t : base) : (t > base ? t : base);
+	return v < 0 ? 0 : v;
 }
 
 // モジュレーション（CC1）→ レジスタ 0x0a の下位（LFO の深さ）に足す。
@@ -1855,6 +1910,44 @@ inline const u8 *drum_record(const u8 *rom, int kit, int note)
 	return off == 0xffff ? nullptr : rom + DRUM_RECORDS + off;
 }
 
+// **その記録に波形が埋まっているか**（doc/native-engine.md の 6.234）。
+// ふつうの打は +24/+25 が `FFFF` で、波形の記録（16 バイト）が +26 にそのまま
+// 入っている。**SFX キット**（MSB 126。キット番号 47 など）の打はそこが
+// `FFFF` でない 16bit の索引で、+26 から先は 0 のまま。波形はその索引の先に
+// あるが、**どの表を引くのかはまだ解けていない**（波形の組の番号でも、
+// 間隔の決まった要素の並びでもなかった）。
+// 埋まっていない記録を式で組むと、波形の番地が 0 になって雑音が鳴るので、
+// こういう打は firmware に回す
+inline bool drum_rec_has_wave(const u8 *rec)
+{
+	return rec && rd16(rec, 24) == 0xffff;
+}
+
+// **波形の埋まっていない打は、旋律の音色記録から組む**（6.234）。
+// +24/+25 は `(b24 << 7) | (b25 & 0x7f)` の索引で、`0x283B50` の 4 バイトの表を
+// 引くと音色記録（`VOICES` からの距離の半分。`VOICE_TABLE` と同じ形）が出る。
+// 実機はその記録の要素を押した鍵と強さで選び、**波形も音程も「鍵 64」として**
+// 組む（押した鍵は音程に効かない。SFX は鍵で高さを変えない音だから）。
+//   波形: `wave_entry(組, wave_note(要素, 64))` … キット 47・48 の 57 打すべてで一致
+//   音程: `pitch_reg(波形, 64, 追従, 粗調+微調, 支点)` … 73 スロット中 68 が一致
+//         （鍵 60 だと 2 つしか合わない。余りが「追従率 × 4」の形で出て 64 と分かった）
+// 表は GROUP_XG（0x283950）から 0x80 おきに並ぶ表の続きにある。
+// 実機の 0x134BE6 に仮の見張りを付けて引数を覗き、要素を指していると分かって解けた
+constexpr u32 SFX_VOICE_TABLE = 0x283B50;
+constexpr u32 SFX_VOICES      = 0x200ee0;   // xg::voice_rom::VOICES と同じ
+constexpr u32 SFX_VOICES_END  = 0x23cece;   // xg::voice_rom::VOICES_END と同じ
+constexpr int SFX_NOTE        = 64;         // 波形と音程を決める鍵（固定）
+
+inline u32 sfx_voice_record(const u8 *rom, const u8 *drec)
+{
+	if (!rom || !drec || drec[24] == 0xff)
+		return 0;
+	const u32 idx = (u32(drec[24]) << 7) | (drec[25] & 0x7f);
+	const u32 slot = SFX_VOICE_TABLE + idx * 4;
+	const u32 rec = SFX_VOICES + rd32(rom, slot) * 2;
+	return (rec >= SFX_VOICES && rec + 16 <= SFX_VOICES_END) ? rec : 0;
+}
+
 // `SMU2000_DRUM_EXACT=1` で、ドラムを写し取りではなく式で組む
 inline bool drum_exact()
 {
@@ -1941,10 +2034,16 @@ inline slot_regs drum_note(const u8 *rom, const u8 *rec, int att,
 	r.set(0x10, 0x0000);
 	r.set(0x11, drum_pitch_reg(rom, rec, drum_cents(rec, coarse, fine)));
 	const wave_info w = read_wave(rec + 26);
-	r.set(0x12, u16(w.pre_loop >> 16));
-	r.set(0x13, u16(w.pre_loop));
-	r.set(0x14, u16(w.loop_len >> 16));
-	r.set(0x15, u16(w.loop_len));
+	{
+		// 逆向きのサンプルは 2 つの数を入れ替える（6.233）。
+		// StandKit# のタム 3 つと AnalogKit の鍵 28 がこれ
+		u32 pre = w.pre_loop, loop = w.loop_len;
+		wave_backwards_swap(pre, loop);
+		r.set(0x12, u16(pre >> 16));
+		r.set(0x13, u16(pre));
+		r.set(0x14, u16(loop >> 16));
+		r.set(0x15, u16(loop));
+	}
 	r.set(0x16, u16(w.format_addr >> 16));
 	r.set(0x17, u16(w.format_addr));
 	for (int i = 0; i < 6; i++)
@@ -2097,7 +2196,10 @@ inline slot_regs build_note(const u8 *rom, const u8 *elem, int note, int att,
 	// **遅れを持つ音色は 0 から始めて、20ms ごとにせり上げる**（6.175）。
 	// byte9 が 2 以上の音色はそもそも揺れない
 	const bool vgate = (elem[12] || elem[13] || elem[9] >= 2);
-	const int plfo0 = vgate ? 0 : (vib_ramp_reg(rom, elem[14]) & 0x7f);
+	// **bit7（8 倍の目盛り）は落とさない**（6.234）。byte14 が 62・63 の要素は表の値が
+	// 0x96 で、実機もそのまま下位に書く（SFX Kit1 の鍵 28・29 で `0a=xx96`）。
+	// `& 0x7f` で 0x16 にしていた。旋律の記録 1353 個のうち変わるのは 9 要素だけ
+	const int plfo0 = vgate ? 0 : vib_ramp_reg(rom, elem[14]);
 	const int lrate = vib_rate(int(elem[11] & 0x3f), cc_vrate);
 	const int plfo  = vgate ? 0 : vib_depth(plfo0, cc_vdep);
 	r.set(0x0a, u16(((((elem[9] ? 0x40 : 0) | (lrate & 0x3f)) << 8))
@@ -2157,13 +2259,21 @@ inline slot_regs build_note(const u8 *rom, const u8 *elem, int note, int att,
 	// 引く。Oboe(7→896)・Clarinet(2→256)・Bagpipe(8→1024) で実機と一致した。
 	// 入れていなかったので、その 3 音色は波形がまるで合っていなかった
 	{
+		u32 pre = w.pre_loop, loop = w.loop_len;
+		// 逆向きなら 2 つの数を入れ替える（6.233）。**下駄を引く前**に入れ替えて、
+		// 下駄は 0x12/0x13 に行くほうから引く。旋律の音色で逆向きのものは
+		// 見つかっていないので、この組み合わせは実機で確かめられていない
+		wave_backwards_swap(pre, loop);
 		const u32 skip = u32(elem[79]) * 128 + elem[80];
-		const u32 pre = w.pre_loop > skip ? w.pre_loop - skip : 0;
+		if (pre > skip)
+			pre -= skip;
+		else
+			pre = 0;
 		r.set(0x12, u16(pre >> 16));
 		r.set(0x13, u16(pre));
+		r.set(0x14, u16(loop >> 16));
+		r.set(0x15, u16(loop));
 	}
-	r.set(0x14, u16(w.loop_len >> 16));
-	r.set(0x15, u16(w.loop_len));
 	r.set(0x16, u16(w.format_addr >> 16));
 	r.set(0x17, u16(w.format_addr));
 

@@ -79,6 +79,14 @@ public:
 	bool cg_owned(u32 i) const
 	{ return i < 0x40 && ((m_cg_owned >> i) & 1); }
 
+	// **firmware が表示を変えた書き込みの記録**。native の口で点滅を受け持つのに
+	// 使う（mu2000::blink_*）。持ち物のマスへの書き込みと、同じ値の書き直しは
+	// 入らない。溜まりすぎたら古いものから捨てず、新しいものを捨てる
+	struct change { u8 cg, addr, before, after; };
+	static constexpr int CHANGE_MAX = 64;
+	int changes(const change *&out) const { out = m_changes; return m_n_changes; }
+	void clear_changes() { m_n_changes = 0; }
+
 	// 文字の絵。HD44780U B04 の CGROM 4KB（1 文字 16 バイト、下位 5bit が絵）
 	void set_cgrom(const u8 *rom, size_t size)
 	{ m_cgrom = (rom && size >= 0x1000) ? rom : nullptr; }
@@ -127,6 +135,13 @@ private:
 	bool m_display_on = false, m_cursor_on = false, m_blink_on = false;
 	bool m_nibble = false;      // 4bit 接続のときの上位/下位
 	u8  m_ir = 0, m_dr = 0;
+	change m_changes[CHANGE_MAX] = {};
+	int m_n_changes = 0;
+	void note_change(bool cg, int addr, u8 before, u8 after)
+	{
+		if (m_n_changes < CHANGE_MAX)
+			m_changes[m_n_changes++] = change{ u8(cg), u8(addr), before, after };
+	}
 };
 
 #endif // S_MU2000_HD44780_H

@@ -43,9 +43,12 @@ build/gui.exe <rom ディレクトリ> --layout panel.txt
 1. いま居るところの `panel.txt`
 2. `gui.exe` と同じところの `panel.txt`
 3. `%LOCALAPPDATA%\S-MU2000\panel.txt`
+4. 付属の写真調の絵 `art/real/panel.txt`（exe の横、その一つ上、いま居るところの順）
+5. プラグインの束の中 `S-MU2000.vst3/Contents/Resources/panel/panel.txt`
+   （`make vst3` が art/real を写しておく）
 
-どこにも無ければ組み込みの配置を使う。**VST3 は 3 番目だけを見る**ので、
-DAW でも同じ絵にしたければそこに置く。
+どこにも無ければ組み込みの配置を使う。VST3 では 1・2 がホスト（DAW）の場所に
+なるので、ふつうは 3 か 5 が使われる。DAW で自分の絵にしたければ 3 に置く。
 
 ## 書き方
 
@@ -84,9 +87,10 @@ card 57 336 201 21        # カードの差し込み口。押すと MIDI ファ�
 adin 8 44 60 130          # A/D INPUT のジャック
 phones 198 238 74 82      # PHONES のジャック。押すと音の出口（デジタル / アナログ）の品書き
 columns.y 186             # 窓の下の札（PART VOL EXP …）の高さ
+modes.x 686               # 右の札（XG GS PERFORM）の左端。高さは液晶の ▶ に合わせる。負なら描かない
 
-low.x 0 12 30 48 55 61 70 78 86 93 0    # LCD 下段の並び
-low.w 10 15 15 2 2 8 7 7 7 8 3          # 単位は上段の点 1 つぶん
+low.x 0 11.96 30.5 48.5 56.1 62.2 70.3 78.3 86.1 92.5 102.9    # LCD 下段の並び
+low.w 10.12 15.64 15 4 4 7.2 6.8 6.7 6.8 8.1 1.3    # 単位は上段の点 1 つぶん（端数も可）
 ```
 
 `low.x` `low.w` の並びは左から
@@ -225,6 +229,7 @@ build/gui.exe <rom ディレクトリ> --layout art/mame/panel.txt
 |---|---|
 | `art/sample/panel.txt` | こちらの採寸 ＋ SVG のボタン・LED・つまみ |
 | `art/mame/panel.txt` | **MAME の絵**（DIN コネクタ、ジャック、通気口ほか）＋ 同じボタン |
+| `art/real/panel.txt` | **実機の写真に合わせた絵**（既定。`tools/panel_art/make_panel.py` で作る） |
 
 ボタン・LED・つまみの絵は両方とも `art/parts/` を指している。
 

@@ -181,6 +181,10 @@ int main(int argc, char **argv)
 	double lcd_at = -1.0;   // --lcd-at 秒: その時刻の液晶の中身を 16 進で出す
 	// --lcd-every 秒: その間隔でずっと出す（画面のちらつきを見るため）
 	double lcd_every = 0.0;
+	// --voices-every 秒: 鳴っている声の数（SWP30 マスタ・スレーブ）をその間隔で出す
+	double voices_every = 0.0, voices_next = 0.0;
+	// --part-rms 番号: --voices-every の行に、そのパート（0-63）の声の和の rms（直近 1024 サンプル）を添える
+	int part_rms = -1;
 	double lcd_next = 0.0;
 	const char *mu_dac_path = nullptr;
 	u32 mu_dac_from = 0, mu_dac_count = 0;
@@ -210,6 +214,10 @@ int main(int argc, char **argv)
 			lcd_at = std::atof(argv[++i]);
 		else if (!std::strcmp(argv[i], "--lcd-every") && i + 1 < argc)
 			lcd_every = std::atof(argv[++i]);
+		else if (!std::strcmp(argv[i], "--voices-every") && i + 1 < argc)
+			voices_every = std::atof(argv[++i]);
+		else if (!std::strcmp(argv[i], "--part-rms") && i + 1 < argc)
+			part_rms = std::atoi(argv[++i]);
 		else if (!std::strcmp(argv[i], "--dump-dac") && i + 3 < argc) {
 			mu_dac_path = argv[++i];
 			mu_dac_from = u32(std::strtoul(argv[++i], nullptr, 0));
@@ -464,6 +472,22 @@ int main(int argc, char **argv)
 					std::printf(" %02x", dd[line * 0x40 + pos]);
 			std::printf("\n");
 		}
+		if (part_rms >= 0 && i == size_t(boot * rate))
+			mu.set_part_scopes(true);
+		if (voices_every > 0.0 && i >= size_t((boot + voices_next) * rate)) {
+			std::printf("VOICES %.3f M %d S %d LED %03x", voices_next,
+			            mu.swpm().sounding_voices(), mu.swps().sounding_voices(), unsigned(mu.leds()));
+			if (part_rms >= 0) {
+				static float buf[mu2000::PSCOPE_N];
+				mu.part_scope_read(part_rms, buf, mu2000::PSCOPE_N);
+				double e = 0;
+				for (float v : buf)
+					e += double(v) * double(v);
+				std::printf(" P%d %.0f", part_rms, std::sqrt(e / double(mu2000::PSCOPE_N)));
+			}
+			std::printf("\n");
+			voices_next += voices_every;
+		}
 		if (lcd_every > 0.0 && i >= size_t((boot + lcd_next) * rate)) {
 			const double now = lcd_next;
 			lcd_next += lcd_every;
@@ -645,7 +669,7 @@ int main(int argc, char **argv)
 			            100.0 * double(w.by_other) / double(w.total));
 	}
 	if (eng_opts.native_engine) {
-		std::printf("  いちばん多いときのスロット: %d / 64\n", mu.native_peak_slots());
+		std::printf("  いちばん多いときのスロット: %d / 128\n", mu.native_peak_slots());
 		if (const u32 stomp = mu.native_fw_stomp())
 			std::printf("  **firmware がこちらの鳴っているスロットに書いた %u 回**\n", stomp);
 		if (const u32 wrong = mu.native_learn_wrong())
