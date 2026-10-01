@@ -1,0 +1,5 @@
+# All artifacts stay under the repo-ignored build-rust/ (matches C++'s build/ convention).
+# rust/scripts/parity.ps1 copies the finished exes up one level so the regression
+# harness can run them with SMU_BUILD=build-rust (same tool names as the C++ build).
+[build]
+target-dir = "../build-rust/target"

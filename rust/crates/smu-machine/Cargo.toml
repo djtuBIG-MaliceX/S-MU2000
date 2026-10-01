@@ -1,0 +1,16 @@
+[package]
+name = "smu-machine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+smu-compat = { path = "../smu-compat" }
+smu-sh2 = { path = "../smu-sh2" }
+smu-swp30 = { path = "../smu-swp30" }
+smu-dev = { path = "../smu-dev" }
+
+# Row gate "wiring/bus map": workspace-root integration test (lib.rs:5).
+[[test]]
+name = "boot_golden"
+path = "../../tests/boot_golden.rs"

@@ -1,0 +1,10 @@
+[package]
+name = "smu-hal-win"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The `windows` crate (WASAPI/winmm/MMCSS/console) is added at the M6 row, not before.
+[dependencies]
+smu-hal = { path = "../smu-hal" }
+smu-machine = { path = "../smu-machine" }

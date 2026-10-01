@@ -1,0 +1,33 @@
+[package]
+name = "smu-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Bin names mirror the C++ tools exactly (parity harness contract via SMU_BUILD).
+[[bin]]
+name = "live"
+path = "src/bin/live.rs"
+[[bin]]
+name = "render"
+path = "src/bin/render.rs"
+[[bin]]
+name = "verify"
+path = "src/bin/verify.rs"
+[[bin]]
+name = "statetest"
+path = "src/bin/statetest.rs"
+[[bin]]
+name = "boot"
+path = "src/bin/boot.rs"
+[[bin]]
+name = "blocktime"
+path = "src/bin/blocktime.rs"
+
+[dependencies]
+smu-compat = { path = "../../crates/smu-compat" }
+smu-machine = { path = "../../crates/smu-machine" }
+smu-swp30 = { path = "../../crates/smu-swp30" }
+smu-smf = { path = "../../crates/smu-smf" }
+smu-hal = { path = "../../crates/smu-hal" }
+smu-hal-win = { path = "../../crates/smu-hal-win" }

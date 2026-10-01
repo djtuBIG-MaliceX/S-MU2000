@@ -1,0 +1,3 @@
+   Compiling smu-swp30 v0.1.0 (D:\Projects\vst\S-MU2000-vst2-iplug\rust\crates\smu-swp30)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.39s
+     Running tests\fdbg.rs (../build-rust/target\debug\deps\fdbg-9475695dca2f8a74.exe)
