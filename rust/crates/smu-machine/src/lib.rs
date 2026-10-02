@@ -1459,23 +1459,11 @@ impl Ctx<'_> {
     fn sci4_r(&mut self, a: u32) -> u8 {
         let off = a - SCI4_BASE;
         let v = self.sci4.borrow_mut().read8(&mut *self.rm, off);
-        if std::env::var_os("SMU_P7P").is_some() {
-            let c = self.rm.time().as_ticks(CPU_HZ);
-            if c > 178_000_000 {
-                eprintln!("[P7SR] cyc={} off={:02x} -> {:02x}", c, off, v);
-            }
-        }
         v
     }
     #[inline]
     fn sci4_w(&mut self, a: u32, v: u8) {
         let off = a - SCI4_BASE;
-        if std::env::var_os("SMU_P7P").is_some() {
-            let c = self.rm.time().as_ticks(CPU_HZ);
-            if c > 178_000_000 {
-                eprintln!("[P7SW] cyc={} off={:02x} <- {:02x}", c, off, v);
-            }
-        }
         self.sci4.borrow_mut().write8(&mut *self.rm, off, v);
     }
     #[inline]
@@ -2080,12 +2068,6 @@ impl Machine {
                     }
                 }
                 Evt::SetInput { line, state } => {
-                    if std::env::var_os("SMU_P7P").is_some() {
-                        let c = self.total_cycles();
-                        if c > 178_000_000 {
-                            eprintln!("[P7SI] cyc={} line={} st={}", c, line, state);
-                        }
-                    }
                     let (l, v) = self.intc.borrow_mut().set_input(line as u32, state as i32);
                     self.soc.set_internal_interrupt(l, v);
                 }
@@ -2093,12 +2075,6 @@ impl Machine {
                     self.soc.set_internal_interrupt(level, vector)
                 }
                 Evt::Ack { vector } => {
-                    if std::env::var_os("SMU_P7P").is_some() {
-                        let c = self.total_cycles();
-                        if c > 178_000_000 {
-                            eprintln!("[P7ACK] cyc={} vec={}", c, vector);
-                        }
-                    }
                     // sh7042.cpp:400 — irqline unused on disk (intc.rs:189)
                     let (l, v) = self.intc.borrow_mut().interrupt_taken(-1, vector);
                     self.soc.set_internal_interrupt(l, v); // update_irq tail :92
@@ -2242,12 +2218,6 @@ impl Machine {
             // MAME のスケジューラが持っていたタイマ (:1173-1180)
             let tmr = self.rm.next_timer_cycles(); // :1174
             if tmr <= now {
-                if std::env::var_os("SMU_P8").is_some() && (178_722_000..178_736_500).contains(&now) {
-                    eprintln!("[P8TF] cyc={} tmr={}", now, tmr);
-                }
-                if std::env::var_os("SMU_P7P").is_some() && now > 178_000_000 {
-                    eprintln!("[P7TMR] cyc={} tmr={} nxt={}", now, tmr, self.rm.timer_dbg());
-                }
                 self.timer_fires += 1; // :1176
                 self.rm.run_timers(now); // :1177 (sci4 tx/rx ticks live here)
                 self.rm.set_cycles(now); // :1178

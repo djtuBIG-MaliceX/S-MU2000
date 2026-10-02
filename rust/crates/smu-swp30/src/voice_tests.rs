@@ -174,7 +174,8 @@ fn voice_gt_sounding() {
 
 #[test]
 fn voice_gt_volume() {
-    // t.volume: 24 levels x 15 samples (swp30.cpp:1814-1833)
+    // t.volume: 24 levels x 15 samples (swp30.cpp:1815-1831, merged bdabf16
+    // ground truth — no 256-grid; re-captured 2026-10-02 from merged C++)
     let f = fields(lines("t.volume,").pop().unwrap());
     let lv: Vec<i32> = vec![
         0, 1, 2, 0x3ff, 0x400, 0x401, 0x7ff, 0x800, 0xc00, 0xfff, 0x1000, 0x1400, 0x1fff, 0x2000,
@@ -248,17 +249,19 @@ fn quirk_tri_state_centred_vs_amplitude_phase() {
 }
 
 #[test]
-fn quirk_volume_grid_and_zero_clamp() {
-    // :1820 clamp is >= 0x3fff; :1832 truncation lands on a multiple of 256
+fn quirk_volume_floor_shift_and_zero_clamp() {
+    // bdabf16 ground truth (swp30.cpp:1827-1830): the 256-grid truncation is
+    // GONE — HW decay noise recorded in float scales with the part volume and
+    // never floors to 0 (upstream.md 34, discussion #69). Result is the raw
+    // arithmetic-shift (floor) product; :1821-1822 clamp is still >= 0x3fff.
     assert_eq!(volume_apply(0x3fff, 0x20000), 0);
     assert_eq!(volume_apply(0x4000, -0x20000), 0);
-    for level in [0x3c00i32, 0x3dff, 0x1234] {
-        for s in [-8193i32, 512, 1] {
-            assert_eq!(volume_apply(level, s) % 256, 0);
-        }
-    }
-    // toward the silent side: a tiny product truncates to exactly 0 (:1830)
-    assert_eq!(volume_apply(0x3e00, 1), 0);
+    // floor, not toward-zero: (-1 * 0x800) >> 26 == -1 (old trunc gave 0)
+    assert_eq!(volume_apply(0x3e00, -1), -1);
+    assert_eq!(volume_apply(0x3e00, 1), 0); // positive tiny still lands on 0
+    // deliberately OFF the 256 grid (the killed quirk asserted % 256 == 0):
+    assert_eq!(volume_apply(0x1234, 1073741823) % 256, 255);
+    // every gt cell above is also locked tuple-exact by t.volume
 }
 
 // ---- phase-B quirk locks ----

@@ -285,11 +285,18 @@ fn run_sample(m: &mut Machine, sintab: &[u16], debt: &mut u64) -> (i32, i32) {
     m.run_sample_pair(sintab) // :3414-3415 + interconnect + master DAC (:3450-3453)
 }
 
-// origin: render.cpp:574-577 (and :382-383 boot-wait). l*32768 wraps as C++
-// two's complement (-O3, no UB trap); '/' truncates toward zero both sides.
+// origin: render.cpp:605-608 (and the boot-wait push :405-406). GCC -O3 FOLDS
+// `l * 32768 / (1<<17)` into `l / 4` (idiv, trunc toward zero) — the product
+// NEVER overflows the s32 intermediate there, so the old "wrapping two's
+// complement" transliteration was wrong for every |l| >= 65536 (calshort:
+// master DAC peak 86813 > 2^16, first divergence frame 421775, sign-flipped
+// samples). Exhaustive ground truth over the full legal ADC domain
+// [-131072, 131071] (build\render semantics, Makefile-canonical g++ flags,
+// %TEMP%\opencode\s16gt): result == trunc(l/4) for ALL 262144 values.
+// Rust '/' on i32 truncates toward zero identically.
 #[inline]
 fn to_s16(l: i32) -> i16 {
-    let s = l.wrapping_mul(32768) / DAC_FULL_SCALE;
+    let s = l / 4; // == l * 32768 / DAC_FULL_SCALE as the C++ binary folds it
     s.clamp(-32768, 32767) as i16
 }
 

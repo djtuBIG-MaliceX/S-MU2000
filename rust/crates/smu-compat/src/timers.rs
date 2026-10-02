@@ -254,20 +254,6 @@ impl RunningMachine {
     /// origin: :669-680 `next_timer_cycles`. Re-scans every call on purpose
     /// (C++ comment :670-672: a cached variant changed the audio — never
     /// "optimize" this).
-    /// TEMP P7 debug: scheduled timers as "id:expire" list.
-    pub fn timer_dbg(&self) -> String {
-        let mut s = String::new();
-        for (i, t) in self.timers.iter().enumerate() {
-            if t.scheduled() {
-                if !s.is_empty() {
-                    s.push(',');
-                }
-                s.push_str(&format!("{}:{}", i, t.expire_cycles()));
-            }
-        }
-        s
-    }
-
     pub fn next_timer_cycles(&self) -> u64 {
         let mut best = u64::MAX;
         for t in &self.timers {

@@ -1,7 +1,8 @@
 //! Mixer / MELO — transliteration of `src/mame/sound/swp30.cpp:2978-3106`
 //! plus the mixer state of `swp30.h:328-331/497-523/560-563`. Phase B adds
-//! the per-sample device chain `run_sample` :4179-4271 / `adc_step` :4273-4277
-//! / `sample_step` :4304-4375 + the vol/route/internal reg handlers
+//! the per-sample device chain `run_sample` :4381-4459 (merged 6.237/6.238:
+//! idle-region skip legs :4214-4374 in this file) / `adc_step` :4308-4312
+//! / `sample_step` :4339-4410 + the vol/route/internal reg handlers
 //! (:2786-2814 / :2836-2869) and the swp30.h:95-96 device accessors.
 //! Ground truth: `%TEMP%\mixA` harness (mix.inc = byte-extract of :2978-3106,
 //! fc-verified vs disk; g++ -std=c++20 -O3 -mfpmath=sse -msse2), vectors in
@@ -32,6 +33,7 @@
 use crate::fetch::Wave;
 use crate::meg::{build_ops, MegState};
 use crate::regs::Swp30;
+use crate::voice::{dbg_awm_chans, dbg_meg_regs, dbg_send};
 
 /// origin: swp30.h:94 `SERIAL_FULL_SCALE`
 pub const SERIAL_FULL_SCALE: i32 = 1 << 26;
@@ -378,20 +380,35 @@ impl Swp30 {
         }
     }
 
-    /// origin: swp30.cpp:4304-4375 `sample_step`. Omitted blocks: :4313-4322
-    /// + :4332-4339 `--dump-dac` fprintf (m_dbg_dac never set), :4327-4328
-    /// voice_tap (unported, null), :4341-4349 g_verbose diagnostics;
-    /// :4362-4372 rec block deferred to the sampling-RAM row (see module doc —
+    /// origin: swp30.cpp:4623-4690 (merged) `sample_step`. Omitted blocks:
+    /// voice_tap (unported, null), g_verbose diagnostics;
+    /// rec block deferred to the sampling-RAM row (see module doc —
     /// wave_access is only writable through the deferred wave arm).
+    /// The three `--dump-dac` fprintf blocks (m/r :4632-4641, awm :4651-4658,
+    /// send :3123-3129 — the send dump fires inside mixer_step on disk; here
+    /// it reads `meg.m[0x20..0x30]` AFTER `mixer_step`, identical to the disk
+    /// local `mixer_out[0x10..0x20]` because :3103 copies that exact window
+    /// and the `m_native` steal :3106-3121 never runs in this port) are
+    /// ported for the calshort hunt (read-only diagnostics, gated by
+    /// `dbg_dac`; stderr-clean on every normal path).
     pub fn sample_step(&mut self, wave: &Wave) {
-        self.meg_flush_writes(); // :4306
-        let mut samples = [0i32; 0x40]; // :4324
-        // :4325 — REAL awm2 on a fresh device writes zeros for every inactive
+        self.meg_flush_writes(); // :4625
+        // :4632-4641 (merged) --dump-dac: MEG m/r right after flush_writes,
+        // BEFORE mixer_step overwrites m[0x20..0x2f] — the effect exit
+        if let Some(f) = &mut self.dbg_dac {
+            let c = self.meg.sample_counter;
+            if c >= self.dbg_dac_from && c < self.dbg_dac_from.wrapping_add(self.dbg_dac_count) {
+                dbg_meg_regs(f, c, &self.meg.m, &self.meg.r);
+            }
+        }
+        let mut samples = [0i32; 0x40]; // :4643
+        // :4644 — REAL awm2 on a fresh device writes zeros for every inactive
         // voice (matches the harness stub bit-for-bit, mixB_vectors)
         let cnt = self.meg.sample_counter; // :1857 seam (MEG row owns the counter)
         self.voices.awm2_step(
             wave,
             &mut self.rand_seed,
+            &mut self.awm_idle,
             cnt,
             &mut samples,
             &mut self.dbg_dac,
@@ -399,48 +416,400 @@ impl Swp30 {
             self.dbg_dac_from,
             self.dbg_dac_count,
         );
-        self.adc_step(); // :4350
-        self.mixer.mixer_step(&samples, &mut self.meg); // :4351
-        self.meg.lfo_step(); // :4352
-        self.meg.sample_counter = self.meg.sample_counter.wrapping_add(1); // :4374
+        // :4651-4658 (merged) --dump-dac: per-voice outputs (who is alive)
+        if let Some(f) = &mut self.dbg_dac {
+            let c = self.meg.sample_counter;
+            if c >= self.dbg_dac_from && c < self.dbg_dac_from.wrapping_add(self.dbg_dac_count) {
+                dbg_awm_chans(f, c, &samples);
+            }
+        }
+        self.adc_step(); // :4669
+        self.mixer.mixer_step(&samples, &mut self.meg); // :4670
+        // :3123-3129 --dump-dac send (see module doc: values == disk
+        // mixer_out[0x10..0x20]; native steal never runs here)
+        if let Some(f) = &mut self.dbg_dac {
+            let c = self.meg.sample_counter;
+            if c >= self.dbg_dac_from && c < self.dbg_dac_from.wrapping_add(self.dbg_dac_count) {
+                let m = &self.meg.m;
+                dbg_send(f, c, &m[0x20..0x30]);
+            }
+        }
+        self.meg.lfo_step(); // :4671
+        self.meg.sample_counter = self.meg.sample_counter.wrapping_add(1); // :4693
     }
 
-    /// origin: swp30.cpp:4179-4271 `run_sample`. Deviations (module doc):
-    /// DAC pair returned instead of out-params; JIT legs inert (only the
-    /// `!meg_jit_run()` interpret path exists here — the MEG-row-paired
-    /// `run_program`); :4197-4199/:4215-4216 meg_tap, :4200 native skip,
-    /// :4206-4211 profile wall-clock (invariant 5) and :4261-4270 g_verbose
-    /// maxima all unported/no-state; :4202-4205 dbg_meg step-leg ported
+    /// origin: swp30.cpp:4381-4459 `run_sample` (merged 6.237/6.238 chain:
+    /// per-region dirty wake, `meg_regions_rebuild(true)` +
+    /// `meg_ops_rebuild()`, idle-primed seed skip, `meg_skip_after`).
+    /// Deviations (module doc): DAC pair returned instead of out-params;
+    /// JIT legs inert (only the `!meg_jit_run()` interpret path exists here
+    /// — the MEG-row-paired `run_program`); :4423-4425/:4453-4454 meg_tap,
+    /// :4426-4427 native skip, :4438-4443 profile wall-clock (invariant 5),
+    /// :4407 `m_mfx_gen++` (native-FX identify — native engine unported,
+    /// dead in this port, kept as a comment) and the :4461+ native-FX block
+    /// all unported/no-state; :4434-4437 dbg_meg step-leg ported
     /// (--trace-meg seam, inert unless the bin sets `dbg_meg`).
+    /// `run_sample_impl` carries the body; the `wave: Option` seam is the
+    /// harness leg (meg_b replay drives the real chain without voices/mixer).
     pub fn run_sample(&mut self, sintab: &[u16], wave: &Wave) -> (i32, i32) {
-        if self.meg_program_changed || self.meg_ops_stale { // :4181
-            self.meg.decode_program(); // :4182
-            build_ops(&self.meg, &mut self.meg_ops); // :4183
-            self.meg_program_changed = false; // :4184
-            self.meg_ops_stale = false; // :4185
-            // :4189 meg_jit_invalidate() — JIT never built
-            self.meg_jit_wait = 1; // :4190
+        self.run_sample_impl(sintab, Some(wave), 0, false)
+    }
+
+    /// harness entry (MEG row): body EXACTLY as `run_sample`, :4419's
+    /// `sample_step(wave)` replaced by its disk-inside legs that the C++
+    /// harness stubs the same way (`sample_step` :4306 flush_writes,
+    /// :4374 `m_sample_counter += sstep` — the legacy `k && sstep` step
+    /// cadence of the pre-merge harness, pinned through `sstep`).
+    pub fn run_sample_harness(&mut self, sintab: &[u16], sstep: u32, lfostep: bool) -> (i32, i32) {
+        self.run_sample_impl(sintab, None, sstep, lfostep)
+    }
+
+    fn run_sample_impl(&mut self, sintab: &[u16], wave: Option<&Wave>, sstep: u32, lfostep: bool) -> (i32, i32) {
+        if self.meg_program_changed || self.meg_ops_stale { // :4383
+            self.meg.decode_program(); // :4384
+            // :4385-4402 (merged 6.238): a program change wakes ONLY the
+            // regions holding written words (map change wakes all :4390-91)
+            if self.meg_program_changed {
+                let mut dirty: u32 = 0; // :4389
+                if self.meg_map_dirty {
+                    dirty = 0xff; // :4390-4391
+                } else {
+                    for w in 0..6u32 {
+                        // :4393-4395
+                        let mut b = self.meg_prg_dirty[w as usize];
+                        while b != 0 {
+                            let pc = (w * 64 + b.trailing_zeros()) as u16;
+                            dirty |= 1 << (self.meg.region_of(pc) as u32 & 7);
+                            b &= b - 1;
+                        }
+                    }
+                }
+                self.meg_skip_mask &= !dirty; // :4396
+                for k in 0..8usize {
+                    // :4397-4399
+                    if (dirty >> k) & 1 != 0 {
+                        self.meg_regions[k].quiet = 0;
+                    }
+                }
+                self.meg_prg_dirty = [0; 6]; // :4400
+                self.meg_map_dirty = false; // :4401
+            }
+            self.meg_regions_rebuild(true); // :4403 (build_ops inside, :4216)
+            self.meg_ops_rebuild(); // :4404 (build_ops again, :4263)
+            self.meg_program_changed = false; // :4405
+            // :4407 `m_mfx_gen++` — native-FX shape re-identify generation.
+            // The native engine (src/dsp, meg_fx.h) is NOT ported (module
+            // doc / AGENTS.md ignore-list), so the counter has no readers:
+            // ported as a no-op citation (dead on every Rust path).
+            self.meg_ops_stale = false; // :4408
+            // :4412 meg_jit_invalidate() — JIT never built
+            self.meg_jit_wait = 1; // :4413
         } else if self.meg_jit_wait != 0 {
-            self.meg_jit_wait = self.meg_jit_wait.wrapping_add(1); // :4191 ++
+            // :4414 `m_meg_jit_wait && ++m_meg_jit_wait > 64` (pre-:4415)
+            self.meg_jit_wait = self.meg_jit_wait.wrapping_add(1);
             if self.meg_jit_wait > 64 {
-                // :4192-4193 rebuild never happens (no JIT)
+                // :4415-4416 meg_jit_rebuild never happens (no JIT)
                 self.meg_jit_wait = 0;
             }
         }
-        self.sample_step(wave); // :4196
-        if self.dbg_meg.is_some() {
-            // :4202-4205 - dbg leg: 384 per-instruction steps so meg_step's
+        match wave {
+            Some(w) => self.sample_step(w), // :4419
+            // harness seam (see run_sample_harness): the three sample_step
+            // legs the C++ harness stub keeps (:4341 flush, :4387 lfo_step
+            // behind the scenario gate, :4410 counter via scenario cadence)
+            None => {
+                self.meg_flush_writes();
+                if lfostep {
+                    self.meg.lfo_step();
+                }
+                if sstep != 0 {
+                    self.meg.sample_counter = self.meg.sample_counter.wrapping_add(sstep);
+                }
+            }
+        }
+        // :4420-4422 (merged): sound arrived at an idle region's entrance —
+        // restore it BEFORE this sample's MEG run
+        if self.meg_skip_mask != 0 {
+            self.meg_skip_before();
+        }
+        // :4423-4425 meg_tap pre-copy — tap unported (always null here)
+        let dbg = self.dbg_meg.is_some();
+        if self.meg_idle_primed && !dbg {
+            // :4428-4433 (merged 6.238): all regions empty and one empty
+            // sample was already run — state cannot move anymore; advance
+            // only the seed the empty ops would have drawn
+            if self.meg_idle_rand != 0 {
+                self.rand_skip(self.meg_idle_rand); // :4430-4431
+            }
+            self.meg.pc = 0; // :4432
+            self.meg.icount -= 0x180; // :4433
+        } else if dbg {
+            // :4434-4437 - dbg leg: 384 per-instruction steps so meg_step's
             // trace seam fires (upstream behaviour, incl. local-skip_to)
             for _ in 0..384 {
                 self.step(sintab);
             }
         } else {
-            self.meg_run_program(sintab); // :4212-4214 (meg_jit_run always false)
+            // :4438-4443 profile leg unported (wall-clock, invariant 5);
+            // :4444 meg_jit_run always false
+            self.meg_run_program(sintab); // :4444-4446
         }
-        // :4219 DAC = first two of outputs 0-3 (scale 1<<17)
-        let left = self.mixer.adc[0]; // :4220
-        let right = self.mixer.adc[1]; // :4221
+        // :4447-4449 (merged): after one all-empty sample has been run,
+        // the following samples take the seed-skip path above
+        if !dbg {
+            self.meg_idle_primed = self.meg_idle_all;
+        }
+        // :4450-4452 (merged): count the quieted regions (only when the MEG
+        // ran this sample)
+        if self.meg_skip_on && !dbg {
+            self.meg_skip_after();
+        }
+        // :4453-4454 meg_tap post-call — unported (null)
+        // :4456-4459 DAC = first two of outputs 0-3 (scale 1<<17)
+        let left = self.mixer.adc[0]; // :4458
+        let right = self.mixer.adc[1]; // :4459
         (left, right)
+    }
+
+    /// origin: swp30.cpp:4214-4256 `meg_regions_rebuild` (merged 6.237).
+    /// Rebuild the ops table, reset the region bookkeeping (carrying `quiet`
+    /// across a state reload of an UNCHANGED program, :4217-4222 —
+    /// keep_quiet=TRUE on every merged run_sample call, :4403), then scan
+    /// the program for each region's entrances (m20-m2f it reads before it
+    /// writes them, :4232-4241) and exits (m20 and above it writes).
+    pub fn meg_regions_rebuild(&mut self, keep_quiet: bool) {
+        build_ops(&self.meg, &mut self.meg_ops); // :4216
+        // :4218-4222 — `g = meg_region{}` then restore quiet if asked
+        for g in self.meg_regions.iter_mut() {
+            let quiet = if keep_quiet { g.quiet } else { 0 };
+            *g = crate::meg::MegRegion::ZERO;
+            g.quiet = quiet;
+        }
+        let mut written = [0u64; 8]; // :4223
+        for pc in 0..0x180usize {
+            let o = self.meg_ops[pc]; // :4225
+            let k = (o.region & 7) as usize; // :4226
+            // :4228 — "real" = touches any state beyond the rand seed
+            let real = o.alu != 0
+                || o.dm != 0
+                || o.dr != 0
+                || o.memw != 0
+                || o.memop != 0
+                || o.index != 0
+                || o.index2 != 0
+                || o.t_write != 0
+                || o.jump != 0;
+            if !real {
+                continue; // :4229-4230
+            }
+            let g = &mut self.meg_regions[k]; // :4227
+            g.used = true; // :4231
+            // :4232-4235 — read_m: m20-m2f entrance not yet written by this
+            // region itself (lambda over `written[k]` + `g` in C++)
+            let read_m = |x: u32, g: &mut crate::meg::MegRegion, written: &[u64; 8]| {
+                if x >= 0x20 && x < 0x30 && (written[k] & (1u64 << x)) == 0 {
+                    g.in_mask |= 1 << (x - 0x20);
+                }
+            };
+            if o.alu != 0 && (o.mmode == 2 || o.mmode == 3) && o.m2_from_m != 0 && o.sm != 0 {
+                // :4236-4237
+                read_m(o.sm as u32, g, &written);
+            }
+            if o.alu != 0 && o.asel == 2 && o.sm != 0 {
+                // :4238-4239
+                read_m(o.sm as u32, g, &written);
+            }
+            if o.dm != 0 && o.dm_src == 7 && o.sm != 0 {
+                // :4240-4241
+                read_m(o.sm as u32, g, &written);
+            }
+            if o.dm != 0 {
+                // :4242-4246
+                written[k] |= 1u64 << o.dm;
+                if o.dm >= 0x20 {
+                    g.out_mask |= 1u64 << o.dm;
+                }
+            }
+        }
+        // :4248-4255 — silence before sleep = the region's delay window
+        // (2^(10+map size bits)) plus 0.1 s of slack; the
+        // SMU2000_MEG_SKIP_DEBUG fprintf (:4252-4254) is a stderr sink,
+        // not ported (debug-seam precedent)
+        for k in 0..8usize {
+            let size = 1u32 << (10 + crate::meg::bit_of(self.meg.map[k], 8, 3)); // :4250
+            self.meg_regions[k].hold = size + 4410; // :4251
+        }
+    }
+
+    /// origin: swp30.cpp:4261-4310 `meg_ops_rebuild` (merged 6.237/6.238).
+    /// Rebuild ops, replace sleeping regions' instructions with do-nothing
+    /// ops that keep `region` + their rand-draw count (:4271-4281), merge a
+    /// run of draws onto the run's LAST op so the seed advances in one
+    /// rand_jump (:4282-4298), then scan for all-empty (:4299-4309).
+    pub fn meg_ops_rebuild(&mut self) {
+        build_ops(&self.meg, &mut self.meg_ops); // :4263
+        self.meg_idle_primed = false; // :4264
+        if self.meg_skip_mask == 0 {
+            // :4265-4268 (nothing sleeps: never all-idle with mask empty)
+            self.meg_idle_all = false;
+            return;
+        }
+        for pc in 0..0x180usize {
+            // :4270-4281 — the dither draws stay in place and at the same
+            // count, so RUNNING regions' streams stay bit-identical
+            let o = &mut self.meg_ops[pc];
+            if (self.meg_skip_mask >> (o.region & 7)) & 1 != 0 {
+                let n = (o.dm != 0 && (o.dm_src == 5 || (o.dm_src == 6 && o.no_noise == 0)))
+                    as u8
+                    + (o.dr != 0 && o.dr_from_r == 0 && o.no_noise == 0) as u8; // :4274-4275
+                let region = o.region; // :4276
+                *o = crate::meg::Op::ZERO; // :4277
+                o.region = region; // :4278
+                o.rand_n = n as u16; // :4279 (C++ u8 widens into u16 rand_n)
+            }
+        }
+        // :4282-4298 — consecutive skips' draws stack onto the run's last
+        // op (one mul-chain instead of many; no draws between them anyway)
+        let mut carry: u32 = 0; // :4284
+        for pc in 0..0x180usize {
+            let o = self.meg_ops[pc]; // :4286
+            let skipped = (self.meg_skip_mask >> (o.region & 7)) & 1 != 0; // :4287
+            if !skipped {
+                if carry != 0 {
+                    self.meg_ops[pc - 1].rand_n = carry as u16; // :4289-4291
+                }
+                carry = 0;
+                continue;
+            }
+            carry = carry.wrapping_add(o.rand_n as u32); // :4294
+            self.meg_ops[pc].rand_n = 0; // :4295
+        }
+        if carry != 0 {
+            self.meg_ops[0x17f].rand_n = carry as u16; // :4297-4298
+        }
+        // :4299-4309 — anything real left besides the sleeping regions?
+        let mut idle_all = true; // :4300
+        let mut idle_rand: u32 = 0; // :4301
+        for o in self.meg_ops.iter() {
+            if o.alu != 0
+                || o.dm != 0
+                || o.dr != 0
+                || o.memw != 0
+                || o.memop != 0
+                || o.index != 0
+                || o.index2 != 0
+                || o.t_write != 0
+                || o.jump != 0
+            {
+                // :4303-4306
+                idle_all = false;
+                break;
+            }
+            idle_rand = idle_rand.wrapping_add(o.rand_n as u32); // :4307
+        }
+        self.meg_idle_all = idle_all;
+        self.meg_idle_rand = idle_rand;
+        self.meg_idle_primed = false; // :4309
+    }
+
+    /// origin: swp30.cpp:4312-4337 `meg_skip_before` (merged 6.237).
+    /// After sample_step, before the MEG run: sound reached a sleeping
+    /// region's entrance -> wake it from THIS sample.
+    pub fn meg_skip_before(&mut self) {
+        let mut wake: u32 = 0; // :4314
+        for k in 0..8usize {
+            if (self.meg_skip_mask >> k) & 1 == 0 {
+                continue; // :4316-4317
+            }
+            let mut inp = self.meg_regions[k].in_mask; // :4318
+            while inp != 0 {
+                if self.meg.m[0x20 + inp.trailing_zeros() as usize] != 0 {
+                    // :4319-4322
+                    wake |= 1 << k;
+                    break;
+                }
+                inp &= inp - 1;
+            }
+        }
+        if wake == 0 {
+            return; // :4324-4325
+        }
+        self.meg_skip_mask &= !wake; // :4326
+        // :4327-4328 meg-skip wake stderr sink (SMU2000_MEG_SKIP_DEBUG) —
+        // debug sink, not ported (stderr, no state)
+        for k in 0..8usize {
+            // :4329-4331
+            if (wake >> k) & 1 != 0 {
+                self.meg_regions[k].quiet = 0;
+            }
+        }
+        self.meg_ops_rebuild(); // :4332
+        // :4333-4335 meg_jit_invalidate() — JIT never built (interpret runs
+        // until writes settle, same result as the ops table)
+        self.meg_jit_wait = 1; // :4336
+    }
+
+    /// origin: swp30.cpp:4339-4374 `meg_skip_after` (merged 6.237).
+    /// After the MEG run: count samples with entrance+exit (and the
+    /// still-pending 3-cycle delayed writes, :4353-4358) all zero.
+    pub fn meg_skip_after(&mut self) {
+        let mut add: u32 = 0; // :4341
+        for k in 0..8usize {
+            // :4342-4345 — only USED regions WITH entrances, not sleeping
+            if !self.meg_regions[k].used
+                || self.meg_regions[k].in_mask == 0
+                || (self.meg_skip_mask >> k) & 1 != 0
+            {
+                continue;
+            }
+            let mut silent = true; // :4346
+            let mut inp = self.meg_regions[k].in_mask; // :4347
+            while inp != 0 && silent {
+                if self.meg.m[0x20 + inp.trailing_zeros() as usize] != 0 {
+                    silent = false;
+                }
+                inp &= inp - 1;
+            }
+            let mut out = self.meg_regions[k].out_mask; // :4350
+            while out != 0 && silent {
+                if self.meg.m[out.trailing_zeros() as usize] != 0 {
+                    silent = false;
+                }
+                out &= out - 1;
+            }
+            // :4353-4358 — writes still in the 3-instruction delay ring
+            for d in 0..3usize {
+                if !silent {
+                    break;
+                }
+                let x = self.meg.mw_reg[d];
+                if x != 0
+                    && (self.meg_regions[k].out_mask >> x) & 1 != 0
+                    && self.meg.mw_value[d] != 0
+                {
+                    silent = false;
+                }
+            }
+            if !silent {
+                // :4359-4362
+                self.meg_regions[k].quiet = 0;
+                continue;
+            }
+            // :4363-4364 — `++g.quiet >= g.hold` (u32 wrap-safe; quiet
+            // stops being counted the sample after the region sleeps)
+            self.meg_regions[k].quiet = self.meg_regions[k].quiet.wrapping_add(1);
+            if self.meg_regions[k].quiet >= self.meg_regions[k].hold {
+                add |= 1 << k;
+            }
+        }
+        if add == 0 {
+            return; // :4366-4367
+        }
+        self.meg_skip_mask |= add; // :4368
+        // :4369-4370 meg-skip quiet stderr sink (debug) — not ported
+        self.meg_ops_rebuild(); // :4371
+        // :4372 meg_jit_invalidate() — JIT never built
+        self.meg_jit_wait = 1; // :4373
     }
 
     /// origin: swp30.cpp:4281-4300 `dump_meg` (--dump-meg program/const/off/

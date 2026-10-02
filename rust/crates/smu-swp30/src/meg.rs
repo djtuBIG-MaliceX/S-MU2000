@@ -296,9 +296,17 @@ impl MegState {
         self.offset[offset]
     }
 
-    /// origin: swp30.cpp:3363-3366 `offset_w`
-    pub fn offset_w(&mut self, offset: usize, data: u16) {
-        self.offset[offset] = data;
+    /// origin: swp30.cpp:3387-3393 `offset_w` (merged: change-gated bump of
+    /// `m_meg_off_gen` :3390-3391 — the native-FX re-identify leg (swp30.h
+    /// :608, read only by the :4490 native block). Native is unported
+    /// (zero-observable), but the counter is ported for transliteration
+    /// fidelity, same pattern as `const_w`/`meg_const_gen`.
+    pub fn offset_w(&mut self, offset: usize, data: u16, off_gen: &mut u32) {
+        if self.offset[offset] != data {
+            // :3390-3391
+            *off_gen = off_gen.wrapping_add(1);
+        }
+        self.offset[offset] = data; // :3392
     }
 
     /// origin: swp30.cpp:3368-3371 `lfo_r` (idx < 0x18 callers only; the
@@ -553,6 +561,34 @@ pub fn meg_pack24(p: i64) -> u32 {
         q = -0x80_0000; // :3582
     }
     ((q as i32).wrapping_shl(8) >> 8) as u32 // :3583
+}
+
+/// origin: swp30.cpp:3616-3619 `meg_mem_value` (file static, merged 6a18898).
+/// Delay-memory writes truncate toward ZERO (same leg as `meg_pack24` :3607),
+/// not to −inf: MAME's `p >> 15` left reverb feedback tails stuck below 0
+/// (discussion #69). Rust i64 `/` truncates toward zero like C++ `/`.
+#[inline]
+pub fn meg_mem_value(p: i64) -> i64 {
+    p / 32768 // :3618
+}
+
+/// origin: swp30.h:80-87 `swp30_device::rand_jump` (merged 6.237). Returns
+/// the (mul, add) that advance the LCG seed exactly n `rand()` calls
+/// (seed' = mul*seed + add, u32 wrapping). Deviation: C++ out-params become
+/// a tuple (zero-observable).
+pub fn rand_jump(n: u32) -> (u32, u32) {
+    let (mut mul, mut add) = (1u32, 0u32); // :82
+    for _ in 0..n {
+        add = 1664525u32.wrapping_mul(add).wrapping_add(1013904223); // :84
+        mul = 1664525u32.wrapping_mul(mul); // :85
+    }
+    (mul, add)
+}
+
+/// origin: swp30.h:88-93 `swp30_device::rand_skip` (merged 6.237).
+pub fn rand_skip(seed: &mut u32, n: u32) {
+    let (mul, add) = rand_jump(n); // :90-91
+    *seed = mul.wrapping_mul(*seed).wrapping_add(add); // :92
 }
 
 /// origin: swp30.cpp:3599-3607 `meg_cond` (file static). Rules per :3594-3595.
@@ -834,10 +870,11 @@ pub fn meg_step(
         meg.rw_value[d3] = v;
     }
 
-    // :3806-3810 — memory write port latch
+    // :3838-3845 — memory write port latch. MERGED 6a18898: meg_mem_value
+    // (truncate toward 0) replaced `m_p >> 15` on disk (:3843).
     if d.memw {
         meg.memw_active[d2] = true;
-        meg.memw_value[d2] = (meg.p >> 15) as i32; // :3808 (s64->s32 truncate)
+        meg.memw_value[d2] = meg_mem_value(meg.p) as i32; // :3843 (s64->s32 truncate)
     } else {
         meg.memw_active[d2] = false;
     }
@@ -1006,6 +1043,12 @@ pub struct Op {
     pub jump: u8,
     pub cond: u8,
     pub target: u16,
+    /// origin: swp30.h:390 `rand_n` (merged 6.237): a replaced idle-region
+    /// op must still advance the rand seed this many draws so every other
+    /// region's dither stream stays bit-identical (`rand_skip` at
+    /// run_program :4150-4151). Set only by `Swp30::meg_ops_rebuild`
+    /// (mix.rs); `build_ops` leaves the ZERO default (:3977 `o = op{}`).
+    pub rand_n: u16,
 }
 
 impl Op {
@@ -1047,6 +1090,30 @@ impl Op {
         jump: 0,
         cond: 0,
         target: 0,
+        rand_n: 0, // swp30.h:390 (merged 6.237) — `op{}` zeroes it
+    };
+}
+
+/// origin: swp30.h:554-560 `swp30_device::meg_region` (merged 6.237/6.238).
+/// One map region's sleep bookkeeping; lives on the device
+/// (`Swp30::meg_regions`, mirrors swp30.h:561), NOT in `meg_state`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MegRegion {
+    pub in_mask: u32,  // :555 entrances m20-m2f (bit = index - 0x20)
+    pub out_mask: u64, // :556 exits m00-m3f at 0x20 and above
+    pub hold: u32,     // :557 samples of silence before sleeping (:4251)
+    pub quiet: u32,    // :558 samples silent so far
+    pub used: bool,    // :559 region has at least one real instruction
+}
+
+impl MegRegion {
+    /// the `meg_region{}` / `= {}` zero image (swp30.h:555-559 defaults).
+    pub const ZERO: MegRegion = MegRegion {
+        in_mask: 0,
+        out_mask: 0,
+        hold: 0,
+        quiet: 0,
+        used: false,
     };
 }
 
@@ -1312,10 +1379,18 @@ pub fn run_program(meg: &mut MegState, swp: &mut MegSwp, ops: &[Op; 0x180]) {
             meg.rw_value[i3] = v as i32; // :4113
         }
 
-        // :4116-4118 — memory write port latch
+        // :4150-4151 (merged 6.237) — replaced idle-region ops still advance
+        // the seed; a run of skipped draws was merged onto one op by
+        // meg_ops_rebuild, so this is the rand_jump-n-advance leg.
+        if o.rand_n != 0 {
+            rand_skip(swp.seed, o.rand_n as u32);
+        }
+
+        // :4153-4155 — memory write port latch. MERGED 6a18898:
+        // meg_mem_value replaced `p >> 15` on disk (:4155).
         meg.memw_active[i2] = o.memw != 0;
         if o.memw != 0 {
-            meg.memw_value[i2] = (p >> 15) as i32; // :4118 (s64->s32 truncate)
+            meg.memw_value[i2] = meg_mem_value(p) as i32; // :4155 (s64->s32 truncate)
         }
 
         // :4120-4125 — first index + second index

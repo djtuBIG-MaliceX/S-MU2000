@@ -1,5 +1,5 @@
 //! Phase-B bit-exactness replay of the SWP30 voice engine
-//! (`src/mame/sound/swp30.cpp` :1069-1365, :1516-1545, :1835-1881, :2532-2597,
+//! (`src/mame/sound/swp30.cpp` :1070-1366, :1517-1546, :1833-1884, :2556-2621,
 //! regs :2014-2177 + keyon) against ground-truth vectors captured from
 //! `%TEMP%\voicegtB\gt.cpp` — a standalone g++ harness embedding the C++
 //! bodies byte-exact (incl. the streaming_block reused from the fetch row).
@@ -375,11 +375,24 @@ fn awm2_crown_via_real_dispatch() {
             assert_eq!(hx(&k[6]), v.peg_cur as u32);
             assert_eq!(k[7].parse::<u32>().unwrap() as u8, v.peg_reached);
             assert_eq!(k[8].parse::<u32>().unwrap(), st.done as u32);
+            // a.idle1024: harness printed m_awm_idle at the SAME point
+            // (after the ch5 keyon_w :2248 wake; ch1 already idle at 1024).
+            // Bits compared on the 6 CONFIGURED channels only: the harness
+            // struct never runs device reset(), so its untouched ch6-63
+            // envelopes sit in the ACTIVE ctor state and can never idle,
+            // while the real device (and Rust `Swp30::new()`, ctor reset
+            // :1969+) legitimately idles them — a provably output- and
+            // rand-neutral difference (type-0 LFO draws no rand).
+            let idl: Vec<&str> = awm2_lines("a.idle1024,")[0].split(',').collect();
+            let want_idle = ((hx(idl[1]) as u64) << 32) | hx(idl[2]) as u64;
+            assert_eq!(want_idle & 0x3f, swp.awm_idle & 0x3f, "awm_idle mask at i==1024");
+            assert_ne!(swp.awm_idle & !0x3f, 0, "reset-cleared ch6+ must idle on Rust side");
         }
 
         let seed = &mut swp.rand_seed;
+        let idle = &mut swp.awm_idle;
         let vs = &mut swp.voices;
-        vs.awm2_step(&wave, seed, i, &mut out, &mut None, 0, 0, 0);
+        vs.awm2_step(&wave, seed, idle, i, &mut out, &mut None, 0, 0, 0);
 
         let want = aw.get(&i).unwrap_or_else(|| panic!("aw.{i} missing"));
         assert_eq!(want.len(), 7, "aw.{i} arity");
@@ -409,6 +422,11 @@ fn awm2_crown_via_real_dispatch() {
             }
         }
     }
+    // final idle mask (a.idle,<hi>,<lo> — gt.cpp scen_awm2 tail; ch0-5 all
+    // live again at end; ch6-63 comparison excluded, see i==1024 note)
+    let idl = awm2_lines("a.idle,")[0].replace("a.idle,", "");
+    let w: Vec<&str> = idl.split(',').collect();
+    assert_eq!(((hx(w[0]) as u64) << 32) | hx(w[1]) as u64, swp.awm_idle & 0x3f, "final awm_idle ch0-5");
     // every access above went to a REAL handler: nothing new deferred
     assert_eq!(swp.deferred_hits, 0, "voice-path ops must not hit deferred arms");
 }

@@ -5,7 +5,7 @@
 //! :1548-1653, :1697-1833.
 //! phase B: `filter_block` (:1069-1275 incl. its own `volume_apply`),
 //! `iir1_block` (:1300-1365), device helpers `filter_impulse` (:1516) and
-//! `lfo_pitch_trace` (:1532), `peg_step` (:2578), `awm2_step` (:1835) and the
+//! `lfo_pitch_trace` (:1532), `peg_step` (:2578), `awm2_step` (:1833) and the
 //! per-channel `Voice`/`Channels` assembly (swp30.h:189-332 + :465-468).
 //!
 //! Ground truth: `tests/data/voice_vectors.txt`, produced by a compiled-C++
@@ -444,24 +444,25 @@ impl LfoBlock {
     }
 }
 
-/// origin: swp30.cpp:1814-1833 `swp30_device::volume_apply`.
-/// 4.10 attenuation times 16.6 sample; result truncated toward zero to a 256
-/// grid (:1826-1831 comment, upstream.md 34). No floats anywhere — integer
-/// only, so no FMA/contraction exposure (Invariant 9: N/A in this region).
+/// origin: swp30.cpp:1815-1831 `swp30_device::volume_apply` (upstream delta
+/// bdabf16 — trunc removal). 4.10 attenuation times 16.6 sample, NO 256-grid
+/// truncation anymore (:1827-1829: float-recorded HW decay noise scales with
+/// the part volume and never floors to 0 — upstream.md 34, discussion #69).
+/// No floats anywhere — integer only, so no FMA/contraction exposure
+/// (Invariant 9: N/A in this region).
 /// C++ `>> e` is UB for negative level (e < 0); firmware EG clamps level to
 /// 0..=0x3fff — the vectors cover 0..0x7fff; debug builds assert the domain.
 pub fn volume_apply(level: i32, sample: i32) -> i32 {
     if level >= 0x3fff {
-        return 0; // :1820-1821 ("passed-in value may have overflowed")
+        return 0; // :1821-1822 ("passed-in value may have overflowed")
     }
-    debug_assert!(level >= 0, "volume_apply: negative level is outside the C++ domain (:1823)");
+    debug_assert!(level >= 0, "volume_apply: negative level is outside the C++ domain (:1826)");
 
-    let e = level >> 10; // :1823
-    let m = level & 0x3ff; // :1824
-    // :1825 int arithmetic in C++ too (fits i32), widened to s64 on assign
+    let e = level >> 10; // :1824
+    let m = level & 0x3ff; // :1825
+    // :1826 int arithmetic in C++ too (fits i32), widened to s64 on assign
     let mul: i64 = ((0x4000000 - (m << 15)) >> e) as i64;
-    let r = (sample as i64 * mul) >> 26; // :1831 (s64 product, arithmetic shift)
-    (r / 256 * 256) as i32 // :1832 (both languages truncate toward zero)
+    ((sample as i64 * mul) >> 26) as i32 // :1830 (s64 product, arithmetic shift, no trunc)
 }
 
 // ===========================================================================
@@ -1057,18 +1058,27 @@ impl Channels {
         }
     }
 
-    /// origin: swp30.cpp:1835-1881 `swp30_device::awm2_step` — the crown.
-    /// Seams: `wave` = fetch-row reader; `rand_seed` = device LFO noise
-    /// (swp30.h:73-78); `sample_counter` = `m_meg->m_sample_counter`
-    /// (:1857, :1860 — MEG row owns the counter). The `--dump-dac` fprintf
-    /// block (:1859-1876) is stderr-only diagnostics gated by m_dbg_dac
+    /// origin: swp30.cpp:1833-1884 `swp30_device::awm2_step` — the crown
+    /// (6.239 idle-voice skip). Seams: `wave` = fetch-row reader;
+    /// `rand_seed` = device LFO noise (swp30.h:73-78); `awm_idle` = the
+    /// swp30.h:631 idle mask (set here; CLEARED by write16 :2122 and keyon_w
+    /// :2248 in regs.rs — a written/keyed voice always rejoins the loop);
+    /// `sample_counter` = `m_meg->m_sample_counter`
+    /// (:1853, :1860 — MEG row owns the counter). The `--dump-dac` fprintf
+    /// block (:1862-1879) is stderr-only diagnostics gated by m_dbg_dac
     /// (never set by the machine) — deliberately not ported, like the
     /// WTRACE/logerror sinks in regs.rs.
+    /// Order: ascending chan (countr_zero) == the old full-sweep order, so
+    /// the type-3 LFO rand DRAWS are the same sequence; an idle voice is
+    /// envelope-inactive with the peg arrived, and the old loop `continue`d
+    /// those BEFORE lfo.step / volume anyway — skipping them changes no
+    /// sample and consumes no rand (that is the whole point of 6.239).
     #[allow(clippy::too_many_arguments)]
     pub fn awm2_step(
         &mut self,
         wave: &Wave<'_>,
         rand_seed: &mut u32,
+        awm_idle: &mut u64,
         sample_counter: u32,
         samples_per_chan: &mut [i32; 0x40],
         dbg_dac: &mut Option<std::fs::File>,
@@ -1076,38 +1086,46 @@ impl Channels {
         dbg_from: u32,
         dbg_count: u32,
     ) {
-        for (chan, v) in self.voices.iter_mut().enumerate() {
-            // :1838-1842: attached voices just stamp the reached flag
+        samples_per_chan.fill(0); // :1837 (pre-zero: skipped/idle channels stay 0)
+        let mut live = !*awm_idle; // :1838
+        while live != 0 {
+            let chan = live.trailing_zeros() as usize; // :1839 std::countr_zero
+            live &= live - 1; // :1838 (clears the LOW set bit — chan just handled)
+            let v = &mut self.voices[chan];
+            // :1841-1844: attached voices just stamp the reached flag
             if v.peg_cur == sext14(v.pitch_offset as u32) {
-                v.peg_reached = 1; // :1840
+                v.peg_reached = 1; // :1842
             } else {
-                v.peg_step(sample_counter); // :1842
+                v.peg_step(sample_counter); // :1844
             }
             if !v.envelope.active() {
-                // :1843-1846
-                samples_per_chan[chan] = 0;
+                // :1845-1849: peg arrived too => mark idle (never iterated
+                // again until write16/keyon clears the bit); sample stays 0
+                if v.peg_reached != 0 && v.peg_cur == sext14(v.pitch_offset as u32) {
+                    *awm_idle |= 1u64 << chan; // :1847
+                }
                 continue;
             }
 
-            // :1850 (lfo.get_pitch() i16 promotes to s32; peg trimmed to 14 bits)
+            // :1853 (lfo.get_pitch() i16 promotes to s32; peg trimmed to 14 bits)
             let (sample1, trigger_release) = v.streaming.step(
                 wave,
                 v.lfo.get_pitch() as i32,
                 (v.peg_cur & 0x3fff) as u16,
             );
             if trigger_release {
-                v.envelope.trigger_release(); // :1851-1852
+                v.envelope.trigger_release(); // :1854-1855
             }
 
-            let sample2 = v.filter.step(sample1); // :1855
-            let sample3 = v.iir1.step(sample2); // :1856
-            // :1857 EG result u16 + LFO amplitude u16 in int, as s32 level
+            let sample2 = v.filter.step(sample1); // :1858
+            let sample3 = v.iir1.step(sample2); // :1859
+            // :1860 EG result u16 + LFO amplitude u16 in int, as s32 level
             let sample4 = volume_apply(
                 v.envelope.step(sample_counter) as i32 + v.lfo.get_amplitude() as i32,
                 sample3,
             );
 
-            // :1859-1876 --dump-dac (swp30.h:127-129)
+            // :1862-1879 --dump-dac (swp30.h:127-129)
             if let Some(f) = dbg_dac {
                 if chan as i32 == dbg_chan
                     && sample_counter >= dbg_from
@@ -1127,8 +1145,8 @@ impl Channels {
                 }
             }
 
-            v.lfo.step(rand_seed); // :1878 (type-3 refresh consumes rand)
-            samples_per_chan[chan] = sample4; // :1879
+            v.lfo.step(rand_seed); // :1881 (type-3 refresh consumes rand)
+            samples_per_chan[chan] = sample4; // :1882
         }
     }
 }
@@ -1169,4 +1187,43 @@ pub fn dbg_dump(
         iir.m_hy[0],
         iir.m_hy[1]
     );
+}
+
+/// origin: swp30.cpp:4635-4640 (merged) — `--dump-dac` MEG m/r line.
+/// (Disk fprintf is text-mode `\n`→CRLF; like `dbg_dump` above the Rust
+/// seam writes `\n` — parsers must accept both.)
+pub fn dbg_meg_regs(f: &mut std::fs::File, counter: u32, m: &[i32; 0x40], r: &[i32; 0x80]) {
+    use std::io::Write;
+    let mut s = format!("{counter}");
+    for i in 0..0x40 {
+        s.push_str(&format!(" m{i:02x}={}", m[i])); // :4637
+    }
+    for i in 0..0x80 {
+        s.push_str(&format!(" r{i:02x}={}", r[i])); // :4639
+    }
+    let _ = writeln!(f, "{s}");
+}
+
+/// origin: swp30.cpp:4653-4657 (merged) — `--dump-dac` per-voice line.
+pub fn dbg_awm_chans(f: &mut std::fs::File, counter: u32, samples: &[i32; 0x40]) {
+    use std::io::Write;
+    let mut s = format!("awm {counter}");
+    for i in 0..0x40 {
+        if samples[i] != 0 {
+            // :4655-4656 (only nonzero channels)
+            s.push_str(&format!(" c{i:02x}={}", samples[i]));
+        }
+    }
+    let _ = writeln!(f, "{s}");
+}
+
+/// origin: swp30.cpp:3125-3128 — `--dump-dac` send line (values =
+/// `mixer_out[0x10..0x20]` = `m_m[0x20..0x30]`, see mix.rs sample_step).
+pub fn dbg_send(f: &mut std::fs::File, counter: u32, send: &[i32]) {
+    use std::io::Write;
+    let mut s = format!("send {counter}");
+    for (j, v) in send.iter().enumerate() {
+        s.push_str(&format!(" s{j:02x}={v}")); // :3127
+    }
+    let _ = writeln!(f, "{s}");
 }

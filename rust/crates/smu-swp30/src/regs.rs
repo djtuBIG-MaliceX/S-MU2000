@@ -51,7 +51,15 @@ pub struct Swp30 {
     /// stay honest; boot never writes them (verified against golden).
     pub revram_data: u32, // :1991 m_revram_data
     pub rec_ctrl: u16,    // write16 case 0x30e `m_rec_ctrl = data` (:2187)
-    pub keyon_mask: u64,  // keyon_mask_w r/w64 (:2221-2229), reset 0 (:1961)
+    pub keyon_mask: u64,  // keyon_mask_w r/w64 (:2221-2229), reset 0 (:1968)
+    /// origin: swp30.h:629-631 `m_awm_idle` (6.239 idle-voice skip): voices
+    /// that are envelope-inactive AND peg-arrived; `awm2_step` (:1838) does
+    /// not iterate them. Cleared per-channel by EVERY `write16` (:2122, incl.
+    /// the snd_w basin) and by `keyon_w` for the whole mask (:2248);
+    /// reset zeroes all (:1969). State load ALSO zeroes it (disk :4778-4780)
+    /// — deferred M5 (state.rs unported; re-running idle voices on load is
+    /// a proven no-op, awm2_step just re-stamps them).
+    pub awm_idle: u64,
 
     // ---- MEG row (phase A) ----
     /// the meg_state core (swp30.h:333-446; swp30.h:526-527 unique_ptr+ptr
@@ -64,6 +72,10 @@ pub struct Swp30 {
     /// origin: swp30.h:556 m_meg_const_gen (default 0; no reset write —
     /// consts deliberately SURVIVE reset, mirrors disk). Bumped by const_w.
     pub meg_const_gen: u32,
+    /// origin: swp30.h:608 m_meg_off_gen (merged; default 0, no reset write;
+    /// bumped change-gated by offset_w :3390, read only by the unported
+    /// native-FX block :4490 — dead here, ported for fidelity).
+    pub meg_off_gen: u32,
     /// origin: swp30.h:567 m_meg_jit_wait; revram_enable_w sets 1 (:2467).
     /// The JIT rebuild consumer is inert in this port (JIT never built),
     /// kept as an explicit latch so the write side stays transliterated.
@@ -98,9 +110,37 @@ pub struct Swp30 {
     /// swp30.h:355-356). `= {}` in-class zeros -> Op::ZERO pattern.
     pub meg_ops: Box<[crate::meg::Op; 0x180]>,
     /// origin: swp30.h:531 m_meg_ops_stale = true. Cleared by the run loop
-    /// after decode+build (:4185, wiring row); set again on state load
-    /// (:4426 — deferred to M5 state.rs).
+    /// after decode+build (:4408 merged; :4185 pre-merge); set again on state
+    /// load (:4743 region — deferred to M5 state.rs).
     pub meg_ops_stale: bool,
+
+    // ---- MEG idle-region skip row (merged 6.237/6.238) ----
+    /// origin: swp30.h:561 m_meg_regions `= {}` (struct `MegRegion`
+    /// swp30.h:554-560, mirrored in [`crate::meg::MegRegion`])
+    pub meg_regions: [crate::meg::MegRegion; 8],
+    /// origin: swp30.h:562 m_meg_skip_mask = 0 (bit = sleeping region)
+    pub meg_skip_mask: u32,
+    /// origin: swp30.h:563 m_meg_skip_on = true; ctor reads
+    /// SMU2000_MEG_SKIP EXACTLY ONCE (:1898-1899, `e[0] != '0'`).
+    pub meg_skip_on: bool,
+    /// origin: swp30.h:564 m_meg_skip_debug (ctor :1900
+    /// SMU2000_MEG_SKIP_DEBUG != nullptr). Only stderr prints gated.
+    pub meg_skip_debug: bool,
+    /// origin: swp30.h:567 m_meg_prg_dirty `= {}` (bit = program address,
+    /// 6 words x 64 = 0x180). Set by meg_prg_w (:2343), drained by the
+    /// run_sample rebuild block (:4393-4400). NOT reset by device reset.
+    pub meg_prg_dirty: [u64; 6],
+    /// origin: swp30.h:568 m_meg_map_dirty = TRUE (in-class default; a
+    /// fresh device's first rebuild wakes ALL regions :4390-4391)
+    pub meg_map_dirty: bool,
+    /// origin: swp30.h:571 m_meg_idle_all (set by meg_ops_rebuild :4300-4308)
+    pub meg_idle_all: bool,
+    /// origin: swp30.h:572 m_meg_idle_primed (run_sample :4428/4449; an
+    /// all-empty sample was run through, from now on only the seed moves)
+    pub meg_idle_primed: bool,
+    /// origin: swp30.h:573 m_meg_idle_rand (draws one idle sample owes the
+    /// seed; run_sample :4430-4431 rand_skip's exactly this)
+    pub meg_idle_rand: u32,
 
     // ---- debug seam (render.cpp --dump-dac, swp30.h:127-129) ----
     /// origin: swp30.h:127 `std::FILE *m_dbg_dac` — per-stage voice dump sink
@@ -143,10 +183,12 @@ impl Swp30 {
             revram_enable: 0, // swp30.cpp:1992 (reset) — ctor also 0 (no init = zero)
             revram_data: 0,   // :1991
             rec_ctrl: 0,      // m_rec_ctrl default 0
-            keyon_mask: 0,    // :1961
+            keyon_mask: 0,    // :1968
+            awm_idle: 0,      // swp30.h:631 in-class 0 + reset :1969
             meg: MegState::new(), // :1889-1892 (in-class zeros; reset() below)
             meg_program_changed: false, // ctor true (:1893) — set AFTER reset()
             meg_const_gen: 0, // swp30.h:556 default 0
+            meg_off_gen: 0,   // swp30.h:608 default 0 (merged)
             meg_jit_wait: 0,  // swp30.h:567 default 0
             reverb_ram: Box::new([0; 0x40000]), // :1902 assign(1<<18, 0)
             revram_adr: 0,    // :1990 (ctor default 0)
@@ -156,8 +198,17 @@ impl Swp30 {
             meg_ix2_act: [0; 3], // swp30.h:538 `= {}`
             meg_ram_index2: 0, // swp30.h:539
             meg_skip_to: 0, // swp30.h:540
-            meg_ops: Box::new([crate::meg::Op::ZERO; 0x180]), // swp30.h:530 `= {}`
-            meg_ops_stale: true, // swp30.h:531
+            meg_ops: Box::new([crate::meg::Op::ZERO; 0x180]), // swp30.h:546 `= {}`
+            meg_ops_stale: true, // swp30.h:547
+            meg_regions: [crate::meg::MegRegion::ZERO; 8], // swp30.h:561 `= {}`
+            meg_skip_mask: 0,    // swp30.h:562
+            meg_skip_on: true,   // swp30.h:563 (env override below, ctor :1898-1899)
+            meg_skip_debug: false, // swp30.h:564 (env override below, :1900)
+            meg_prg_dirty: [0; 6], // swp30.h:567 `= {}`
+            meg_map_dirty: true, // swp30.h:568 in-class TRUE
+            meg_idle_all: false, // swp30.h:571
+            meg_idle_primed: false, // swp30.h:572
+            meg_idle_rand: 0,    // swp30.h:573
             mixer: Mixer::new(), // swp30.h:497-523/560-563 `= {}` (dirty ~0)
             internal_adr: 0,     // swp30.h:574
             dbg_dac: None,       // swp30.h:127 nullptr
@@ -173,8 +224,17 @@ impl Swp30 {
             last_deferred_addr: 0,
             last_deferred_write: false,
         };
+        // merged 6.237 (ctor :1897-1900): the idle-region skip env is read
+        // EXACTLY here, never per sample ("e[0] != '0'": first byte; an
+        // empty string is true). Env names EXACT: SMU2000_MEG_SKIP and
+        // SMU2000_MEG_SKIP_DEBUG (invariant 1: identical env on both sides).
+        if let Ok(e) = std::env::var("SMU2000_MEG_SKIP") {
+            // :1898-1899
+            s.meg_skip_on = e.as_bytes().first().map_or(true, |c| *c != b'0');
+        }
+        s.meg_skip_debug = std::env::var("SMU2000_MEG_SKIP_DEBUG").is_ok(); // :1900
         s.reset(); // swp30.cpp:1909 (ctor calls reset())
-        s.meg_program_changed = true; // :1893 (meg->reset() at :1892, flag after)
+        s.meg_program_changed = true; // :1896 (meg->reset() at :1892, flag after)
         s
     }
 
@@ -184,8 +244,9 @@ impl Swp30 {
     /// here with mixer row B. Still absent: m_wave_adr/size/access/val
     /// (:1986-89) — the wave arms stay deferred, those latches stay 0 anyway.
     pub fn reset(&mut self) {
-        self.rand_seed = self.rand_seed_base; // :1960
-        self.keyon_mask = 0; // :1961
+        self.rand_seed = self.rand_seed_base; // :1967
+        self.keyon_mask = 0; // :1968
+        self.awm_idle = 0; // :1969 (merged: every voice re-runs after reset)
         self.meg_flag_n = false; // :1962
         self.meg_flag_z = false; // :1962
         self.meg_ix2_value = [0; 3]; // :1963 fill(0)
@@ -211,6 +272,9 @@ impl Swp30 {
         // m_rec_bus: NO reset write on disk (:1958-2000) — survives, like C++
         // m_rec_ctrl (:2187 write latch) has NO reset write on disk — left as-is.
         // m_meg_program_changed/const_gen/jit_wait: NO reset writes on disk.
+        // MERGED-verified (scan of :1958-2000 after upstream 6.237/6.238):
+        // meg_regions/meg_skip_mask/meg_prg_dirty/meg_map_dirty/meg_idle_*
+        // also have NO reset writes — they SURVIVE device reset on disk.
         // m_reverb_ram: NOT cleared by reset (only revram_clear_w regions :2484).
         self.deferred_hits = 0;
         self.last_deferred_addr = 0;
@@ -280,9 +344,54 @@ impl Swp30 {
         };
         let ops = &*self.meg_ops;
         // split-borrow shim: the seam above holds disjoint &mut fields; ops
-        // is the read-only ops table (C++ passes m_meg_ops.data() :4210/4214)
+        // is the read-only ops table (C++ passes m_meg_ops.data() :4442/4446)
         let meg = &mut self.meg;
         crate::meg::run_program(meg, &mut seam, ops);
+    }
+
+    /// origin: swp30_device::meg_prg_w<Sel> :2331-2345 (merged 6.237/6.238):
+    /// **only a real content change** schedules a rebuild, and only the
+    /// dirty addresses become per-address dirty bits (:4393-4395 wakes just
+    /// those regions). C++ template Sel -> runtime `sel` (dispatch parity
+    /// with the write16 arms; the shift/mask inside `prg_w` are Sel-only).
+    pub fn meg_prg_w(&mut self, sel: usize, data: u16) {
+        let a = self.meg.program_address; // :2335
+        let before = if (a as usize) < 0x180 {
+            self.meg.program[a as usize] // :2336
+        } else {
+            0
+        };
+        self.meg.prg_w(sel, data); // :2337
+        if a >= 0x180 {
+            // :2338-2340. NOTE: C++ `prg_w` (:2291-2302) would index
+            // m_program[>=0x180] (UB) on this leg before the check; Rust
+            // would panic. UNREACHABLE on both sides: prg_address_w clamps
+            // >=0x180 to 0 (disk :2278-2283) and Sel==3 auto-increment
+            // wraps (disk :2297-2301). Branch kept transliterated.
+            self.meg_program_changed = true; // :2339
+            self.meg_map_dirty = true; // :2340
+        } else if self.meg.program[a as usize] != before {
+            self.meg_program_changed = true; // :2342
+            self.meg_prg_dirty[(a >> 6) as usize] |= 1u64 << (a & 63); // :2343
+        }
+    }
+
+    /// origin: swp30_device::meg_map_w<Sel> :2353-2361 (merged: the address
+    /// decoding is baked into the ops table, so a map change rebuilds — but
+    /// only when the value actually changed; :4390 then wakes ALL regions).
+    pub fn meg_map_w(&mut self, sel: usize, data: u16) {
+        if self.meg.map_r(sel) != data {
+            // :2356-2359
+            self.meg_program_changed = true;
+            self.meg_map_dirty = true;
+        }
+        self.meg.map_w(sel, data); // :2360
+    }
+
+    /// origin: swp30_device::rand_skip :88-93 (merged 6.237) — the device
+    /// seed leg used by the run_sample idle-primed path (:4430-4431).
+    pub fn rand_skip(&mut self, n: u32) {
+        crate::meg::rand_skip(&mut self.rand_seed, n);
     }
 
     /// A not-yet-ported slot was touched: count it and record the address.
@@ -424,6 +533,11 @@ impl Swp30 {
         // --- channel grid writes :2124-2177 — voice slots REAL (voice-engine
         // row); meg/mixer slots stay deferred (MEG-row territory only) ---
         let chan = (addr >> 6) & 0x3f;
+        // S-MU2000 (merged :2122): any write to a voice wakes it from idle —
+        // ANY register, and this fires on the WHOLE write16 dispatch (global
+        // regs compute a spurious chan too; disk calls that harmless, and the
+        // snd_w basin below is included — clear BEFORE the match arms).
+        self.awm_idle &= !(1u64 << chan); // :2122
         if matches!(slot, 0x21 | 0x23 | 0x25 | 0x27 | 0x29 | 0x2b) {
             // meg_const_w<Sel> (:2146-2160 -> :3394-3398, idx=(offset>>6)*6+Sel)
             let idx = (chan as usize) * 6 + ((slot - 0x21) / 2) as usize;
@@ -431,7 +545,7 @@ impl Swp30 {
             return;
         }
         if matches!(slot, 0x30 | 0x31) {
-            self.meg.offset_w((chan as usize) * 2 + (slot - 0x30) as usize, data); // :3405-3409
+            self.meg.offset_w((chan as usize) * 2 + (slot - 0x30) as usize, data, &mut self.meg_off_gen); // :3413-3419 seam: m_meg_off_gen (merged)
             return;
         }
         if matches!(slot, 0x3e | 0x3f) {
@@ -556,20 +670,21 @@ impl Swp30 {
                 self.meg.prg_address_w(data); // :2196/:2310-2313
                 return;
             }
-            // meg_prg_w<Sel> — meg->prg_w FIRST, then program_changed (:2320-2324)
-            0x44e => { self.meg.prg_w(0, data); self.meg_program_changed = true; return; } // :2197
-            0x44f => { self.meg.prg_w(1, data); self.meg_program_changed = true; return; } // :2198
-            0x48e => { self.meg.prg_w(2, data); self.meg_program_changed = true; return; } // :2199
-            0x48f => { self.meg.prg_w(3, data); self.meg_program_changed = true; return; } // :2200
-            // meg_map_w<Sel> — program_changed FIRST (:2332-2337)
-            0x60e => { self.meg_program_changed = true; self.meg.map_w(0, data); return; } // :2201
-            0x64e => { self.meg_program_changed = true; self.meg.map_w(1, data); return; } // :2202
-            0x68e => { self.meg_program_changed = true; self.meg.map_w(2, data); return; } // :2203
-            0x6ce => { self.meg_program_changed = true; self.meg.map_w(3, data); return; } // :2204
-            0x70e => { self.meg_program_changed = true; self.meg.map_w(4, data); return; } // :2205
-            0x74e => { self.meg_program_changed = true; self.meg.map_w(5, data); return; } // :2206
-            0x78e => { self.meg_program_changed = true; self.meg.map_w(6, data); return; } // :2207
-            0x7ce => { self.meg_program_changed = true; self.meg.map_w(7, data); return; } // :2208
+            // meg_prg_w<Sel> — MERGED :2207-2210 -> :2331-2345: change-gated
+            // rebuild + per-address dirty bitmap (helper below)
+            0x44e => { self.meg_prg_w(0, data); return; } // :2207
+            0x44f => { self.meg_prg_w(1, data); return; } // :2208
+            0x48e => { self.meg_prg_w(2, data); return; } // :2209
+            0x48f => { self.meg_prg_w(3, data); return; } // :2210
+            // meg_map_w<Sel> — MERGED :2211-2218 -> :2353-2361: change-gated
+            0x60e => { self.meg_map_w(0, data); return; } // :2211
+            0x64e => { self.meg_map_w(1, data); return; } // :2212
+            0x68e => { self.meg_map_w(2, data); return; } // :2213
+            0x6ce => { self.meg_map_w(3, data); return; } // :2214
+            0x70e => { self.meg_map_w(4, data); return; } // :2215
+            0x74e => { self.meg_map_w(5, data); return; } // :2216
+            0x78e => { self.meg_map_w(6, data); return; } // :2217
+            0x7ce => { self.meg_map_w(7, data); return; } // :2218
             0x80e => { self.revram_enable_w(data); return; } // :2209/:2458-2468
             0x80f => { self.revram_clear_w(data); return; }  // :2210/:2470-2493
             0x94e => { self.revram_adr_w(1, data); return; } // :2211/:2500-2506
@@ -590,14 +705,16 @@ impl Swp30 {
         self.snd_w(addr, data);
     }
 
-    /// origin: swp30_device::keyon_w :2236-2259. The data argument is IGNORED
-    /// on disk (:2236 `keyon_w(u16)`); the keyon comes from `keyon_mask`.
-    /// Exact per-channel order :2245-2252 (streaming/filter/iir1/envelope/
-    /// lfo/peg). The g_verbose dbg_notes block (:2241-2244) and the
-    /// `logerror[%08d] keyon` trace (:2254-2255) are debug sinks with no
+    /// origin: swp30_device::keyon_w :2246-2270 (merged). The data argument is
+    /// IGNORED on disk (:2246 `keyon_w(u16)`); the keyon comes from
+    /// `keyon_mask`. :2248 wakes every keyed voice from idle first.
+    /// Exact per-channel order :2256-2263 (streaming/filter/iir1/envelope/
+    /// lfo/peg). The g_verbose dbg_notes block (:2252-2255) and the
+    /// `logerror[%08d] keyon` trace (:2265-2266) are debug sinks with no
     /// state effect (logerror is off in this port like WTRACE/snd_w) —
     /// not reproduced; `m_streaming[].describe()` is therefore not called.
     pub fn keyon_w(&mut self, _data: u16) {
+        self.awm_idle &= !self.keyon_mask; // :2248 (merged)
         // disjoint field borrows (machine seed + voice grid)
         let keyon_mask = &mut self.keyon_mask;
         let voices = &mut self.voices;

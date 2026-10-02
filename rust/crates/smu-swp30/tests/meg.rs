@@ -16,7 +16,7 @@
 
 use std::sync::OnceLock;
 
-use smu_swp30::meg::{Decoded, LFO_INCREMENT_TABLE};
+use smu_swp30::meg::{rand_jump, rand_skip, Decoded, LFO_INCREMENT_TABLE};
 use smu_swp30::regs::Swp30;
 
 const DECODE: &str = include_str!("data/meg_decode.txt");
@@ -618,6 +618,28 @@ fn rand_and_revram_calls() {
             swp.meg.call_rand(&mut swp.rand_seed);
             assert_eq!(swp.meg.retval, u32::from_str_radix(f[2], 16).unwrap(), "n {line}");
             assert_eq!(swp.rand_seed, u32::from_str_radix(f[3], 16).unwrap(), "n seed {line}");
+        }
+        // merged 6.237 rand_jump/rand_skip pins (gt_rand2.cpp j lines)
+        if f[0] == "j" {
+            let n = u32::from_str_radix(f[1], 16).unwrap();
+            swp.rand_seed = 0x9d14abd7;
+            rand_skip(&mut swp.rand_seed, n);
+            assert_eq!(swp.rand_seed, u32::from_str_radix(f[2], 16).unwrap(), "j {line}");
+            // the (mul,add) pair must equal n single rand() calls from ANY
+            // seed (small n loop-checked here, all n pinned by the seed line)
+            let (mul, add) = rand_jump(n);
+            if n <= 4096 {
+                let probe = 0x1357_9BDFu32.wrapping_mul(n | 1);
+                let mut s = probe;
+                for _ in 0..n {
+                    smu_swp30::voice::swp_rand(&mut s);
+                }
+                assert_eq!(
+                    mul.wrapping_mul(probe).wrapping_add(add),
+                    s,
+                    "j mul/add n={n:x}"
+                );
+            }
         }
         if f[0] == "x" {
             let v0 = u32::from_str_radix(f[1], 16).unwrap();
