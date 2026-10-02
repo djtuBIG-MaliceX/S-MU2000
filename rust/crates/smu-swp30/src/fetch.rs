@@ -1023,3 +1023,120 @@ impl StreamingBlock {
         &MAX_VALUE
     }
 }
+
+// ---- M5-W3b state serializer (origin: swp30.cpp:4721 s.stdarr(m_streaming)) ----
+// Element stream = RAW C++ struct bytes (stdarr memcpy). Layout ground truth:
+// g++ -std=c++20 -O3 (x86-64) harness %TEMP%\opencode\stategt\gt.cpp
+// (data members byte-copied from swp30.h:156-169): sizeof==52, offsets below.
+impl StreamingBlock {
+    /// harness `sizeof(streaming_block)` == 52 (pad @14-15 after m_pitch,
+    /// pad @47 after m_done, tail pad @50-51 for align-4).
+    pub const STATE_SIZE: usize = 52;
+
+    /// append this block's 52 wire bytes (C++ declaration order, explicit
+    /// LE widths, bool = 1 byte, explicit pad fillers)
+    pub fn state_bytes(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.m_start.to_le_bytes()); // swp30.h:156 @0
+        out.extend_from_slice(&self.m_loop.to_le_bytes()); // :157 @4
+        out.extend_from_slice(&self.m_address.to_le_bytes()); // :158 @8
+        out.extend_from_slice(&self.m_pitch.to_le_bytes()); // :159 @12
+        out.extend_from_slice(&[0u8; 2]); // pad @14
+        out.extend_from_slice(&self.m_loop_size.to_le_bytes()); // :161 @16
+        out.extend_from_slice(&self.m_pos.to_le_bytes()); // :162 @20
+        out.extend_from_slice(&self.m_pos_dec.to_le_bytes()); // :163 @24
+        out.extend_from_slice(&self.m_dpcm_s0.to_le_bytes()); // :164 @28
+        out.extend_from_slice(&self.m_dpcm_s1.to_le_bytes()); // :164 @30
+        out.extend_from_slice(&self.m_dpcm_s2.to_le_bytes()); // :164 @32
+        out.extend_from_slice(&self.m_dpcm_s3.to_le_bytes()); // :164 @34
+        out.extend_from_slice(&self.m_dpcm_pos.to_le_bytes()); // :165 @36
+        out.extend_from_slice(&self.m_dpcm_delta.to_le_bytes()); // :166 @40
+        out.push(self.m_first as u8); // :168 @44 (bool = 1 byte)
+        out.push(self.m_finetune_active as u8); // :168 @45
+        out.push(self.m_done as u8); // :168 @46
+        out.push(0u8); // pad @47
+        out.extend_from_slice(&self.m_last.to_le_bytes()); // :169 @48
+        out.extend_from_slice(&[0u8; 2]); // tail pad @50-51
+    }
+
+    /// fill from 52 wire bytes (pads ignored; bool follows != 0, same
+    /// decode rule as StateIo::bool — no repr reading)
+    pub fn state_load(&mut self, b: &[u8]) {
+        let g = |o: usize, n: usize| &b[o..o + n];
+        self.m_start = i32::from_le_bytes(g(0, 4).try_into().unwrap());
+        self.m_loop = i32::from_le_bytes(g(4, 4).try_into().unwrap());
+        self.m_address = u32::from_le_bytes(g(8, 4).try_into().unwrap());
+        self.m_pitch = u16::from_le_bytes(g(12, 2).try_into().unwrap());
+        self.m_loop_size = i32::from_le_bytes(g(16, 4).try_into().unwrap());
+        self.m_pos = i32::from_le_bytes(g(20, 4).try_into().unwrap());
+        self.m_pos_dec = i32::from_le_bytes(g(24, 4).try_into().unwrap());
+        self.m_dpcm_s0 = i16::from_le_bytes(g(28, 2).try_into().unwrap());
+        self.m_dpcm_s1 = i16::from_le_bytes(g(30, 2).try_into().unwrap());
+        self.m_dpcm_s2 = i16::from_le_bytes(g(32, 2).try_into().unwrap());
+        self.m_dpcm_s3 = i16::from_le_bytes(g(34, 2).try_into().unwrap());
+        self.m_dpcm_pos = u32::from_le_bytes(g(36, 4).try_into().unwrap());
+        self.m_dpcm_delta = i32::from_le_bytes(g(40, 4).try_into().unwrap());
+        self.m_first = b[44] != 0;
+        self.m_finetune_active = b[45] != 0;
+        self.m_done = b[46] != 0;
+        self.m_last = i16::from_le_bytes(g(48, 2).try_into().unwrap());
+    }
+}
+
+#[cfg(test)]
+mod state_layout_tests {
+    use super::*;
+
+    /// Every field byte-group at its g++-harness offset (layout.txt:
+    /// m_start 0, m_loop 4, m_address 8, m_pitch 12, pad 14, m_loop_size
+    /// 16, m_pos 20, m_pos_dec 24, s0 28, s1 30, s2 32, s3 34, dpcm_pos
+    /// 36, dpcm_delta 40, bools 44/45/46, pad 47, m_last 48, tail 50).
+    #[test]
+    fn streaming_state_image_offsets_match_harness() {
+        let mut b = StreamingBlock::NEW;
+        b.m_start = -0x0102_0304;
+        b.m_loop = 0x1112_1314;
+        b.m_address = 0x2122_2324;
+        b.m_pitch = 0x3132;
+        b.m_loop_size = -0x4142_4344;
+        b.m_pos = 0x5152_5354;
+        b.m_pos_dec = -0x6162_6364;
+        b.m_dpcm_s0 = -0x7172;
+        b.m_dpcm_s1 = 0x7273;
+        b.m_dpcm_s2 = -0x7374;
+        b.m_dpcm_s3 = 0x7475;
+        b.m_dpcm_pos = 0x8182_8384;
+        b.m_dpcm_delta = -0x1192_9394;
+        b.m_first = true;
+        b.m_finetune_active = true;
+        b.m_done = false;
+        b.m_last = -0x1234;
+        let mut out = Vec::new();
+        b.state_bytes(&mut out);
+        assert_eq!(out.len(), StreamingBlock::STATE_SIZE);
+        let i32le = |v: i32| v.to_le_bytes();
+        assert_eq!(&out[0..4], &i32le(-0x0102_0304));
+        assert_eq!(&out[4..8], &i32le(0x1112_1314));
+        assert_eq!(&out[8..12], &0x2122_2324u32.to_le_bytes());
+        assert_eq!(&out[12..14], &0x3132u16.to_le_bytes());
+        assert_eq!(&out[14..16], &[0, 0], "pad after m_pitch");
+        assert_eq!(&out[16..20], &i32le(-0x4142_4344));
+        assert_eq!(&out[20..24], &i32le(0x5152_5354));
+        assert_eq!(&out[24..28], &i32le(-0x6162_6364));
+        assert_eq!(&out[28..30], &(-0x7172i16).to_le_bytes());
+        assert_eq!(&out[30..32], &0x7273i16.to_le_bytes());
+        assert_eq!(&out[32..34], &(-0x7374i16).to_le_bytes());
+        assert_eq!(&out[34..36], &0x7475i16.to_le_bytes());
+        assert_eq!(&out[36..40], &0x8182_8384u32.to_le_bytes());
+        assert_eq!(&out[40..44], &i32le(-0x1192_9394));
+        assert_eq!(&out[44..47], &[1, 1, 0], "bools m_first/finetune/done");
+        assert_eq!(&out[47..48], &[0], "pad before m_last");
+        assert_eq!(&out[48..50], &(-0x1234i16).to_le_bytes());
+        assert_eq!(&out[50..52], &[0, 0], "tail pad");
+        let mut c = StreamingBlock::NEW;
+        c.state_load(&out);
+        let mut out2 = Vec::new();
+        c.state_bytes(&mut out2);
+        assert_eq!(out, out2, "save/load/save stability");
+        assert!(c.m_first && c.m_finetune_active && !c.m_done);
+    }
+}

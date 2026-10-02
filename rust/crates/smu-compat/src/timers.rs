@@ -2,8 +2,9 @@
 //!
 //! Ledger row M1 `compat/timers`: attotime (:503-535), emu_timer (:542-563 and
 //! its out-of-line `adjust` :730-737), and the clock/rand/timer subset of
-//! `running_machine` (:637-719). `state_sync` (:556, :701-712) lands with the
-//! M5 state row once the serializer interface exists in `smu-machine`.
+//! `running_machine` (:637-719). `state_sync` (:556, :701-712) landed with
+//! the M5 `state io` row — the serializer lives here in `state_io` because
+//! these methods need it (`smu-machine::state` re-exports).
 //!
 //! Quirks copied verbatim (do NOT "fix"):
 //! - `adjust` truncates the double product toward zero (:736). With 28 MHz,
@@ -18,6 +19,8 @@
 //! - `rand()` is MAME's LCG, seed 0x9d14abd7, rotl16 out (:637-647). SWP30 ×2
 //!   carry separate seeds via `set_rand_seed` (mu2000.cpp:1135-1136) — that
 //!   setter lands with the M3 SWP port.
+
+use crate::state_io::StateIo;
 
 /// origin: mamecompat.h:503-532 `struct attotime`. Internally "seconds" as f64.
 #[derive(Clone, Copy, Debug)]
@@ -136,6 +139,13 @@ impl EmuTimer {
     /// origin: :552 `expire_cycles`
     pub fn expire_cycles(&self) -> u64 {
         self.expire
+    }
+
+    /// origin: :556 `state_sync` — the callback (`m_cb`) is rebuilt at
+    /// wiring time, so only the schedule travels.
+    pub fn state_sync(&mut self, s: &mut StateIo<'_>) {
+        s.v(&mut self.expire);
+        s.v(&mut self.param);
     }
 }
 
@@ -262,6 +272,25 @@ impl RunningMachine {
             }
         }
         best
+    }
+
+    /// origin: :699-712 `state_sync` — clock + per-timer schedule, in birth
+    /// order (indices line up by construction). Quirk kept verbatim: on the
+    /// read side a stream/local timer-count mismatch does NOT fail the io —
+    /// it just returns early (:708-709) and lets the caller's later reads
+    /// desync (「数が違う。読み手が食い違いを見る」).
+    pub fn state_sync(&mut self, s: &mut StateIo<'_>) {
+        s.tag("mach"); // :703
+        s.v(&mut self.rand_seed); // :704
+        s.v(&mut self.cycles); // :705
+        let mut n = self.timers.len() as u32; // :706 (u32(m_timers.size()))
+        s.v(&mut n); // :707 — read side OVERWRITES n with the stream count
+        if (n as u64) != self.timers.len() as u64 {
+            return; // :708-709 — on write this is always false (n == len)
+        }
+        for t in &mut self.timers {
+            t.state_sync(s); // :710-711
+        }
     }
 
     /// origin: :683-697 `run_timers`. Fire-and-re-arm happens live: the loop

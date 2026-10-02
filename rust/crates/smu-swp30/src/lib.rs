@@ -9,6 +9,7 @@ pub mod fetch;
 pub mod meg;
 pub mod mix;
 pub mod regs;
+pub mod state;
 pub mod voice;
 
 #[cfg(test)]

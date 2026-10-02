@@ -285,3 +285,106 @@ fn machine_clock_defaults() {
     assert_eq!(m.cycles(), 0);
     assert_eq!(m.next_timer_cycles(), u64::MAX); // nothing scheduled (:675)
 }
+
+// ---- M5-W1: state_sync golden (mamecompat.h:556, :699-712 + state.h) ----
+
+fn hex(v: &[u8]) -> String {
+    v.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[test]
+fn machine_state_sync_golden_bytes_and_restore() {
+    use crate::state_io::StateIo;
+
+    // 2-timer machine: seed default, cycles 1000, t1 @1000+108 param 7,
+    // t2 unscheduled (NEVER adjust keeps ~0) param -3.
+    let mut m = RunningMachine::new();
+    m.set_clock_hz(HZ);
+    let t1 = m.make_timer(|_, _| {});
+    let t2 = m.make_timer(|_, _| {});
+    m.set_cycles(1000);
+    m.timer_adjust(t1, &Attotime::from_ticks(108, HZ), 7);
+    m.timer_adjust(t2, &Attotime::NEVER, -3);
+
+    let mut buf = Vec::new();
+    {
+        let mut io = StateIo::writer(&mut buf);
+        m.state_sync(&mut io);
+        assert!(io.ok());
+    }
+    // hand-built golden: "mach\0\0\0\0" | seed d7ab149d | cyc 1000 | n=2
+    //   | t1 exp 1108(0x454) param 7 | t2 exp ~0 param -3(0xfffffffd)
+    const GOLDEN: &str = "6d61636800000000\
+                          d7ab149d\
+                          e803000000000000\
+                          02000000\
+                          5404000000000000\
+                          07000000\
+                          ffffffffffffffff\
+                          fdffffff";
+    assert_eq!(hex(&buf), GOLDEN);
+
+    // restore into a fresh same-birth-order machine; dirty state first
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let fired = Rc::new(RefCell::new(Vec::<i32>::new()));
+    let f = Rc::clone(&fired);
+    let mut m2 = RunningMachine::new();
+    m2.set_clock_hz(HZ);
+    let u1 = m2.make_timer(move |_, p| f.borrow_mut().push(p));
+    let u2 = m2.make_timer(|_, _| {});
+    m2.rand(); // desync seed
+    m2.set_cycles(7);
+    m2.timer_adjust(u2, &Attotime::from_ticks(35, HZ), 99);
+    {
+        let mut io = StateIo::reader(&buf);
+        m2.state_sync(&mut io);
+        assert!(io.ok(), "{}", io.error());
+    }
+    assert_eq!(m2.cycles(), 1000);
+    assert_eq!(m2.rand(), 0x574a3af2); // seed restored → golden LCG next
+    assert!(m2.timer_scheduled(u1));
+    assert_eq!(m2.timer_expire(u1), 1108);
+    assert!(!m2.timer_scheduled(u2)); // t2's ~0 overwrote the dirty schedule
+    assert_eq!(m2.timer_expire(u2), u64::MAX);
+    m2.run_timers(1108); // param travels: callback sees 7
+    assert_eq!(*fired.borrow(), vec![7]);
+}
+
+#[test]
+fn machine_state_sync_count_mismatch_early_return_quirk() {
+    use crate::state_io::StateIo;
+
+    // writer: ONE timer (cycles 9, expire 9+35=44, param 5)
+    let mut m1 = RunningMachine::new();
+    let t = m1.make_timer(|_, _| {});
+    m1.set_cycles(9);
+    m1.timer_adjust(t, &Attotime::from_ticks(35, HZ), 5);
+    let mut buf = Vec::new();
+    m1.state_sync(&mut StateIo::writer(&mut buf));
+
+    // reader: TWO timers. n=1 != 2 → early return after the count (:708).
+    // NOT an error: ok() stays true, timers untouched, stream parked
+    // exactly on the first schedule byte (「読み手が食い違いを見る」).
+    let mut m2 = RunningMachine::new();
+    let u = m2.make_timer(|_, _| {});
+    m2.make_timer(|_, _| {});
+    m2.set_cycles(5);
+    m2.timer_adjust(u, &Attotime::from_ticks(35, HZ), 1); // dirty expire 40
+    {
+        let mut io = StateIo::reader(&buf);
+        m2.state_sync(&mut io);
+        assert!(io.ok()); // quirk: mismatch alone never fails the io
+        assert_eq!(io.error(), "");
+        assert_eq!(m2.cycles(), 9); // clock WAS read (before the quirk)
+        let mut probe: u8 = 0;
+        io.v(&mut probe);
+        assert_eq!(probe, 44); // next byte = writer t1.expire lo — not consumed
+        assert!(io.ok());
+    }
+    assert_eq!(m2.timer_expire(u), 40); // schedule untouched
+    assert!(m2.timer_scheduled(u));
+
+    // and the write side NEVER early-returns: n == len by construction
+    // (covered above: the 2-timer golden emitted every schedule).
+}

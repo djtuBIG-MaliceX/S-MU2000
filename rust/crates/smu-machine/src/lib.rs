@@ -69,7 +69,10 @@
 //!   mu2000.cpp:997); ROM dir is an explicit argument like boot.cpp's
 //!   `argv[1]` — NO `SMU2000_ROMS` env fallback (session-C finding).
 
+pub mod bootcache;
+pub mod card;
 pub mod midi;
+pub mod nvram;
 pub mod state;
 
 use std::cell::RefCell;
@@ -79,6 +82,7 @@ use std::rc::Rc;
 
 use smu_compat::paths;
 use smu_compat::roms;
+use smu_compat::StateIo;
 use smu_compat::timers::RunningMachine;
 use smu_dev::hd44780::Hd44780;
 use smu_dev::sci4::Sci4;
@@ -292,6 +296,33 @@ impl Adc {
         self.next_event = 0; // :161
         self.mode_update(); // :162
         self.adtrg = true; // :163
+    }
+
+    /// origin: sh_adc.cpp:380-391 (`sh_adc_device::state`). Widths from
+    /// sh_adc.h:77-84: addr u16 x8 / buf u16 x2 (`arr`), adcsr/adcr u8, the
+    /// five channel-config ints, two bools (1 byte), mode/channel/count ints,
+    /// analog_powered/adtrg bools, next_event u64, disk order :383-390.
+    /// m_register_mask (h:79) and the ctor config (port_base/shift,
+    /// intc_vector) are NOT serialized on disk :380-391.
+    pub fn state(&mut self, s: &mut StateIo) {
+        s.tag("adc");                          // :382
+        s.arr(&mut self.addr);                 // :383 arr m_addr (h:77 u16[8])
+        s.arr(&mut self.buf);                  // :383 arr m_buf (h:77 u16[2])
+        s.v(&mut self.adcsr);                  // :384 (h:78 u8)
+        s.v(&mut self.adcr);                   // :384
+        s.v(&mut self.trigger);                // :385 (h:80 int)
+        s.v(&mut self.start_mode);             // :385
+        s.v(&mut self.start_channel);          // :385
+        s.v(&mut self.end_channel);            // :386
+        s.v(&mut self.start_count);            // :386
+        s.v(&mut self.suspend_on_interrupt);   // :387 (h:81 bool)
+        s.v(&mut self.analog_power_control);   // :387
+        s.v(&mut self.mode);                   // :388 (h:82 int)
+        s.v(&mut self.channel);                // :388
+        s.v(&mut self.count);                  // :388
+        s.v(&mut self.analog_powered);         // :389 (h:83 bool)
+        s.v(&mut self.adtrg);                  // :389
+        s.v(&mut self.next_event);             // :390 (h:84 u64)
     }
 
     /// origin: sh_adc.h:75 free_running (is_hs=false folded; MS ctor :38).
@@ -1320,6 +1351,52 @@ impl Sh7042Peripherals for Hub {
         r
     }
 
+    // ---- M5-W2 state seams (sh7042.cpp:412-430) — route each call to the
+    // real device; `Sh7042::state` already enforces the disk call order.
+    // No drain needed: state() never moves IRQ state.
+    fn intc_state(&mut self, s: &mut StateIo) {
+        self.intc.borrow_mut().state(s); // sh7042.cpp:412
+    }
+    fn adc0_state(&mut self, s: &mut StateIo) {
+        self.adc0.borrow_mut().state(s); // :413
+    }
+    fn adc1_state(&mut self, s: &mut StateIo) {
+        self.adc1.borrow_mut().state(s); // :417-418
+    }
+    fn bsc_state(&mut self, s: &mut StateIo) {
+        self.bsc.borrow_mut().state(s); // :419
+    }
+    fn cmt_state(&mut self, s: &mut StateIo) {
+        self.cmt.borrow_mut().state(s); // :420
+    }
+    fn dmac_state(&mut self, s: &mut StateIo) {
+        self.dmac.borrow_mut().state(s); // :421 (shared DMAOR)
+    }
+    fn dmac_ch_state(&mut self, ch: usize, s: &mut StateIo) {
+        self.dmac.borrow_mut().channels[ch].state(s); // :422 (m_dmac0..3)
+    }
+    fn mtu_state(&mut self, s: &mut StateIo) {
+        self.mtu.borrow_mut().state(s); // :423
+    }
+    fn mtu_ch_state(&mut self, ch: usize, s: &mut StateIo) {
+        self.mtu.borrow_mut().ch[ch].state(s); // :424-425 (m_mtu0..4)
+    }
+    /// porta..portf (sh7042.cpp:426-427); a/d are the 32-bit devices, b/c/e/f
+    /// 16-bit (creation :231-236) — each emits its own "port32"/"port16" tag.
+    fn port_state(&mut self, port: usize, s: &mut StateIo) {
+        match port {
+            0 => self.porta.borrow_mut().state(s),
+            1 => self.portb.borrow_mut().state(s),
+            2 => self.portc.borrow_mut().state(s),
+            3 => self.portd.borrow_mut().state(s),
+            4 => self.porte.borrow_mut().state(s),
+            _ => self.portf.borrow_mut().state(s),
+        }
+    }
+    fn sci_state(&mut self, sci: usize, s: &mut StateIo) {
+        self.pair.borrow_mut().sci[sci].state(s); // :428-430 (m_sci[i].lookup())
+    }
+
     // ---- SWP30 window (mu2000.cpp:861-918 wrappers). reg = (a - base)>>1,
     // base = master 0x800000 / slave 0x802000 (mu2000.cpp:921-922). Only r16
     // reads and w16/w32 writes are traced (the disk r8/w8 lambdas have no
@@ -1691,6 +1768,9 @@ pub struct Machine {
     pub sws: Rc<RefCell<[u8; 6]>>,
     pub enc: Rc<RefCell<EncState>>,
     pub card_inserted: Rc<RefCell<bool>>,
+    /// origin: mu2000.h `smartmedia m_card` (state leg mu2000.cpp:3531-3533
+    /// v>=5 — M5-W3a; bus behavior stays with the `smartmedia stub` row)
+    pub card: card::Card,
     pub adc0: Rc<RefCell<Adc>>, // sh7042.cpp:167 (MS, base 0, vec 136)
     pub adc1: Rc<RefCell<Adc>>, // :168 (MS, base 4, vec 137)
     pub ad_peak: Rc<RefCell<[i32; 2]>>, // mu2000.h:869 {0,0}
@@ -1705,13 +1785,30 @@ pub struct Machine {
     /// mu2000.h:925 `m_swp_wait = 0` (SWP_WRITE_CYCLES = 440, mu2000.h:924)
     pub swp_wait: Rc<RefCell<u64>>,
     // ---- machine-side latches (mu2000.h explicit defaults — Invariant 3) ----
-    pub ledsw1: u8, //  :881 = 0
-    pub ledsw2: u8, //  :881 = 0
-    pub d80: u8,    //  :883 = 0
-    pub m_sci_irq: [i8; 2], // :898 {0,0} — sci4 irq0/1 shadow (mu2000.cpp:1130-1131)
-    pub m_sci_irq3: i8,     //  irq3 shadow (:1132)
+    pub ledsw1: u8, //  :888 = 0
+    pub ledsw2: u8, //  :888 = 0
+    pub d80: u8,    //  :890 = 0
+    pub m_sci_irq: [i32; 2], // :905 {0,0} — sci4 irq0/1 shadow (mu2000.cpp:1130-1131).
+    // i32 like disk (state leg :3544 streams `int` = 4 bytes; M5-W4 widened
+    // from i8 — sync_sci4 casts the Core::irq_line i8 through `as i32`).
+    pub m_sci_irq3: i8,     //  irq3 shadow (:1132; NOT on the state stream — :3544 arr is [2])
+    pub pe: u16,            // :898 `u16 m_pe = 0` — encoder phase latch (panel state leg :3543;
+                            // the runtime PORTA seam lives in EncState — W5 re-tap note)
+    pub enc_pending: i32,   // :896 `int m_enc_pending = 0` — panel state leg :3543 (runtime
+                            // PORTA seam lives in EncState — W5 re-tap note)
+    /// SWP30 sampling RAM (mu2000.h:874 `m_sampram`; ctor mu2000.cpp:88
+    /// assign(0x400000, 0)). Rides the state stream (mu2000.cpp:3530).
+    /// DEVIATION (ledger-disclosed, M5-W4): the wave-path overlay
+    /// (`set_sample_ram` -> wave_cache overlay, swp30.h:53) is NOT wired —
+    /// fetch.rs:15-16 overlay-free row — so nothing writes here yet; the
+    /// field exists so the state BYTES match C++ and the sampling row can
+    /// wire the overlay without touching the layout.
+    pub sampram: Vec<u8>,
     // ---- run-loop counters (mu2000.h members) ----
     pub overrun: u64, // m_overrun
+    pub cycle_debt: u64, // :925 `m_cycle_debt = 0` — state leg :3545; the
+                        // render.rs statetest run_sample helper threads it
+                        // through `&mut m.cycle_debt` (mu2000.cpp:3232-3234)
     pub loops: u64,   // m_loops (:1169)
     pub timer_fires: u64, // m_timer_fires (:1176)
     pub event_fires: u64, // m_event_fires (:1185)
@@ -1822,6 +1919,7 @@ impl Machine {
             sws,
             enc,
             card_inserted,
+            card: card::Card::new(), // mu2000.h m_card (smartmedia.h:82-90 inits)
             adc0,
             adc1,
             ad_peak,
@@ -1837,7 +1935,11 @@ impl Machine {
             d80: 0,
             m_sci_irq: [0, 0],
             m_sci_irq3: 0,
+            pe: 0,                          // mu2000.h:898 = 0 (M5-W4 state leg :3543)
+            enc_pending: 0,                 // mu2000.h:896 = 0 (M5-W4 state leg :3543)
+            sampram: vec![0u8; 0x400000],   // mu2000.cpp:88 assign(0x400000, 0)
             overrun: 0,
+            cycle_debt: 0,                  // mu2000.h:925 = 0 (M5-W4 state leg :3545)
             loops: 0,
             timer_fires: 0,
             event_fires: 0,
@@ -1971,8 +2073,10 @@ impl Machine {
     fn sync_sci4(&mut self) {
         let cur = { self.sci4.core().borrow().irq_line };
         for i in 0..2 {
-            if cur[i] != self.m_sci_irq[i] {
-                self.m_sci_irq[i] = cur[i];
+            // i8->i32 widen (M5-W4: the shadow is `int` like disk :905;
+            // values are -1/0/1 so the widening is value-exact)
+            if cur[i] as i32 != self.m_sci_irq[i] {
+                self.m_sci_irq[i] = cur[i] as i32;
                 let or = (self.m_sci_irq[0] != 0 || self.m_sci_irq[1] != 0) as i8;
                 self.q.borrow_mut().push_back(Evt::SetInput { line: 0, state: or });
             }
@@ -2519,5 +2623,59 @@ mod glue_tests {
         let sd = m.swps.borrow();
         assert_eq!(sd.mixer.meli[0], smu_swp30::mix::SERIAL_FULL_SCALE);
         assert_eq!(sd.mixer.meli[9], smu_swp30::mix::SERIAL_FULL_SCALE);
+    }
+
+    /// M5-W2: `Adc::state` (sh_adc.cpp:380-391) — save→load→save byte
+    /// equality on quirky values through the real hub-side device type.
+    #[test]
+    fn adc_state_roundtrip_quirky() {
+        use smu_compat::StateIo;
+        let mut a = Adc::new_ms(0, 136);
+        a.device_reset();
+        a.addr = [1, 2, 3, 0x8000, 5, 6, 0xffff, 8];
+        a.buf = [0xabcd, 0xef01];
+        a.adcsr = 0xe0; // ADST|ADIE|ADF
+        a.adcr = 0x07;
+        a.trigger = -1;
+        a.start_mode = 0x44; // COUNTED|BUFFER (HS-only bits — quirky payload)
+        a.start_channel = -2;
+        a.end_channel = i32::MAX;
+        a.start_count = 0x55aa_55aa_u32 as i32;
+        a.suspend_on_interrupt = true;
+        a.analog_power_control = true;
+        a.mode = 0x6d;
+        a.channel = 7;
+        a.count = -1;
+        a.analog_powered = false; // quirky flip (ctor says true)
+        a.adtrg = false;
+        a.next_event = u64::MAX - 7;
+
+        let mut s1 = Vec::new();
+        {
+            let mut s = StateIo::writer(&mut s1);
+            a.state(&mut s);
+            assert!(s.ok(), "save: {}", s.error());
+        }
+        assert_eq!(&s1[0..8], b"adc\0\0\0\0\0");
+        // 16 + 4 addr, 4 buf, 2 u8, 5 ints, 2 bools, 3 ints, 2 bools, u64
+        assert_eq!(s1.len(), 8 + 16 + 4 + 2 + 20 + 2 + 12 + 2 + 8);
+
+        let mut fresh = Adc::new_ms(0, 136);
+        {
+            let mut s = StateIo::reader(&s1);
+            fresh.state(&mut s);
+            assert!(s.ok(), "load: {}", s.error());
+        }
+        let mut s2 = Vec::new();
+        {
+            let mut s = StateIo::writer(&mut s2);
+            fresh.state(&mut s);
+            assert!(s.ok());
+        }
+        assert_eq!(s1, s2);
+        assert_eq!(fresh.addr, a.addr);
+        assert_eq!(fresh.next_event, a.next_event);
+        assert_eq!(fresh.analog_powered, false);
+        assert_eq!(fresh.adtrg, false);
     }
 }

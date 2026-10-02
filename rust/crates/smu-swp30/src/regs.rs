@@ -31,6 +31,7 @@ pub const SLAVE_BASE: u32 = 0x0080_2000;
 use crate::meg::MegState;
 use crate::mix::{Mixer, MixerSlot};
 use crate::voice::{sext14, Channels, RAND_SEED_INIT};
+use smu_compat::timers::RunningMachine;
 
 /// SWP30 register-dispatch device. Voice state lives in `voices` (row
 /// `voice engine`); MEG and mixer/serial state live in `meg`/`mixer`
@@ -41,6 +42,15 @@ pub struct Swp30 {
     /// origin: swp30.h:451 m_rand_seed / m_rand_seed_base (0x9d14abd7)
     pub rand_seed: u32,
     pub rand_seed_base: u32,
+    /// origin: swp30.h:465 `running_machine m_machine` — the CHIP-LOCAL
+    /// compat machine (value member, NOT mu2000's; h:62-78 "chip per
+    /// sequence"). Only ever touched at swp30.cpp:4709 (`state_sync`) and
+    /// verify.cpp:32 (`machine().rand`, verify binary only — never saves
+    /// state). On every state path it is pristine: seed 0x9d14abd7,
+    /// cycles 0, zero timers (mamecompat.h:715-717 — the defaults
+    /// `RunningMachine::new` reproduces). The chip LCG is `rand_seed`
+    /// above, never this machine's.
+    pub machine: RunningMachine,
     /// the 64-voice AWM2 grid (m_streaming/m_filter/m_iir1/m_envelope/m_lfo +
     /// m_pitch_offset/m_peg_rate/m_peg_cur/m_peg_reached, swp30.h:460-468)
     pub voices: Channels,
@@ -51,6 +61,26 @@ pub struct Swp30 {
     /// stay honest; boot never writes them (verified against golden).
     pub revram_data: u32, // :1991 m_revram_data
     pub rec_ctrl: u16,    // write16 case 0x30e `m_rec_ctrl = data` (:2187)
+    /// origin: swp30.h:619 `m_rec_pos` (v4 state leg :4762). No writer in
+    /// this port yet — the rec block (`m_rec_pos++` :4686) is deferred to
+    /// the sampling-RAM row (mix.rs module doc). NOT cleared by device
+    /// reset (no :1958-2000 write on disk).
+    pub rec_pos: u32,
+    /// origin: swp30.h:624 `m_sample_counter`. DEAD since the merge: no
+    /// write anywhere post-construction (device reset :1965-2009 omits it;
+    /// the :1961 zero is meg_state::reset touching MEG's own counter);
+    /// every live user reads `m_meg->m_sample_counter` (:1860/:2611 — Rust
+    /// `meg.sample_counter`). Materialised anyway because the state stream
+    /// carries this slot (:4747) — keeps bytes cross-loadable with C++.
+    pub sample_counter: u32,
+    /// origin: swp30.h:625-626 `m_wave_adr/m_wave_size/m_wave_val/
+    /// m_wave_access`. The wave-access arms are still deferred (wave-access
+    /// row) so these latches stay 0 (boot golden writes none); reset zeroes
+    /// them :1986-1989; state legs :4748-4750.
+    pub wave_adr: u32,
+    pub wave_size: u32,
+    pub wave_val: u32,
+    pub wave_access: u16,
     pub keyon_mask: u64,  // keyon_mask_w r/w64 (:2221-2229), reset 0 (:1968)
     /// origin: swp30.h:629-631 `m_awm_idle` (6.239 idle-voice skip): voices
     /// that are envelope-inactive AND peg-arrived; `awm2_step` (:1838) does
@@ -80,10 +110,12 @@ pub struct Swp30 {
     /// The JIT rebuild consumer is inert in this port (JIT never built),
     /// kept as an explicit latch so the write side stays transliterated.
     pub meg_jit_wait: u32,
-    /// origin: swp30.h:453+570 m_reverb_ram / m_revram_adr / (enable above).
+    /// origin: swp30.h:469 `std::vector<u16> m_reverb_ram` (18bit space).
     /// 1<<18 words, zeroed at device_start (:1902 `assign`); device reset
     /// does NOT clear it (:1958-2000) — only revram_clear_w regions (:2484).
-    pub reverb_ram: Box<[u16; 0x40000]>,
+    /// Vec (not Box<[u16;N]>) so the state load can mirror `resize(n)`
+    /// verbatim (swp30.cpp:4717).
+    pub reverb_ram: Vec<u16>,
     pub revram_adr: u32,
 
     // ---- MEG row (phase B) — device-side meg glue, swp30.h:534-540 ----
@@ -179,10 +211,17 @@ impl Swp30 {
         let mut s = Swp30 {
             rand_seed: RAND_SEED_INIT, // swp30.h:451
             rand_seed_base: RAND_SEED_INIT, // swp30.h:451
+            machine: RunningMachine::new(), // swp30.h:465 (chip-local value member; mamecompat :715-717 defaults — never touched on machine paths)
             voices: Channels::new(), // in-class zeros; reset() below applies clear()
             revram_enable: 0, // swp30.cpp:1992 (reset) — ctor also 0 (no init = zero)
             revram_data: 0,   // :1991
             rec_ctrl: 0,      // m_rec_ctrl default 0
+            rec_pos: 0,       // swp30.h:619 in-class 0
+            sample_counter: 0, // swp30.h:624 in-class 0 (dead latch, see field doc)
+            wave_adr: 0,      // swp30.h:625
+            wave_size: 0,     // swp30.h:625
+            wave_val: 0,      // swp30.h:625
+            wave_access: 0,   // swp30.h:626
             keyon_mask: 0,    // :1968
             awm_idle: 0,      // swp30.h:631 in-class 0 + reset :1969
             meg: MegState::new(), // :1889-1892 (in-class zeros; reset() below)
@@ -190,7 +229,7 @@ impl Swp30 {
             meg_const_gen: 0, // swp30.h:556 default 0
             meg_off_gen: 0,   // swp30.h:608 default 0 (merged)
             meg_jit_wait: 0,  // swp30.h:567 default 0
-            reverb_ram: Box::new([0; 0x40000]), // :1902 assign(1<<18, 0)
+            reverb_ram: vec![0u16; 0x40000], // :1902 assign(1<<18, 0)
             revram_adr: 0,    // :1990 (ctor default 0)
             meg_flag_n: false, // swp30.h:534 in-class false
             meg_flag_z: false, // :534
@@ -241,8 +280,8 @@ impl Swp30 {
     /// origin: swp30_device::reset :1958-2000 — exact order for the fields
     /// this device models. m_meg_flag/ix2 (:1962-63) land here (MEG phase B);
     /// mixer+mix_dirty (:1966-67) and nsend/meli/melo/adc (:1994-99) land
-    /// here with mixer row B. Still absent: m_wave_adr/size/access/val
-    /// (:1986-89) — the wave arms stay deferred, those latches stay 0 anyway.
+    /// here with mixer row B. Wave latches (:1994-97) ARE zeroed here
+    /// (storage only — the write arms stay deferred, wave-access row).
     pub fn reset(&mut self) {
         self.rand_seed = self.rand_seed_base; // :1967
         self.keyon_mask = 0; // :1968
@@ -256,12 +295,14 @@ impl Swp30 {
         self.mixer.mixer = [MixerSlot::ZERO; 0x80]; // :1966 fill(mixer_slot())
         self.mixer.mix_dirty = [!0u64, !0u64]; // :1967
         self.voices.clear_all(); // :1969-1982 (exact per-array order)
-        self.meg.reset(); // :1984 (MEG row — exact order meg_state::reset :1924-1956)
-        // (m_wave_adr/size/access/val :1986-89 — wave-access row; latches
-        //  remain 0 here because the wave arms are still deferred)
-        self.revram_adr = 0; // :1990
-        self.revram_data = 0; // :1991
-        self.revram_enable = 0; // :1992
+        self.meg.reset(); // :1992 (MEG row — exact order meg_state::reset :1924-1963)
+        self.wave_adr = 0; // :1994 (arms deferred, but reset zeroes for real)
+        self.wave_size = 0; // :1995
+        self.wave_access = 0; // :1996
+        self.wave_val = 0; // :1997
+        self.revram_adr = 0; // :1998
+        self.revram_data = 0; // :1999
+        self.revram_enable = 0; // :2000
         for s in self.mixer.nsend.iter_mut() {
             s[0] = 0; // :1994-1995
             s[1] = 0;

@@ -122,6 +122,15 @@ impl ShPort16 {
     /// `m_dr`/`m_io` — direction and latch survive a reset unchanged.
     pub fn device_reset(&mut self) {}
 
+    /// origin: sh_port.cpp:124-128 (`sh_port16_device::state`); tag "port16",
+    /// m_dr/m_io u16 (sh_port.h:48). Config members (m_index/m_default_io/
+    /// m_mask) are ctor constants — NOT serialized on disk :124-128.
+    pub fn state(&mut self, s: &mut smu_compat::StateIo) {
+        s.tag("port16");       // :126
+        s.v(&mut self.m_dr);   // :127
+        s.v(&mut self.m_io);   // :127
+    }
+
     /// origin: sh_port.cpp:36-49 `dr_r`.
     /// Reads the pin delegate only when `(~m_io & ~m_mask) != 0` (bits that are
     /// input AND unmasked exist). Return = latched outputs OR'd with the pin
@@ -217,6 +226,14 @@ impl ShPort32 {
 
     /// origin: sh_port.cpp:91-93 `device_reset()` is empty (NO-OP).
     pub fn device_reset(&mut self) {}
+
+    /// origin: sh_port.cpp:130-134 (`sh_port32_device::state`); tag "port32",
+    /// m_dr/m_io u32 (sh_port.h:79).
+    pub fn state(&mut self, s: &mut smu_compat::StateIo) {
+        s.tag("port32");       // :132
+        s.v(&mut self.m_dr);   // :133
+        s.v(&mut self.m_io);   // :133
+    }
 
     /// origin: sh_port.h:70 `io_now()` (used by `sh7042_device::porta_io`,
     /// sh7042.h:82, to peek the dial direction from outside). 16-bit class has

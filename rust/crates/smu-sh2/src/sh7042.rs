@@ -32,6 +32,8 @@
 
 use crate::core::Sh2Bus;
 use crate::device::Sh2Device;
+// origin: src/state.h — layout engine (smu_compat re-export, M5-W1)
+use smu_compat::StateIo;
 
 // origin: src/mame/cpu/sh.h:54 (#define CPU_TYPE_SH2 (1)) — passed at sh7042.cpp:41
 pub const CPU_TYPE_SH2: i32 = 1;
@@ -215,6 +217,25 @@ pub trait Sh7042Peripherals {
     fn sci_update(&mut self, sci: usize, current_time: u64) -> u64 {
         0
     } // sh7042.cpp:291-292 (sci0, sci1)
+
+    // ---- M5-W2 state seams (sh7042.cpp:412-430). `Sh7042::state` calls these
+    // in the EXACT disk order; each device emits its own tag. Defaults are
+    // silent (no bytes): a fake/test periph that does not carry the device
+    // contributes nothing — the real Hub always routes to the real devices.
+    fn intc_state(&mut self, _s: &mut StateIo) {} // sh7042.cpp:412
+    fn adc0_state(&mut self, _s: &mut StateIo) {} // :413
+    fn adc1_state(&mut self, _s: &mut StateIo) {} // :417-418 (die-A, version>=8)
+    fn bsc_state(&mut self, _s: &mut StateIo) {} // :419
+    fn cmt_state(&mut self, _s: &mut StateIo) {} // :420
+    fn dmac_state(&mut self, _s: &mut StateIo) {} // :421 (shared DMAOR)
+    fn dmac_ch_state(&mut self, _ch: usize, _s: &mut StateIo) {} // :422 ch0..3
+    fn mtu_state(&mut self, _s: &mut StateIo) {} // :423 (shared TSTR..)
+    fn mtu_ch_state(&mut self, _ch: usize, _s: &mut StateIo) {} // :424-425 ch0..4
+    /// porta..portf, index 0..5 (sh7042.cpp:426-427). Each port knows its own
+    /// width/tag: a/d are sh_port32 ("port32"), b/c/e/f are sh_port16
+    /// ("port16") — sh_port.cpp:124-134, creation sh7042.cpp:231-236.
+    fn port_state(&mut self, _port: usize, _s: &mut StateIo) {}
+    fn sci_state(&mut self, _sci: usize, _s: &mut StateIo) {} // :428-430 (m_sci[i].lookup())
 
     // ---- bus SWP30 windows (handlers get absolute addr; reg == (a-base)>>1).
     // NO swp r32 exists on disk (mu2000.cpp:858-918 registers r8/r16/w8/w16/w32) ----
@@ -1417,6 +1438,58 @@ impl Sh7042 {
         // device_reset reaching the machine-supplied program bus
         let mut ctx = BusCtx { bus: &mut self.bus };
         self.dev.device_reset(&mut ctx); // sh7042.cpp:148
+    }
+
+    /// origin: src/mame/cpu/sh7042.cpp:403-431. Tag, then the sh2 part (:406),
+    /// the event bookkeeping (:407) and the eight PCF pin regs (:408-409,
+    /// widths per sh7042.h:176-183), then EVERY internal peripheral in birth
+    /// order (:412-430). The adc1 leg (:414-418, issue #18): version>=8 AND
+    /// present — C++ gates on the optional device pointer `m_adc1`
+    /// (created only on die-A, sh7042.cpp:166-170; mirrored by `m_die_a`).
+    /// The sci loop (:428-430) skips absent devices via `lookup()`; here the
+    /// seam method is always routed (the Hub pair always exists).
+    pub fn state(&mut self, s: &mut StateIo) {
+        s.tag("sh7042");                     // :405
+        self.dev.state(s);                   // :406 sh2_device::state
+        s.v(&mut self.m_event_cycles);       // :407 (sh7042.h:173 u64)
+        s.v(&mut self.m_in_event);           // :407 (sh7042.h:174 bool)
+        s.v(&mut self.bus.m_pcf_ah);         // :408 (h:176 u16)
+        s.v(&mut self.bus.m_pcf_al);         // :408 (h:177 u32)
+        s.v(&mut self.bus.m_pcf_b);          // :408 (h:178 u32)
+        s.v(&mut self.bus.m_pcf_c);          // :408 (h:179 u16)
+        s.v(&mut self.bus.m_pcf_dh);         // :409 (h:180 u32)
+        s.v(&mut self.bus.m_pcf_dl);         // :409 (h:181 u16)
+        s.v(&mut self.bus.m_pcf_e);          // :409 (h:182 u32)
+        s.v(&mut self.bus.m_pcf_if);         // :409 (h:183 u16)
+        // :411 "内蔵の周辺。生まれた順にたどる" — birth order, not address order
+        if let Some(p) = self.bus.periph.as_mut() {
+            p.intc_state(s); // :412
+            p.adc0_state(s); // :413
+            if s.version() >= 8 && self.m_die_a {
+                // :417-418 (s.version()>=8 && m_adc1)
+                p.adc1_state(s);
+            }
+            p.bsc_state(s);  // :419
+            p.cmt_state(s);  // :420
+            p.dmac_state(s); // :421
+            // :422 m_dmac0..3 — ShDmac owns the four channel structs
+            for ch in 0..4usize {
+                p.dmac_ch_state(ch, s);
+            }
+            p.mtu_state(s); // :423
+            // :424-425 m_mtu0..4
+            for ch in 0..5usize {
+                p.mtu_ch_state(ch, s);
+            }
+            // :426-427 porta..portf (a/d 32-bit, b/c/e/f 16-bit)
+            for port in 0..6usize {
+                p.port_state(port, s);
+            }
+            // :428-430 sci0, sci1 (m_sci[i].lookup())
+            for sci in 0..2usize {
+                p.sci_state(sci, s);
+            }
+        }
     }
 
     // origin: src/mame/cpu/sh7042.cpp:242-245 (internal_update() -> timed)

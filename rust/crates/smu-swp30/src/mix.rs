@@ -851,3 +851,29 @@ impl Swp30 {
         }
     }
 }
+
+// ---- M5-W3b state serializer (origin: swp30.cpp:4726 s.stdarr(m_mixer)) ----
+// Harness ground truth %TEMP%\opencode\stategt\gt.cpp (swp30.h:344-345
+// byte-copied): sizeof(mixer_slot)==12, vol@0 route@6 — no padding.
+impl MixerSlot {
+    /// harness `sizeof(mixer_slot)` == 12
+    pub const STATE_SIZE: usize = 12;
+
+    pub fn state_bytes(&self, out: &mut Vec<u8>) {
+        for x in self.vol {
+            out.extend_from_slice(&x.to_le_bytes()); // std::array<u16,3> vol @0
+        }
+        for x in self.route {
+            out.extend_from_slice(&x.to_le_bytes()); // std::array<u16,3> route @6
+        }
+    }
+
+    pub fn state_load(&mut self, b: &[u8]) {
+        for i in 0..3 {
+            self.vol[i] = u16::from_le_bytes(b[i * 2..][..2].try_into().unwrap());
+        }
+        for i in 0..3 {
+            self.route[i] = u16::from_le_bytes(b[6 + i * 2..][..2].try_into().unwrap());
+        }
+    }
+}

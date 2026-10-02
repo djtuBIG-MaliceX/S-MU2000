@@ -10,4 +10,7 @@
 pub mod bus;
 pub mod paths;
 pub mod roms;
+pub mod state_io;
 pub mod timers;
+
+pub use state_io::{state_pack, state_unpack, StateIo};

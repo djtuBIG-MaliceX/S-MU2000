@@ -1,6 +1,7 @@
 //! SH-2 interpreter core — transliteration of `src/mame/cpu/sh.cpp` (live interpreter
-//! region, lines 1..1875; the dead DRC note at :1876 and `state()` at :1881 are NOT
-//! ported here — `state()` is ledger row M5) plus the SH-2 virtual overrides and the
+//! region, lines 1..1875 plus the `state()` serializer at :1881, ledger row M5-W2;
+//! the dead DRC note at :1876 is not
+//! ported) plus the SH-2 virtual overrides and the
 //! fetch/dispatch loop of `src/mame/cpu/sh2.cpp` that the interpreter needs to run:
 //! masked bus wrappers (:89-152), check_pending_irq (:154-178), LDCMSR/LDCSR/RTE/
 //! TRAPA/ILLEGAL (:180-245), execute_one_f000 (:247-250), execute_run (:252-291),
@@ -19,6 +20,9 @@
 //!   (`//#define VERBOSE 1`, sh2.cpp:24) and are omitted — zero state effect.
 //! - C++ signed overflow that is UB on x86 (wraps in practice: DMULS `0 - INT_MIN`,
 //!   MAC_W `int32 *=`) is rendered `wrapping_*`; bit-identical on the MinGW baseline.
+
+// origin: src/state.h — layout engine (smu_compat re-export, M5-W1)
+use smu_compat::StateIo;
 
 // origin: src/mame/cpu/sh.h:62-66 (Bits in SR)
 pub const SH_T: u32 = 0x0000_0001;
@@ -97,80 +101,148 @@ impl InstructionHook for NoHook {
 /// (sh.h:106-159, the POD that sh.cpp:1884 `state()` serializes whole) plus the
 /// sh2_device members the ported loop touches (sh2.h:65-67,90-91) and the clock
 /// members of sh.h:234-235. The SH3/4 DRC "near" block sh.h:132-158 (m_ppc..m_fpu_pr)
-/// is DRC-only, never written by the interpreter path, and NOT mirrored.
+/// is DRC-only and never written by the interpreter path, but sh.cpp:1884 dumps it
+/// as part of the POD, so M5-W2 mirrors it here as inert zero-init fields
+/// (grep sh*.cpp: the only writers were the deleted DRC half, sh.cpp:1876+).
+/// `repr(C)` + C++ field order make offsets 0..424 byte-identical to the
+/// g++ ground-truth layout (tests/state.rs golden; sizeof=424, align=8).
+/// DEVIATION (names): the struct members sh.h:140/142 collide with the device
+/// mirrors already here, so their DRC slots are `m_cpu_off_drc`/`m_test_irq_drc`
+/// (always 0 on disk — zero-filled at device_start, no interpreter writer).
+#[repr(C)]
 pub struct Sh2Core {
-    // ---- internal_sh2_state (sh.h:108-130) ----
-    pub r: [u32; 16],
-    pub pc: u32,
-    pub pr: u32,
-    pub sr: u32,
-    pub gbr: u32,
-    pub vbr: u32,
-    pub mach: u32,
-    pub macl: u32,
-    pub ea: u32,
+    // ---- internal_sh2_state, EXACT C++ order (sh.h:108-158, offs 0..424) ----
+    pub pc: u32,          // sh.h:108 (offs 0)
+    pub pr: u32,          // :109 (4)
+    pub sr: u32,          // :110 (8)
+    pub mach: u32,        // :111 (12)
+    pub macl: u32,        // :112 (16)
+    pub r: [u32; 16],     // :113 (20..84)
+    pub ea: u32,          // :114 (84)
+    pub pending_irq: u32, // :116 (88)
+    pub pending_nmi: u32, // :117 (92)
+    pub irqline: i32,     // :118 (96)
+    pub evec: u32,        // :119 (100) exception vector for DRC
+    pub irqsr: u32,       // :120 (104) IRQ-time old SR for DRC
     // Branch/delay state, exactly as C++ has it: `m_delay` (sh.h:130) is BOTH the
     // in-delay-slot flag (0 = none) and the target PC. BRAF/BSRF/JMP/JSR/RTS/RTE/
     // BRA/BSR/BTS/BFS write it; execute_run consumes it on the NEXT instruction
     // (sh2.cpp:274-278). There are no separate B/S/T delay-slot flags in this file.
-    // `target` (sh.h:121) exists only for the DRC front end; kept for the M5 state
-    // mirror, never read by the interpreter.
-    pub m_delay: u32,
-    pub target: u32,
-    pub pending_irq: u32,
-    pub pending_nmi: u32,
-    pub irqline: i32,
-    pub evec: u32,      // exception vector for DRC (sh.h:119) — kept for state mirror
-    pub irqsr: u32,     // IRQ-time old SR for DRC (sh.h:120) — kept for state mirror
-    pub internal_irq_level: i32,
-    pub icount: i32,
-    pub sleep_mode: u8,
-    pub arg0: u32,      // print_debug args (sh.h:125-126)
-    pub arg1: u32,
+    // `target` (sh.h:121) exists only for the DRC front end; never read here.
+    pub target: u32,      // :121 (108)
+    pub internal_irq_level: i32, // :122 (112)
+    pub icount: i32,      // :123 (116)
+    pub sleep_mode: u8,   // :124 (120)
+    /// mirror of the C++ ABI tail padding after sleep_mode (offs 121..123);
+    /// zero at construction (C++ device_start zero-fills the whole POD),
+    /// serialized verbatim so the stream is byte-identical to memcpy(424).
+    pub pad_sleep: [u8; 3],
+    pub arg0: u32,        // :125 (124) print_debug argument 1
+    pub arg1: u32,        // :126 (128)
+    pub gbr: u32,         // :127 (132)
+    pub vbr: u32,         // :128 (136)
+    pub m_delay: u32,     // :130 (140)
+    // SH3/4 DRC "near" block (sh.h:132-145) — inert here, serialized verbatim
+    pub m_ppc: u32,       // :133 (144)
+    pub m_spc: u32,       // :134 (148)
+    pub m_ssr: u32,       // :135 (152)
+    /// sh.h:136 `uint32_t m_rbnk[2][8]` — [2][8] flattened; same 64 LE bytes.
+    pub m_rbnk: [u32; 16], // :136 (156..220)
+    pub m_sgr: u32,       // :137 (220)
+    pub m_fr: [u32; 16],  // :138 (224..288)
+    pub m_xf: [u32; 16],  // :139 (288..352)
+    pub m_cpu_off_drc: u32, // :140 (352) — see DEVIATION note above
+    pub m_pending_irq: u32, // :141 (356)
+    pub m_test_irq_drc: u32, // :142 (360) — see DEVIATION note above
+    pub m_fpscr: u32,     // :143 (364)
+    pub m_fpul: u32,      // :144 (368)
+    pub m_dbr: u32,       // :145 (372)
+    // FP constants the deleted DRC code referred to by address (sh.h:147-158).
+    // Interpreter path: never assigned (grep sh*.cpp — only in-class `= 0`
+    // defaults), so exact init value is 0/zero-bytes; still serialized with
+    // exact width, round-tripped verbatim.
+    pub m_ftrc_dmin: f64, // :148 (376) = 0
+    pub m_ftrc_dmax: f64, // :149 (384) = 0
+    pub m_ftrc_smin: f32, // :150 (392) = 0
+    pub m_ftrc_smax: f32, // :151 (396) = 0
+    pub m_fzero: f32,     // :152 (400) = 0
+    pub m_fone: f32,      // :153 (404) = 0
+    pub m_fpmode: [u8; 4], // :154 (408) = {}
+    pub m_frt_input: i32, // :156 (412) = 0
+    pub m_fpu_sz: i32,    // :157 (416) = 0
+    pub m_fpu_pr: i32,    // :158 (420) = 0
     // ---- sh2_device / sh_common_execution members used by the ported path ----
+    // (NOT part of the 424-byte POD dump above)
     pub m_am: u32,               // address mask (sh.h:482, set from ctor sh2.cpp:35)
-    pub m_test_irq: u32,         // sh2.h:65
+    pub m_test_irq: u32,         // sh2.h:65 (device-level — sh2.cpp:411 slot)
     pub m_internal_irq_vector: i32, // sh2.h:66
     pub m_nmi_line_state: i8,    // sh2.h:67
-    pub m_cpu_off: u32,          // sh2.h:90
+    pub m_cpu_off: u32,          // sh2.h:90 (device-level — sh2.cpp:412 slot)
     pub m_irq_line_state: [i8; 17], // sh2.h:91 — written by device row (execute_set_input)
     pub m_total_cycles: u64,     // sh.h:234
     pub m_cycles_this_run: i32,  // sh.h:235
-    pub m_pcfsel: i32,           // sh.h:452 — serialized by state() sh.cpp:1885 (M5)
+    pub m_pcfsel: i32,           // sh.h:452 — serialized by state() sh.cpp:1885
 }
 
 impl Sh2Core {
     /// Every field explicitly initialized (ledger Invariant 3 — no Default).
     /// Mirrors sh_common_execution::device_start (sh.cpp:45-63, which zeroes all of
-    /// internal_sh2_state incl. arg0; arg1 = 0 comes from the sh.h:126 in-class
-    /// default) plus the sh2_device in-class defaults (sh2.h:65-67,90-91) and the
-    /// ctor's m_am store (sh2.cpp:35). NOTE: C++ device_reset (sh2.cpp:63-84) then
-    /// re-initializes and sets internal_irq_level = -1 and sr = SH_I — call
-    /// `reset()` for the machine's post-reset state.
+    /// internal_sh2_state incl. arg0 and the DRC block; arg1 = 0 comes from the
+    /// sh.h:126 in-class default) plus the sh2_device in-class defaults
+    /// (sh2.h:65-67,90-91) and the ctor's m_am store (sh2.cpp:35). NOTE: C++
+    /// device_reset (sh2.cpp:63-84) then re-initializes and sets
+    /// internal_irq_level = -1 and sr = SH_I — call `reset()` for the machine's
+    /// post-reset state. The POD defaults below are EXACTLY the in-class `= 0` /
+    /// `= {}` values of sh.h:108-158 (all the FP constants too — grep shows the
+    /// only assignments lived in the deleted DRC half).
     pub fn new(am: u32) -> Self {
         // origin: src/mame/cpu/sh.cpp:45-63 (device_start zero-fill)
         Sh2Core {
-            r: [0; 16],
-            pc: 0,
-            pr: 0,
-            sr: 0,
-            gbr: 0,
-            vbr: 0,
-            mach: 0,
-            macl: 0,
-            ea: 0,
-            m_delay: 0,
-            target: 0,
-            pending_irq: 0,
-            pending_nmi: 0,
-            irqline: 0,
-            evec: 0,
-            irqsr: 0,
-            internal_irq_level: 0,
-            icount: 0,
-            sleep_mode: 0,
-            arg0: 0,
-            arg1: 0,
+            pc: 0,          // sh.h:108
+            pr: 0,          // :109
+            sr: 0,          // :110
+            mach: 0,        // :111
+            macl: 0,        // :112
+            r: [0; 16],     // :113
+            ea: 0,          // :114
+            pending_irq: 0, // :116
+            pending_nmi: 0, // :117
+            irqline: 0,     // :118
+            evec: 0,        // :119
+            irqsr: 0,       // :120
+            target: 0,      // :121
+            internal_irq_level: 0, // :122
+            icount: 0,      // :123
+            sleep_mode: 0,  // :124
+            pad_sleep: [0; 3], // padding mirror (C++ device_start zero-fills)
+            arg0: 0,        // :125
+            arg1: 0,        // :126
+            gbr: 0,         // :127
+            vbr: 0,         // :128
+            m_delay: 0,     // :130
+            m_ppc: 0,       // :133
+            m_spc: 0,       // :134
+            m_ssr: 0,       // :135
+            m_rbnk: [0; 16], // :136
+            m_sgr: 0,       // :137
+            m_fr: [0; 16],  // :138
+            m_xf: [0; 16],  // :139
+            m_cpu_off_drc: 0,   // :140
+            m_pending_irq: 0,   // :141
+            m_test_irq_drc: 0,  // :142
+            m_fpscr: 0,     // :143
+            m_fpul: 0,      // :144
+            m_dbr: 0,       // :145
+            m_ftrc_dmin: 0.0, // :148 (= 0)
+            m_ftrc_dmax: 0.0, // :149
+            m_ftrc_smin: 0.0, // :150
+            m_ftrc_smax: 0.0, // :151
+            m_fzero: 0.0,   // :152
+            m_fone: 0.0,    // :153
+            m_fpmode: [0; 4], // :154 (= {})
+            m_frt_input: 0, // :156
+            m_fpu_sz: 0,    // :157
+            m_fpu_pr: 0,    // :158
             m_am: am,
             m_test_irq: 0,
             m_internal_irq_vector: 0,
@@ -284,6 +356,69 @@ impl Sh2Core {
         self.m_test_irq = 0;
         self.m_cpu_off = 0;
         self.m_internal_irq_vector = 0;
+    }
+
+    /// origin: src/mame/cpu/sh.cpp:1881-1890 (`sh_common_execution::state`).
+    /// C++ dumps the POD whole — `s.v(*m_sh2_state)` (:1884) is one memcpy of
+    /// `sizeof(internal_sh2_state)` = 424 bytes (g++ -std=c++20 -O3 ground-truth
+    /// harness, tests/state.rs golden). Mirrored field-by-field in C++ offset
+    /// order, same widths; the ONLY non-field bytes are `pad_sleep` (offs
+    /// 121..123, the tail pad after `sleep_mode`), serialized verbatim like the
+    /// memcpy carries it. Tag first (:1883); the three tail scalars follow in
+    /// disk order :1885/:1888/:1889 (pcfsel i32, total_cycles u64,
+    /// cycles_this_run i32). Wire total: 8 + 424 + 4 + 8 + 4 = 448 bytes.
+    pub fn state(&mut self, s: &mut StateIo) {
+        s.tag("shcore");                    // sh.cpp:1883
+        s.v(&mut self.pc);                  // sh.h:108 (0)
+        s.v(&mut self.pr);                  // :109 (4)
+        s.v(&mut self.sr);                  // :110 (8)
+        s.v(&mut self.mach);                // :111 (12)
+        s.v(&mut self.macl);                // :112 (16)
+        s.arr(&mut self.r);                 // :113 (20..84) 16 x u32
+        s.v(&mut self.ea);                  // :114 (84)
+        s.v(&mut self.pending_irq);         // :116 (88)
+        s.v(&mut self.pending_nmi);         // :117 (92)
+        s.v(&mut self.irqline);             // :118 (96) int32
+        s.v(&mut self.evec);                // :119 (100)
+        s.v(&mut self.irqsr);               // :120 (104)
+        s.v(&mut self.target);              // :121 (108)
+        s.v(&mut self.internal_irq_level);  // :122 (112) int
+        s.v(&mut self.icount);              // :123 (116) int
+        s.v(&mut self.sleep_mode);          // :124 (120) uint8
+        s.raw(&mut self.pad_sleep);         // (121..123) memcpy'd tail pad
+        s.v(&mut self.arg0);                // :125 (124)
+        s.v(&mut self.arg1);                // :126 (128)
+        s.v(&mut self.gbr);                 // :127 (132)
+        s.v(&mut self.vbr);                 // :128 (136)
+        s.v(&mut self.m_delay);             // :130 (140)
+        s.v(&mut self.m_ppc);               // :133 (144)
+        s.v(&mut self.m_spc);               // :134 (148)
+        s.v(&mut self.m_ssr);               // :135 (152)
+        s.arr(&mut self.m_rbnk);            // :136 (156..220) [2][8] flat = 64B
+        s.v(&mut self.m_sgr);               // :137 (220)
+        s.arr(&mut self.m_fr);              // :138 (224..288)
+        s.arr(&mut self.m_xf);              // :139 (288..352)
+        s.v(&mut self.m_cpu_off_drc);       // :140 (352)
+        s.v(&mut self.m_pending_irq);       // :141 (356)
+        s.v(&mut self.m_test_irq_drc);      // :142 (360)
+        s.v(&mut self.m_fpscr);             // :143 (364)
+        s.v(&mut self.m_fpul);              // :144 (368)
+        s.v(&mut self.m_dbr);               // :145 (372)
+        s.v(&mut self.m_ftrc_dmin);         // :148 (376) double
+        s.v(&mut self.m_ftrc_dmax);         // :149 (384) double
+        s.v(&mut self.m_ftrc_smin);         // :150 (392) float
+        s.v(&mut self.m_ftrc_smax);         // :151 (396) float
+        s.v(&mut self.m_fzero);             // :152 (400) float
+        s.v(&mut self.m_fone);              // :153 (404) float
+        s.arr(&mut self.m_fpmode);          // :154 (408) uint8 x4
+        s.v(&mut self.m_frt_input);         // :156 (412) int
+        s.v(&mut self.m_fpu_sz);            // :157 (416) int
+        s.v(&mut self.m_fpu_pr);            // :158 (420) int
+        s.v(&mut self.m_pcfsel);            // sh.cpp:1885 (sh.h:452 int)
+        // sh.cpp:1886-1887: peripherals read m_total_cycles as "now" — the
+        // timers' schedules die without this field (the :1888 comment).
+        s.v(&mut self.m_total_cycles);      // sh.cpp:1888 (sh.h:234 u64)
+        s.v(&mut self.m_cycles_this_run);   // sh.cpp:1889 (sh.h:235 int)
     }
 
     // ---- masked bus access (origin: src/mame/cpu/sh2.cpp:89-152) ----

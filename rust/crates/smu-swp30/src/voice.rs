@@ -1227,3 +1227,155 @@ pub fn dbg_send(f: &mut std::fs::File, counter: u32, send: &[i32]) {
     }
     let _ = writeln!(f, "{s}");
 }
+
+// ---- M5-W3b state serializers (origin: swp30.cpp:4722-4725 stdarr legs) ----
+// Raw C++ element bytes; harness ground truth %TEMP%\opencode\stategt\gt.cpp
+// (data members byte-copied from swp30.h:205-233/259-261/284-289/315-325):
+// sizeof filter_block=88 iir1_block=28 envelope_block=16 lfo_block=16.
+impl FilterBlock {
+    /// harness `sizeof(filter_block)` == 88 (pad @10-11 after m_filter_b)
+    pub const STATE_SIZE: usize = 88;
+
+    pub fn state_bytes(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.m_filter_1_a.to_le_bytes()); // swp30.h:205 @0
+        out.extend_from_slice(&self.m_level_1.to_le_bytes()); // :206 @2
+        out.extend_from_slice(&self.m_filter_2_a.to_le_bytes()); // :207 @4
+        out.extend_from_slice(&self.m_level_2.to_le_bytes()); // :208 @6
+        out.extend_from_slice(&self.m_filter_b.to_le_bytes()); // :209 @8
+        out.extend_from_slice(&[0u8; 2]); // pad @10
+        for x in [
+            self.m_filter_1_p1, self.m_filter_2_p1, self.m_filter_p2, // :211-213 @12..
+            self.m_filter_1_x1, self.m_filter_1_x2, self.m_filter_1_y0, self.m_filter_1_y1, // :215-218
+            self.m_filter_1_h, self.m_filter_1_b, self.m_filter_1_l, self.m_filter_1_n, // :220-223
+            self.m_filter_2_x1, self.m_filter_2_x2, self.m_filter_2_y0, self.m_filter_2_y1, // :225-228
+            self.m_filter_2_h, self.m_filter_2_b, self.m_filter_2_l, self.m_filter_2_n, // :230-233
+        ] {
+            out.extend_from_slice(&x.to_le_bytes());
+        }
+    }
+
+    pub fn state_load(&mut self, b: &[u8]) {
+        let g = |o: usize, n: usize| &b[o..o + n];
+        self.m_filter_1_a = u16::from_le_bytes(g(0, 2).try_into().unwrap());
+        self.m_level_1 = u16::from_le_bytes(g(2, 2).try_into().unwrap());
+        self.m_filter_2_a = u16::from_le_bytes(g(4, 2).try_into().unwrap());
+        self.m_level_2 = u16::from_le_bytes(g(6, 2).try_into().unwrap());
+        self.m_filter_b = u16::from_le_bytes(g(8, 2).try_into().unwrap());
+        let mut s32s = [0i32; 19];
+        for (i, x) in s32s.iter_mut().enumerate() {
+            *x = i32::from_le_bytes(g(12 + i * 4, 4).try_into().unwrap());
+        }
+        let mut it = s32s.into_iter();
+        self.m_filter_1_p1 = it.next().unwrap();
+        self.m_filter_2_p1 = it.next().unwrap();
+        self.m_filter_p2 = it.next().unwrap();
+        self.m_filter_1_x1 = it.next().unwrap();
+        self.m_filter_1_x2 = it.next().unwrap();
+        self.m_filter_1_y0 = it.next().unwrap();
+        self.m_filter_1_y1 = it.next().unwrap();
+        self.m_filter_1_h = it.next().unwrap();
+        self.m_filter_1_b = it.next().unwrap();
+        self.m_filter_1_l = it.next().unwrap();
+        self.m_filter_1_n = it.next().unwrap();
+        self.m_filter_2_x1 = it.next().unwrap();
+        self.m_filter_2_x2 = it.next().unwrap();
+        self.m_filter_2_y0 = it.next().unwrap();
+        self.m_filter_2_y1 = it.next().unwrap();
+        self.m_filter_2_h = it.next().unwrap();
+        self.m_filter_2_b = it.next().unwrap();
+        self.m_filter_2_l = it.next().unwrap();
+        self.m_filter_2_n = it.next().unwrap();
+    }
+}
+
+impl Iir1Block {
+    /// harness `sizeof(iir1_block)` == 28 (no interior pad: m_a@0 m_b@8
+    /// m_hx@12 m_hy@20)
+    pub const STATE_SIZE: usize = 28;
+
+    pub fn state_bytes(&self, out: &mut Vec<u8>) {
+        for x in [self.m_a[0][0], self.m_a[0][1], self.m_a[1][0], self.m_a[1][1]] {
+            out.extend_from_slice(&x.to_le_bytes()); // s16 m_a[2][2] swp30.h:259 @0
+        }
+        for x in self.m_b {
+            out.extend_from_slice(&x.to_le_bytes()); // :260 @8
+        }
+        for x in self.m_hx {
+            out.extend_from_slice(&x.to_le_bytes()); // :261 @12
+        }
+        for x in self.m_hy {
+            out.extend_from_slice(&x.to_le_bytes()); // :261 @20
+        }
+    }
+
+    pub fn state_load(&mut self, b: &[u8]) {
+        let s16 = |o: usize| i16::from_le_bytes(b[o..o + 2].try_into().unwrap());
+        let s32 = |o: usize| i32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+        self.m_a[0][0] = s16(0);
+        self.m_a[0][1] = s16(2);
+        self.m_a[1][0] = s16(4);
+        self.m_a[1][1] = s16(6);
+        self.m_b[0] = s16(8);
+        self.m_b[1] = s16(10);
+        self.m_hx[0] = s32(12);
+        self.m_hx[1] = s32(16);
+        self.m_hy[0] = s32(20);
+        self.m_hy[1] = s32(24);
+    }
+}
+
+impl EnvelopeBlock {
+    /// harness `sizeof(envelope_block)` == 16 (tail pad @13-15, align-4)
+    pub const STATE_SIZE: usize = 16;
+
+    pub fn state_bytes(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.m_attack.to_le_bytes()); // swp30.h:284 @0
+        out.extend_from_slice(&self.m_decay1.to_le_bytes()); // :285 @2
+        out.extend_from_slice(&self.m_decay2.to_le_bytes()); // :286 @4
+        out.extend_from_slice(&self.m_release_glo.to_le_bytes()); // :287 @6
+        out.extend_from_slice(&self.m_envelope_level.to_le_bytes()); // :288 @8
+        out.push(self.m_envelope_mode); // :289 @12
+        out.extend_from_slice(&[0u8; 3]); // tail pad @13-15
+    }
+
+    pub fn state_load(&mut self, b: &[u8]) {
+        let g = |o: usize, n: usize| &b[o..o + n];
+        self.m_attack = u16::from_le_bytes(g(0, 2).try_into().unwrap());
+        self.m_decay1 = u16::from_le_bytes(g(2, 2).try_into().unwrap());
+        self.m_decay2 = u16::from_le_bytes(g(4, 2).try_into().unwrap());
+        self.m_release_glo = u16::from_le_bytes(g(6, 2).try_into().unwrap());
+        self.m_envelope_level = i32::from_le_bytes(g(8, 4).try_into().unwrap());
+        self.m_envelope_mode = b[12];
+    }
+}
+
+impl LfoBlock {
+    /// harness `sizeof(lfo_block)` == 16 (tail pad @15)
+    pub const STATE_SIZE: usize = 16;
+
+    pub fn state_bytes(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.m_counter.to_le_bytes()); // swp30.h:315 @0
+        out.extend_from_slice(&self.m_state.to_le_bytes()); // :316 @4
+        out.extend_from_slice(&self.m_r_type_step_pitch.to_le_bytes()); // :318 @6
+        out.extend_from_slice(&self.m_r_amplitude.to_le_bytes()); // :319 @8
+        out.push(self.m_type); // :321 @10
+        out.push(self.m_step); // :322 @11
+        out.push(self.m_amplitude); // :323 @12
+        out.push(self.m_pitch_mode as u8); // :324 @13 (bool = 1 byte)
+        out.push(self.m_pitch_depth as u8); // :325 @14 (s8)
+        out.push(0u8); // tail pad @15
+    }
+
+    pub fn state_load(&mut self, b: &[u8]) {
+        let g = |o: usize, n: usize| &b[o..o + n];
+        self.m_counter = u32::from_le_bytes(g(0, 4).try_into().unwrap());
+        self.m_state = u16::from_le_bytes(g(4, 2).try_into().unwrap());
+        self.m_r_type_step_pitch = u16::from_le_bytes(g(6, 2).try_into().unwrap());
+        self.m_r_amplitude = u16::from_le_bytes(g(8, 2).try_into().unwrap());
+        self.m_type = b[10];
+        self.m_step = b[11];
+        self.m_amplitude = b[12];
+        self.m_pitch_mode = b[13] != 0;
+        self.m_pitch_depth = b[14] as i8;
+    }
+}

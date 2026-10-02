@@ -38,11 +38,16 @@
 //! disk port numbering (0..2 direct, 30..33 → chan 3..6, sci4.h:23-24); the
 //! wiring row must NOT invent board bytes.
 //!
-//! `state()` (sci4.cpp:363-374) is deferred to M5 row `state serializer`;
-//! field order there is: sci4 tag, rx, enable, status, datamode, div, cur_rx,
-//! tdr, tsr, tdr_full, tx_step, tx_active, rdr, rsr, rdr_full, rx_step,
-//! rx_active, targets. `save_item` in device_start (sci4.cpp:57-74) is the
-//! same list.
+//! `state()` (sci4.cpp:363-374) ported with M5-W3a: sci4 tag, rx, enable,
+//! status, datamode, div, cur_rx, tdr, tsr, tdr_full, tx_step, tx_active,
+//! rdr, rsr, rdr_full, rx_step, rx_active, targets. `save_item` in
+//! device_start (sci4.cpp:57-74) is the same list. NOTE the disk carries
+//! NO timer bytes in `state()`: the 8 `emu_timer` schedules ride
+//! `running_machine::state_sync` (mamecompat.h:699-712, birth order
+//! tx0,rx0,tx1,rx1,…) — mirror: machine-level
+//! `RunningMachine::state_sync` (timers.rs:282-294, M5-W1) already covers
+//! them because [`Sci4::device_start`] registers the 8 on the SHARED queue;
+//! [`Sci4::timer_ids`] is the seam that exposes the handles for that glue.
 //!
 //! Dropped vs disk: `logerror`/`chan_id` (sci4.cpp:125,130,150-152,287-294,
 //! 304-306,347-349) — gated behind `g_verbose` on disk (mamecompat.h:113-117)
@@ -56,6 +61,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use smu_compat::timers::{Attotime, RunningMachine, TimerId};
+use smu_compat::StateIo;
 
 /// origin: sci4.h:15-79 `class sci4_device`. The Rc/RefCell is the Rust form
 /// of the disk pointer capture in `timer_alloc` (mamecompat.h:723-728); all
@@ -523,6 +529,34 @@ impl Core {
     fn irq(&mut self, chan: usize, state: i8) {
         self.irq_line[chan] = state;
     }
+
+    /// origin: sci4.cpp:363-374 `state(state_io &s)` (M5-W3a). Disk has NO
+    /// timer legs here — the 8 emu_timer schedules ride the machine-level
+    /// `RunningMachine::state_sync` (mamecompat.h:699-712); see module doc.
+    /// `stdarr` of `std::array<u8,N>` == raw element bytes == `StateIo::arr`
+    /// of `[u8;N]` (state_io.rs:148-169) — no struct-element padding case,
+    /// so no g++ offsetof harness is needed (unlike sh.h's shcore POD).
+    pub fn state(&mut self, s: &mut StateIo) {
+        s.tag("sci4"); // :365
+        s.arr(&mut self.rx); // :366 stdarr(m_rx) — 7 bytes
+        s.arr(&mut self.enable); // :367 stdarr(m_enable)
+        s.arr(&mut self.status); // :367 stdarr(m_status)
+        s.arr(&mut self.datamode); // :367 stdarr(m_datamode)
+        s.arr(&mut self.div); // :368 stdarr(m_div)
+        s.arr(&mut self.cur_rx); // :368 stdarr(m_cur_rx)
+        s.arr(&mut self.tdr); // :369 stdarr(m_tdr)
+        s.arr(&mut self.tsr); // :369 stdarr(m_tsr)
+        s.arr(&mut self.tdr_full); // :369 stdarr(m_tdr_full)
+        s.arr(&mut self.tx_step); // :370 stdarr(m_tx_step)
+        s.arr(&mut self.tx_active); // :370 stdarr(m_tx_active)
+        s.arr(&mut self.rdr); // :371 stdarr(m_rdr)
+        s.arr(&mut self.rsr); // :371 stdarr(m_rsr)
+        s.arr(&mut self.rdr_full); // :371 stdarr(m_rdr_full) — dead-quirk
+        // byte rides the stream both ways (load may inject it, header doc)
+        s.arr(&mut self.rx_step); // :372 stdarr(m_rx_step)
+        s.arr(&mut self.rx_active); // :372 stdarr(m_rx_active)
+        s.v(&mut self.targets); // :373 u8
+    }
 }
 
 impl Sci4 {
@@ -593,5 +627,23 @@ impl Sci4 {
     /// register reset (sci4.cpp:176-181, :240-243, :251-255, :194-204).
     pub fn rx_w(&mut self, m: &mut RunningMachine, sci: usize, state: i8) {
         self.core.borrow_mut().do_rx_w(m, sci, state)
+    }
+
+    /// origin: sci4.cpp:363-374 via the device wrapper — delegates to
+    /// [`Core::state`] (M5-W3a).
+    pub fn state(&mut self, s: &mut StateIo) {
+        self.core.borrow_mut().state(s)
+    }
+
+    /// M5-W3a state-sync seam for sci4.h:42-43 `m_tx_timer[4]` /
+    /// `m_rx_timer[4]`: exposes the queue handles registered by
+    /// [`Sci4::device_start`]. The device `state()` (like the disk one)
+    /// carries NO timer bytes — `RunningMachine::state_sync`
+    /// (mamecompat.h:699-712 ↔ timers.rs:282-294) serializes the schedules
+    /// in birth order tx0,rx0,tx1,rx1,…, and these handles let the machine
+    /// glue/tests verify which queue slots are the SCI4's.
+    pub fn timer_ids(&self) -> ([TimerId; 4], [TimerId; 4]) {
+        let c = self.core.borrow();
+        (c.tx_ids, c.rx_ids)
     }
 }

@@ -264,6 +264,38 @@ impl Sh2Sci {
         self.m_internal_to_external_ratio = int_to_ext; // :316
     }
 
+    /// origin: src/mame/cpu/sh_sci.cpp:789-799 (`sh_sci_device::state`).
+    /// Widths from sh_sci.h:128-133: the nine tx/rx machine ints, clock_mode
+    /// u32 (:129), ext_clock_value/rx_value bool (:130), the eight register
+    /// bytes (:132), clock_event/clock_step/divider u64 (:133). Config
+    /// (m_id/vectors) and the ratio pair are NOT serialized on disk.
+    pub fn state(&mut self, s: &mut smu_compat::StateIo) {
+        s.tag("sci");                      // :791
+        s.v(&mut self.m_tx_state);         // :792 (h:128 int)
+        s.v(&mut self.m_rx_state);         // :792
+        s.v(&mut self.m_tx_bit);           // :792
+        s.v(&mut self.m_rx_bit);           // :792
+        s.v(&mut self.m_clock_state);      // :793
+        s.v(&mut self.m_tx_parity);        // :793
+        s.v(&mut self.m_rx_parity);        // :793
+        s.v(&mut self.m_tx_clock_counter); // :794
+        s.v(&mut self.m_rx_clock_counter); // :794
+        s.v(&mut self.m_clock_mode);       // :795 (h:129 u32)
+        s.v(&mut self.m_ext_clock_value);  // :796 (h:130 bool)
+        s.v(&mut self.m_rx_value);         // :796 (h:130 bool)
+        s.v(&mut self.m_rdr);              // :797 (h:132 u8)
+        s.v(&mut self.m_tdr);              // :797
+        s.v(&mut self.m_smr);              // :797
+        s.v(&mut self.m_scr);              // :797
+        s.v(&mut self.m_ssr);              // :797
+        s.v(&mut self.m_brr);              // :798
+        s.v(&mut self.m_rsr);              // :798
+        s.v(&mut self.m_tsr);              // :798
+        s.v(&mut self.m_clock_event);      // :799 (h:133 u64)
+        s.v(&mut self.m_clock_step);       // :799
+        s.v(&mut self.m_divider);          // :799
+    }
+
     /// origin: src/mame/cpu/sh_sci.cpp:345-368 (device_reset).
     pub fn device_reset(&mut self) {
         self.m_rdr = 0x00; // :347

@@ -482,3 +482,100 @@ fn t20_slot_decode_18_stride() {
         assert_eq!(d.read8(&mut m, ch * 8 + 2), 0); // status untouched
     }
 }
+
+// ---- M5-W3a: state() (sci4.cpp:363-374) + timers via machine state_sync ----
+
+use smu_compat::timers::TimerId;
+use smu_compat::StateIo;
+
+fn dsave(d: &mut Sci4) -> Vec<u8> {
+    let mut o = Vec::new();
+    {
+        let mut s = StateIo::writer(&mut o);
+        d.state(&mut s);
+        assert!(s.ok(), "sci4 save: {}", s.error());
+    }
+    o
+}
+
+fn msync(m: &mut RunningMachine) -> Vec<u8> {
+    let mut o = Vec::new();
+    {
+        let mut s = StateIo::writer(&mut o);
+        m.state_sync(&mut s);
+        assert!(s.ok(), "mach sync: {}", s.error());
+    }
+    o
+}
+
+#[test]
+fn sci4_state_roundtrip_quirky_and_timers_ride_machine_sync() {
+    let mut m = mach();
+    let mut d = Sci4::new(8_000_000);
+    d.device_start(&mut m); // 8 timers, birth order tx0,rx0,tx1,rx1,... (:76-79)
+    let (tx, rx) = d.timer_ids();
+    // shared queue slots: the SCI4 owns indices 0..8 in interleaved order
+    assert_eq!(tx[1], TimerId(2));
+    assert_eq!(rx[3], TimerId(7));
+    {
+        let c = d.core();
+        let mut c = c.borrow_mut();
+        c.rx = [9, 8, 7, 6, 5, 4, 3]; // :366
+        c.enable = [0x81, 0x02, 0x04, 0x08]; // :367
+        c.status = [1, 2, 4, 6];
+        c.datamode = [0x80, 3, 5, 7];
+        c.div = [0x10, 0x81, 0x30, 0xff]; // :368
+        c.cur_rx = [0, 1, 0, 1];
+        c.tdr = [0xa5, 0x5c, 0, 0]; // :369
+        c.tsr = [0, 0, 0, 0x7f];
+        c.tdr_full = [1, 0, 1, 0];
+        c.tx_step = [9, 254, 0, 0]; // :370 254 rides the u8 wrap width
+        c.tx_active = [0, 1, 0, 0];
+        c.rdr = [0x33, 0, 0, 0]; // :371
+        c.rsr = [0, 0xcc, 0, 0];
+        c.rdr_full[2] = 1; // DEAD-QUIRK byte — load may inject it (header doc)
+        c.rx_step = [1, 0, 0, 10]; // :372
+        c.rx_active = [0, 0, 1, 0];
+        c.targets = 0x2a; // :373
+        c.wait(&mut m, 0, 1, 1); // arm tx1 for div*16 ticks (sci4.cpp:313-318)
+    }
+    let s1 = dsave(&mut d);
+    assert_eq!(s1.len(), 8 + 7 + 15 * 4 + 1); // tag + rx + 15 stdarr + targets
+    assert_eq!(&s1[0..8], b"sci4\0\0\0\0");
+    // hand-verified offsets: rx@8, then 15 x [u8;4] legs, targets last
+    assert_eq!(s1[8 + 3], 6); // rx[3]
+    assert_eq!(s1[8 + 7 + 12 * 4 + 2], 1); // rdr_full[2] == byte 65
+    assert_eq!(s1[75], 0x2a); // targets
+
+    // machine leg (mamecompat.h:699-712): tag + seed + cycles + n + 8 timers
+    let m1 = msync(&mut m);
+    assert_eq!(&m1[0..8], b"mach\0\0\0\0");
+    assert_eq!(&m1[20..24], &8u32.to_le_bytes()); // timer count
+    assert_eq!(&m1[24..32], &[0xff; 8]); // tx0 expire == never
+    // tx1 = queue slot 2: expire @ 24+2*12 = 48, param i32 @ 56
+    assert_eq!(m1[56], 1); // param = chan 1 (sci4.cpp:317 adjust param)
+    let armed = u64::from_le_bytes(m1[48..56].try_into().unwrap());
+    // disk math (mamecompat.h:736): trunc((div*16/8e6)*28e6), div=0x81
+    let want = ((0x81u64 * 16) as f64 / 8_000_000.0 * 28_000_000.0) as u64;
+    assert_eq!(armed, want);
+    assert_eq!(m.timer_expire(tx[1]), want);
+    assert!(!m.timer_scheduled(tx[0]));
+
+    // load into a FRESH machine + device (same birth order ⇒ slot alignment)
+    let mut m2 = mach();
+    let mut d2 = Sci4::new(8_000_000);
+    d2.device_start(&mut m2);
+    {
+        let mut s = StateIo::reader(&s1);
+        d2.state(&mut s);
+        assert!(s.ok(), "sci4 load: {}", s.error());
+        let mut s = StateIo::reader(&m1);
+        m2.state_sync(&mut s);
+        assert!(s.ok(), "mach load: {}", s.error());
+    }
+    assert_eq!(d2.core().borrow().rdr_full[2], 1); // dead-quirk injected
+    assert_eq!(d2.core().borrow().targets, 0x2a);
+    assert_eq!(m2.timer_expire(TimerId(2)), want); // the schedule itself rode
+    assert_eq!(dsave(&mut d2), s1);
+    assert_eq!(msync(&mut m2), m1);
+}

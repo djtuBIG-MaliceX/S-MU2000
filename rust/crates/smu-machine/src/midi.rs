@@ -78,20 +78,39 @@ impl MidiLine {
 /// firmware-visible 0xF80000/1 window are the M7 `usb.rs` row; `cmd`/`have`
 /// are born empty/false here and only M7 will ever fill them
 /// (`m_usb_host == false` keeps disk's reset push :1065-1067 inert).
+/// `next`/`cur`/`cur_cmd` joined at M5-W4 — state-only legs
+/// (mu2000.cpp:3588/:3603); they ride the stream pinned at their init
+/// values until the M7 pump exists. `tx`/`out_port` (disk :1011-1012) are
+/// NOT in the state stream (mu2000::state :3575-3604 omits them) — M7 row.
 pub struct UsbIn {
-    pub rx: VecDeque<u8>, // :996 F5-framed MIDI byte stream
-    pub in_port: i32,     // :997 = -1
-    pub have: bool,       // :999 = false
-    pub cmd: VecDeque<u8>, // :1001 empty (M7 host-online F4 03 01 01 01)
+    pub rx: VecDeque<u8>, // disk :1003 F5-framed MIDI byte stream
+    pub in_port: i32,     // disk :1004 = -1
+    pub have: bool,       // disk :1006 = false
+    pub cmd: VecDeque<u8>, // disk :1008 empty (M7 host-online F4 03 01 01 01)
+    /// disk :1005 `u64 next` — next byte may be handed over at this time.
+    /// Added M5-W4: it RIDES THE STATE STREAM (mu2000.cpp:3588) even though
+    /// only M7's `usb_step` advances it — pinned 0 until then.
+    pub next: u64,   // :1005 = 0
+    /// disk :1007 `u8 cur` — last handed-over byte (state leg :3588).
+    pub cur: u8,     // :1007 = 0
+    /// disk :1009 `bool cur_cmd` — byte in flight is a command (v10 leg :3603).
+    pub cur_cmd: bool, // :1009 = false
+    /// disk :1010 `u64 tx_next` — TX-side time gate (state leg :3588).
+    /// `tx`/`out_port` (disk :1011-1012) do NOT ride the stream (M7).
+    pub tx_next: u64, // :1010 = 0
 }
 
 impl UsbIn {
     pub fn new() -> UsbIn {
         UsbIn {
-            rx: VecDeque::new(), // :996
-            in_port: -1,         // :997
-            have: false,         // :999
-            cmd: VecDeque::new(), // :1001
+            rx: VecDeque::new(), // :1003
+            in_port: -1,         // :1004
+            have: false,         // :1006
+            cmd: VecDeque::new(), // :1008
+            next: 0,             // :1005 (M5-W4, state-leg only)
+            cur: 0,              // :1007 (M5-W4, state-leg only)
+            cur_cmd: false,      // :1009 (M5-W4, state-leg only)
+            tx_next: 0,          // :1010 (M5-W4, state-leg only)
         }
     }
 

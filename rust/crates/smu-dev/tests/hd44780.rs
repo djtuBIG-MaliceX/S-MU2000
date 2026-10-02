@@ -417,3 +417,130 @@ fn render_gates_small_rom_and_display_off() {
     d.control_w(0x08); // display off (:153)
     assert!(d.render().iter().all(|&v| v == 0));
 }
+
+// ---- M5-W3a: state() (hd44780.cpp:273-296) --------------------------------
+
+use smu_compat::StateIo;
+
+fn save_v(d: &mut Hd44780, v: u32) -> Vec<u8> {
+    let mut out = Vec::new();
+    {
+        let mut s = StateIo::writer(&mut out);
+        s.set_version(v);
+        d.state(&mut s);
+        assert!(s.ok(), "save v{v}: {}", s.error());
+    }
+    out
+}
+
+fn load_v(d: &mut Hd44780, buf: &[u8], v: u32) {
+    let mut s = StateIo::reader(buf);
+    s.set_version(v);
+    d.state(&mut s);
+    assert!(s.ok(), "load v{v}: {}", s.error());
+}
+
+///quirky device: every state() field carries a distinctive value, m_fw and
+/// m_cg_fw intentionally DIFFER from the RAM (the v<11/12 memcpy legs must
+/// prove themselves), m_render_buf filled through render() (private field).
+fn quirked() -> Hd44780 {
+    let mut d = dev();
+    d.m_now = u64::MAX - 1; // :276
+    d.m_busy_until = 0x0102_0304_0506_0708; // :276
+    d.set_cgrom(&vec![0x55u8; 0x1000]); // fake glyph ROM
+    d.m_display_on = true; // :294
+    for i in 0..0x80 {
+        d.m_ddram[i] = (i as u32 * 7 + 0x11) as u8; // :277
+    }
+    d.m_fw.copy_from_slice(&d.m_ddram);
+    for b in d.m_fw.iter_mut() {
+        *b ^= 0xa5; // fw != ddram (v<11 memcpy leg must overwrite it)
+    }
+    d.m_cgram[0] = 0x10; // :277
+    d.m_cgram[63] = 0xfe;
+    for b in d.m_cg_fw.iter_mut() {
+        *b = 0x5a; // cg_fw != cgram
+    }
+    d.m_owned = [0xdead_beef_cafe_1234, 0x0fed_cba9_8765_4321]; // :281
+    d.m_cg_owned = 1 << 63; // :287
+    d.m_ac = -7; // :292 negative int
+    d.m_active_ram = smu_dev::hd44780::CGRAM;
+    d.m_direction = -1;
+    d.m_disp_shift = 0x4f;
+    d.m_num_line = 2; // :293
+    d.m_char_size = 10;
+    d.m_data_len = 4;
+    d.m_shift_on = true; // :294
+    d.m_cursor_on = true;
+    d.m_blink_on = true;
+    d.m_nibble = true; // :295
+    d.m_ir = 0xff; // :295
+    d.m_dr = 0x5c;
+    let _ = d.render(); // fill m_render_buf (cpp:240-270)
+    d
+}
+
+#[test]
+fn lcd_state_v15_roundtrip_and_offsets() {
+    let mut a = quirked();
+    let s1 = save_v(&mut a, 15);
+    // tag + 2*u64 + render 1280 + ddram 128 + cgram 64 + (v11) fw 128 +
+    // 2*u64 + (v12) cg_fw 64 + u64 + 7*int + 5*bool + 2*u8
+    assert_eq!(s1.len(), 8 + 16 + 1280 + 128 + 64 + 128 + 16 + 64 + 8 + 28 + 5 + 2);
+    assert_eq!(&s1[0..8], b"lcd\0\0\0\0\0");
+    // hand-verified offsets (cpp stream order):
+    assert_eq!(&s1[8..16], &(u64::MAX - 1).to_le_bytes()); // m_now
+    assert_eq!(&s1[16..24], &0x0102_0304_0506_0708u64.to_le_bytes()); // busy
+    assert_eq!(s1[24], 0x55); // m_render_buf[0] (glyph row byte from font)
+    assert_eq!(s1[1304], 0x11); // m_ddram[0]
+    assert_eq!(s1[1432], 0x10); // m_cgram[0]
+    assert_eq!(s1[1496], 0x11 ^ 0xa5); // m_fw[0] (quirky, NOT the RAM)
+    assert_eq!(&s1[1624..1632], &0xdead_beef_cafe_1234u64.to_le_bytes()); // owned[0]
+    assert_eq!(&s1[1632..1640], &0x0fed_cba9_8765_4321u64.to_le_bytes()); // owned[1]
+    assert_eq!(s1[1640], 0x5a); // m_cg_fw[0] (quirky)
+    assert_eq!(&s1[1704..1712], &(1u64 << 63).to_le_bytes()); // cg_owned
+    assert_eq!(&s1[1712..1716], &(-7i32).to_le_bytes()); // m_ac
+    assert_eq!(&s1[1736..1740], &4i32.to_le_bytes()); // m_data_len
+    assert_eq!(&s1[1740..1745], &[1, 1, 1, 1, 1]); // shift/disp/curs/blink/nibble
+    assert_eq!(s1[1745], 0xff); // m_ir
+    assert_eq!(s1[1746], 0x5c); // m_dr (last byte)
+
+    let mut b = dev();
+    load_v(&mut b, &s1, 15);
+    let s2 = save_v(&mut b, 15);
+    assert_eq!(s1, s2, "save->load->save bytes diverge");
+    assert_eq!(b.m_fw, a.m_fw); // quirky fw rode through, memcpy leg NOT taken
+    assert_eq!(b.m_owned, [0xdead_beef_cafe_1234, 0x0fed_cba9_8765_4321]);
+}
+
+#[test]
+fn lcd_state_pre_v11_v12_fallback_legs() {
+    let mut a = quirked();
+    // v10: NO fw/owned/cg_fw/cg_owned bytes at all
+    let s10 = save_v(&mut a, 10);
+    assert_eq!(s10.len(), 8 + 16 + 1280 + 128 + 64 + 28 + 5 + 2);
+    // cpp:283-284/289-290 else-legs run on BOTH sides — the v10 WRITE
+    // already rebuilt the device it saved (quirky fw destroyed, owned zeroed)
+    assert_eq!(a.m_fw, a.m_ddram);
+    assert_eq!(a.m_owned, [0, 0]);
+    let mut b = dev();
+    load_v(&mut b, &s10, 10);
+    assert_eq!(b.m_fw, a.m_ddram); // :283 memcpy(m_fw, m_ddram)
+    assert_eq!(b.m_cg_fw, a.m_cgram); // :289 memcpy(m_cg_fw, m_cgram)
+    assert_eq!(b.m_owned, [0, 0]); // :284
+    assert_eq!(b.m_cg_owned, 0); // :290
+    let s10b = save_v(&mut b, 10);
+    assert_eq!(s10, s10b); // v10 save->load->save byte equality
+
+    // v11 on a FRESH quirk: fw/owned legs present, cg_fw still fallback
+    let mut a2 = quirked();
+    let s11 = save_v(&mut a2, 11);
+    assert_eq!(s11.len(), s10.len() + 128 + 16);
+    assert_eq!(s11[1496], 0x11 ^ 0xa5); // quirky fw byte rides the stream
+    assert_eq!(a2.m_cg_fw, a2.m_cgram); // :289 write-side leg (v11 < 12)
+    let mut c = dev();
+    load_v(&mut c, &s11, 11);
+    assert_eq!(c.m_fw, a2.m_fw); // quirky fw rode through
+    assert_eq!(c.m_cg_fw, a2.m_cgram); // fallback still taken
+    assert_eq!(c.m_owned, a2.m_owned);
+}

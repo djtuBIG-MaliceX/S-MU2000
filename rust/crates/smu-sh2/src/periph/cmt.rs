@@ -126,6 +126,19 @@ impl ShCmt {
         self.m_cor = [0xffff, 0xffff]; // :46
     }
 
+    /// origin: src/mame/cpu/sh_cmt.cpp:226-232 (`sh_cmt_device::state`).
+    /// Widths from sh_cmt.h:61-66: next_event std::array<u64,2>, str u16,
+    /// csr/cnt/cor std::array<u16,2>, disk order :229-231. m_intc_vector is
+    /// ctor config — NOT serialized on disk :226-232.
+    pub fn state(&mut self, s: &mut smu_compat::StateIo) {
+        s.tag("cmt");                   // :228
+        s.arr(&mut self.m_next_event);  // :229 stdarr u64 x2
+        s.v(&mut self.m_str);           // :230 (h:63 u16)
+        s.arr(&mut self.m_csr);         // :231 stdarr u16 x2
+        s.arr(&mut self.m_cnt);         // :231
+        s.arr(&mut self.m_cor);         // :231
+    }
+
     // ---- host-seam helpers ----
 
     /// Wiring row writes the exact cycle count here before bus ops (replaces

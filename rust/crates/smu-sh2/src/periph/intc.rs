@@ -97,6 +97,18 @@ impl Sh2Intc {
         self.m_pending = [0; 8]; // :59
     }
 
+    /// origin: src/mame/cpu/sh_intc.cpp:168-173 (`sh_intc_device::state`).
+    /// stdarr = whole-array raw block: pending u32 x8 (h:48), ipr u16 x8
+    /// (h:49), then isr/icr u16 (:51) and lines u8 (:53), disk order :171-172.
+    pub fn state(&mut self, s: &mut smu_compat::StateIo) {
+        s.tag("intc");              // :170
+        s.arr(&mut self.m_pending); // :171 stdarr m_pending
+        s.arr(&mut self.m_ipr);     // :171 stdarr m_ipr
+        s.v(&mut self.m_isr);       // :172
+        s.v(&mut self.m_icr);       // :172
+        s.v(&mut self.m_lines);     // :172
+    }
+
     #[inline]
     fn bit(x: u32, n: u32) -> u32 {
         (x >> n) & 1

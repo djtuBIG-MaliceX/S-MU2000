@@ -213,6 +213,32 @@ impl Sh2MtuChannel {
         self.m_counter_incrementing = true; // :220
     }
 
+    /// origin: src/mame/cpu/sh_mtu.cpp:538-548 (`sh_mtu_channel_device::state`).
+    /// Widths from sh_mtu.h:124-132: tgr_clearing int, tcr/tmdr/tior/tier/tsr
+    /// u8, clock_type/clock_divider int, tcnt u16, tgr std::array<u16,4>,
+    /// last_clock_update/event_time u64, phase/counter_cycle u32, the two flags
+    /// bool (1 byte). Config members (m_interrupt, m_tier_mask, m_tgr_count,
+    /// m_tbr_count, m_count_types) are ctor constants — NOT on disk :538-548.
+    pub fn state(&mut self, s: &mut smu_compat::StateIo) {
+        s.tag("mtuch");                    // :540
+        s.v(&mut self.m_tgr_clearing);     // :541 (h:124 int)
+        s.v(&mut self.m_tcr);              // :542 (h:125)
+        s.v(&mut self.m_tmdr);             // :542
+        s.v(&mut self.m_tior);             // :542
+        s.v(&mut self.m_tier);             // :542
+        s.v(&mut self.m_tsr);              // :542
+        s.v(&mut self.m_clock_type);       // :543 (h:126 int)
+        s.v(&mut self.m_clock_divider);    // :543 (h:126 int)
+        s.v(&mut self.m_tcnt);             // :544 (h:127 u16)
+        s.arr(&mut self.m_tgr);            // :545 stdarr u16 x4 (h:128)
+        s.v(&mut self.m_last_clock_update);// :546 (h:129 u64)
+        s.v(&mut self.m_event_time);       // :546 (h:129 u64)
+        s.v(&mut self.m_phase);            // :547 (h:130 u32)
+        s.v(&mut self.m_counter_cycle);    // :547 (h:130 u32)
+        s.v(&mut self.m_counter_incrementing); // :548 (h:131 bool)
+        s.v(&mut self.m_channel_active);   // :548 (h:132 bool)
+    }
+
     // ---- register handlers (sh_mtu.cpp) ----
 
     /// origin: src/mame/cpu/sh_mtu.cpp:223-226 (tcr_r)
@@ -717,6 +743,23 @@ impl Sh2Mtu {
         for c in self.ch.iter_mut() {
             c.device_reset(); // :202-221
         }
+    }
+
+    /// origin: src/mame/cpu/sh_mtu.cpp:531-536 (`sh_mtu_device::state`) — the
+    /// SHARED block only; the channels ride separately via `ch[ch].state`
+    /// (sh7042.cpp:424-425). Widths: tstr/tsyr/toer/tocr/tgcr u8 (h:186),
+    /// tcdr/tddr/tcnts/tcbr u16 (h:187).
+    pub fn state(&mut self, s: &mut smu_compat::StateIo) {
+        s.tag("mtu");           // :533
+        s.v(&mut self.m_tstr);  // :534
+        s.v(&mut self.m_tsyr);  // :534
+        s.v(&mut self.m_toer);  // :534
+        s.v(&mut self.m_tocr);  // :534
+        s.v(&mut self.m_tgcr);  // :534
+        s.v(&mut self.m_tcdr);  // :535
+        s.v(&mut self.m_tddr);  // :535
+        s.v(&mut self.m_tcnts); // :535
+        s.v(&mut self.m_tcbr);  // :535
     }
 
     // ---- host-seam helpers ----

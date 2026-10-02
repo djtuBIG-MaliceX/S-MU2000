@@ -37,9 +37,16 @@
 //!   `m_fw`/`m_cg_fw` ARE kept and written unconditionally, which is disk
 //!   behaviour with `owned()==false` (cpp:200-212), so read-back semantics
 //!   (cpp:223-224) are bit-identical for the firmware path.
-//! * `state()` (cpp:273-296) deferred to the M5 state-serializer row.
+//! * `state()` (cpp:273-296) ported with M5-W3a. `m_owned`/`m_cg_owned`
+//!   (hd44780.h:123/125) have no native reader in this port, but the fields
+//!   are kept so the state stream stays byte-identical to C++ in BOTH
+//!   directions (the v>=11/12 legs ride their u64s verbatim; the v<11/12
+//!   legs zero them exactly like disk). Firmware path: owned is always 0
+//!   (no native engine built — wiring row), so the bytes match on both sides.
 //! * panel-hold in `lcd_port_w` (mu2000.cpp:1024-1032) is native-engine
 //!   plumbing; omitted.
+
+use smu_compat::StateIo;
 
 /// origin: hd44780.h:114 `enum { DDRAM, CGRAM }` (`m_active_ram`).
 pub const DDRAM: i32 = 0;
@@ -69,8 +76,15 @@ pub struct Hd44780 {
     /// origin: hd44780.h:122 `u8 m_fw[0x80]` — the screen the firmware
     /// believes is displayed (6.188); what `data_r` returns (cpp:224).
     pub m_fw: [u8; 0x80],
+    /// origin: hd44780.h:123 `u64 m_owned[2]` — native ownership bitmaps.
+    /// State-fidelity only here (module doc): the firmware path never sets
+    /// them, but `state()` (cpp:281/284) serializes/zeroes them verbatim.
+    pub m_owned: [u64; 2],
     /// origin: hd44780.h:124 `u8 m_cg_fw[0x40]` (6.190 counterpart).
     pub m_cg_fw: [u8; 0x40],
+    /// origin: hd44780.h:125 `u64 m_cg_owned` — CGRAM counterpart, same
+    /// state-fidelity note as [`Hd44780::m_owned`].
+    pub m_cg_owned: u64,
     /// origin: hd44780.h:126 `u8 m_cgram[0x40]` (64 bytes, NOT 8).
     pub m_cgram: [u8; 0x40],
     /// origin: hd44780.h:127-133 — signed `int` on disk; keep i32 so the
@@ -117,7 +131,9 @@ impl Hd44780 {
             m_render_buf: [0u8; RENDER_SIZE], // hd44780.h:120 `= {}`
             m_ddram: [0u8; 0x80],       // hd44780.h:121 `= {}`
             m_fw: [0u8; 0x80],          // hd44780.h:122 `= {}`
+            m_owned: [0u64; 2],         // hd44780.h:123 `= {}`
             m_cg_fw: [0u8; 0x40],       // hd44780.h:124 `= {}`
+            m_cg_owned: 0,              // hd44780.h:125 `= 0`
             m_cgram: [0u8; 0x40],       // hd44780.h:126 `= {}`
             m_ac: 0,                    // hd44780.h:127
             m_active_ram: DDRAM,        // hd44780.h:128 `= DDRAM`
@@ -503,6 +519,54 @@ impl Hd44780 {
             return 0x0000; // :1010
         }
         0 // :1012
+    }
+
+    /// origin: hd44780.cpp:273-296 `state(state_io &s)` (M5-W3a). The glyph
+    /// pictures `m_cgrom` are ROM — NOT saved (cpp:272 comment); the host
+    /// re-loads them. v<11/12 fallback legs (cpp:283-284/289-290) rebuild
+    /// `m_fw`/`m_cg_fw` from the live RAM and zero the owned bitmaps,
+    /// exactly like the disk for snapshots that predate 6.188/6.190.
+    pub fn state(&mut self, s: &mut StateIo) {
+        s.tag("lcd"); // :275
+        s.v(&mut self.m_now); // :276 u64
+        s.v(&mut self.m_busy_until); // :276 u64
+        s.arr(&mut self.m_render_buf); // :277 RENDER_SIZE=1280 raw bytes
+        s.arr(&mut self.m_ddram); // :277 0x80 raw bytes
+        s.arr(&mut self.m_cgram); // :277 0x40 raw bytes
+        // :278-279 **native の持ち物**（版 11 から。6.188）— absent in old
+        // records: 「誰も持っていない」(owned=0) restore leg below.
+        if s.version() >= 11 {
+            // :280
+            s.arr(&mut self.m_fw); // :281
+            s.v(&mut self.m_owned[0]); // :281 u64
+            s.v(&mut self.m_owned[1]); // :281 u64
+        } else {
+            self.m_fw.copy_from_slice(&self.m_ddram); // :283 memcpy(m_fw, m_ddram)
+            self.m_owned[0] = 0; // :284
+            self.m_owned[1] = 0; // :284
+        }
+        if s.version() >= 12 {
+            // :286
+            s.arr(&mut self.m_cg_fw); // :287
+            s.v(&mut self.m_cg_owned); // :287 u64
+        } else {
+            self.m_cg_fw.copy_from_slice(&self.m_cgram); // :289 memcpy(m_cg_fw, m_cgram)
+            self.m_cg_owned = 0; // :290
+        }
+        s.v(&mut self.m_ac); // :292 int == i32 (hd44780.h:127)
+        s.v(&mut self.m_active_ram); // :292 int
+        s.v(&mut self.m_direction); // :292 int
+        s.v(&mut self.m_disp_shift); // :292 int
+        s.v(&mut self.m_num_line); // :293 int
+        s.v(&mut self.m_char_size); // :293 int
+        s.v(&mut self.m_data_len); // :293 int
+        s.v(&mut self.m_shift_on); // :294 bool = 1 byte
+        s.v(&mut self.m_display_on); // :294 bool
+        s.v(&mut self.m_cursor_on); // :294 bool
+        s.v(&mut self.m_blink_on); // :294 bool
+        s.v(&mut self.m_nibble); // :295 bool
+        s.v(&mut self.m_ir); // :295 u8
+        s.v(&mut self.m_dr); // :295 u8
     }
 }
 

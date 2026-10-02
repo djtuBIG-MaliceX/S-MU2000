@@ -160,6 +160,20 @@ impl ShBsc {
     pub fn rtcor_w(&mut self, data: u16, mem_mask: u16) {
         combine16(&mut self.m_rtcor, data, mem_mask); // :137
     }
+
+    /// origin: sh_bsc.cpp:141-146 (`sh_bsc_device::state`) — eight u16 regs
+    /// (sh_bsc.h:46), disk order :144-145.
+    pub fn state(&mut self, s: &mut smu_compat::StateIo) {
+        s.tag("bsc");           // :143
+        s.v(&mut self.m_bcr1);  // :144
+        s.v(&mut self.m_bcr2);  // :144
+        s.v(&mut self.m_wcr1);  // :144
+        s.v(&mut self.m_wcr2);  // :144
+        s.v(&mut self.m_dcr);   // :145
+        s.v(&mut self.m_rtcsr); // :145
+        s.v(&mut self.m_rtcnt); // :145
+        s.v(&mut self.m_rtcor); // :145
+    }
 }
 
 impl Sh7042Peripherals for ShBsc {
@@ -338,6 +352,16 @@ impl ShDmacChannel {
     pub fn chcr_w(&mut self, data: u32, mem_mask: u32) {
         combine32(&mut self.m_chcr, data, mem_mask); // :113
     }
+
+    /// origin: sh_dmac.cpp:123-127 (`sh_dmac_channel_device::state`); four u32
+    /// (sh_dmac.h:80 — DMATCR is u32 on disk), order :126.
+    pub fn state(&mut self, s: &mut smu_compat::StateIo) {
+        s.tag("dmach");          // :125
+        s.v(&mut self.m_sar);    // :126
+        s.v(&mut self.m_dar);    // :126
+        s.v(&mut self.m_dmatcr); // :126
+        s.v(&mut self.m_chcr);   // :126
+    }
 }
 
 /// DMAC shared block + the four channels the die wires as `dmac:0..3`
@@ -380,6 +404,14 @@ impl ShDmac {
     /// origin: sh_dmac.cpp:40-44 (dmaor_w).
     pub fn dmaor_w(&mut self, data: u16, mem_mask: u16) {
         combine16(&mut self.m_dmaor, data, mem_mask); // :42
+    }
+
+    /// origin: sh_dmac.cpp:117-121 (`sh_dmac_device::state`) — the shared
+    /// DMAOR only (u16, sh_dmac.h:46); the channels ride separately
+    /// (`ShDmacChannel::state`, sh7042.cpp:422).
+    pub fn state(&mut self, s: &mut smu_compat::StateIo) {
+        s.tag("dmac");        // :119
+        s.v(&mut self.m_dmaor); // :120
     }
 }
 

@@ -22,6 +22,8 @@
 //!   them and MUST NOT re-apply `& m_am`, or the 0x40000000 boundary logic breaks.
 
 use crate::core::{InstructionHook, Sh2Bus, Sh2Core};
+// origin: src/state.h — layout engine (smu_compat re-export, M5-W1)
+use smu_compat::StateIo;
 
 // origin: src/compat/mamecompat.h:566 (INPUT_LINE_NMI = -1, INPUT_LINE_IRQ0 = 0)
 pub const INPUT_LINE_NMI: i32 = -1;
@@ -71,13 +73,28 @@ impl Sh2Device {
     /// zero-fill — done in `Sh2Core::new`, core.rs:143-177), save_item registrations
     /// (:50-54 — deferred to the M5 state row), STATE_GENPC debug entries (:56-57 —
     /// debugger-only, this port has none), then `m_nmi_line_state = 0` (:59).
-    /// `sh2_device::state(state_io&)` (sh2.cpp:407-413) intentionally NOT ported
-    /// here — owned by the M5 `state serializer` row.
     // origin: src/mame/cpu/sh2.cpp:42-61
-    // deferred: src/mame/cpu/sh2.cpp:407-413 -> M5 state.rs
     pub fn device_start(&mut self) {
         // origin: src/mame/cpu/sh2.cpp:59
         self.core.m_nmi_line_state = 0;
+    }
+
+    /// Device state stream — tag "sh2" then the sh_common_execution core dump,
+    /// then the four device scalars and the input-line array, in disk order.
+    /// All sh2.h members live on `Sh2Core` here (65-67/90-91 — see module doc),
+    /// so the nesting is one level flatter than C++ but the BYTE ORDER is the
+    /// exact C++ call order: tag(:409) → core::state(:410) → :411 → :412.
+    /// Widths: test_irq u32, internal_irq_vector int32, nmi_line_state int8,
+    /// cpu_off u32, irq_line_state int8 x17 (sh2.h:65-67,90-91).
+    // origin: src/mame/cpu/sh2.cpp:407-413
+    pub fn state(&mut self, s: &mut StateIo) {
+        s.tag("sh2");                              // sh2.cpp:409
+        self.core.state(s);                        // :410 sh_common_execution::state
+        s.v(&mut self.core.m_test_irq);            // :411 (sh2.h:65 u32)
+        s.v(&mut self.core.m_internal_irq_vector); // :411 (sh2.h:66 i32)
+        s.v(&mut self.core.m_nmi_line_state);      // :411 (sh2.h:67 i8)
+        s.v(&mut self.core.m_cpu_off);             // :412 (sh2.h:90 u32, device slot)
+        s.arr(&mut self.core.m_irq_line_state);    // :412 (sh2.h:91 i8 x17)
     }
 
     /// Device reset. `jit_flush()` (sh2.cpp:65) is a DRC no-op in this port

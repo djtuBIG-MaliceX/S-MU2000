@@ -26,6 +26,7 @@
 //! dropped (documented deviation; revisit only if a render case diverges).
 
 use crate::voice::swp_rand;
+use smu_compat::StateIo;
 
 /// origin: swp30.h:341-350 `meg_state::decoded`. Definite assignment: every
 /// field is written by `decode_program` (asel/rop/mmode are 2-bit masks,
@@ -624,7 +625,8 @@ pub struct MegSwp<'a> {
     pub ram_index2: &'a mut i32,
     pub skip_to: &'a mut u16,
     pub revram_enable: u16,
-    pub reverb_ram: &'a mut [u16; 0x40000],
+    pub reverb_ram: &'a mut [u16], // slice (Vec) — mirrors std::vector;
+    // state load may resize (swp30.cpp:4717); addressing stays & 0x3ffff
     pub seed: &'a mut u32,
     pub sintab: &'a [u16],
 }
@@ -1475,4 +1477,274 @@ pub fn run_program(meg: &mut MegState, swp: &mut MegSwp, ops: &[Op; 0x180]) {
     *swp.flag_z = flag_z;
     meg.pc = 0;
     meg.icount -= 0x180;
+}
+
+// ---- M5-W3b state serializers (origin: swp30.cpp:4732-4742) ----
+// Raw POD dump of meg_state. Harness ground truth %TEMP%\opencode\stategt\gt.cpp
+// (decoded struct swp30.h:356-365 + members :366/:395-429 byte-copied):
+// sizeof(decoded)==25, sizeof(meg_state)==14872, m_swp@9600.
+
+impl Decoded {
+    /// harness `sizeof(meg_state::decoded)` == 25 (13 u8 + 12 bool, all byte)
+    pub const STATE_SIZE: usize = 25;
+
+    pub fn state_bytes(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&[
+            self.sm, self.sr, self.dm, self.dr, self.t, // swp30.h:357 @0-4
+            self.mmode, self.m1t, self.asel, self.rop, self.shift, self.clamp, // :358 @5-10
+            self.dm_src, self.memop, // :359 @11-12
+            self.m1_expand as u8, self.m2_from_m as u8, // :360 @13-14 (bool = 1 byte)
+            self.dr_from_r as u8, self.no_noise as u8, // :361 @15-16
+            self.memw as u8, self.index as u8, self.t_write as u8, // :362 @17-19
+            self.t_from_p as u8, self.mem_use_index as u8, // :362 @20-21
+            self.index2 as u8, self.mem_use_index2 as u8, // :363 @22-23
+            self.mem_table as u8, // :364 @24
+        ]);
+    }
+
+    pub fn state_load(&mut self, b: &[u8]) {
+        let nz = |i: usize| b[i] != 0;
+        self.sm = b[0];
+        self.sr = b[1];
+        self.dm = b[2];
+        self.dr = b[3];
+        self.t = b[4];
+        self.mmode = b[5];
+        self.m1t = b[6];
+        self.asel = b[7];
+        self.rop = b[8];
+        self.shift = b[9];
+        self.clamp = b[10];
+        self.dm_src = b[11];
+        self.memop = b[12];
+        self.m1_expand = nz(13);
+        self.m2_from_m = nz(14);
+        self.dr_from_r = nz(15);
+        self.no_noise = nz(16);
+        self.memw = nz(17);
+        self.index = nz(18);
+        self.t_write = nz(19);
+        self.t_from_p = nz(20);
+        self.mem_use_index = nz(21);
+        self.index2 = nz(22);
+        self.mem_use_index2 = nz(23);
+        self.mem_table = nz(24);
+    }
+}
+
+impl MegState {
+    /// harness `sizeof(meg_state)` == 14872 on x86-64
+    pub const STATE_POD_SIZE: usize = 14872;
+
+    /// origin: swp30.cpp:4733-4742 `s.v(*m_meg)` inside the m_swp-nulling
+    /// block (:4737-4741 — a saved pointer would make the loader poke the
+    /// SAVER's machine). The Rust MegState has no device pointer (MegSwp is
+    /// a call-time seam), so the pointer slot is an explicit 8-byte ZERO at
+    /// harness offset 9600 on save and a DISCARDED 8 bytes on load. Field
+    /// order + pad fillers exactly per harness (no repr trickery).
+    pub fn state_pod(&mut self, s: &mut StateIo) {
+        if s.writing() {
+            let mut b: Vec<u8> = Vec::with_capacity(Self::STATE_POD_SIZE);
+            debug_assert_eq!(Decoded::STATE_SIZE * 0x180, 9600);
+            for d in self.decoded.iter() {
+                d.state_bytes(&mut b); // m_decoded @0 (384*25)
+            }
+            b.extend_from_slice(&[0u8; 8]); // m_swp @9600 -> null (disk :4739)
+            for x in self.program.iter() {
+                b.extend_from_slice(&x.to_le_bytes()); // m_program @9608 u64[0x180]
+            }
+            for x in self.konst.iter() {
+                b.extend_from_slice(&x.to_le_bytes()); // m_const @12680 s16[0x180]
+            }
+            for x in self.offset.iter() {
+                b.extend_from_slice(&x.to_le_bytes()); // m_offset @13448 u16[0x80]
+            }
+            for x in self.lfo.iter() {
+                b.extend_from_slice(&x.to_le_bytes()); // m_lfo @13704 u16[0x18]
+            }
+            for x in self.lfo_increment.iter() {
+                b.extend_from_slice(&x.to_le_bytes()); // m_lfo_increment @13752 u32[0x18]
+            }
+            for x in self.lfo_counter.iter() {
+                b.extend_from_slice(&x.to_le_bytes()); // m_lfo_counter @13848 u32[0x18]
+            }
+            for x in self.map.iter() {
+                b.extend_from_slice(&x.to_le_bytes()); // m_map @13944 u16[8]
+            }
+            for x in self.m.iter() {
+                b.extend_from_slice(&x.to_le_bytes()); // m_m @13960 s32[0x40]
+            }
+            for x in self.r.iter() {
+                b.extend_from_slice(&x.to_le_bytes()); // m_r @14216 s32[0x80]
+            }
+            for x in self.t.iter() {
+                b.extend_from_slice(&x.to_le_bytes()); // m_t @14728 s16[8]
+            }
+            b.extend_from_slice(&self.p.to_le_bytes()); // m_p @14744 s64 (14744%8==0, no pad)
+            for x in self.mw_value.iter() {
+                b.extend_from_slice(&x.to_le_bytes()); // m_mw_value @14752 s32[3]
+            }
+            b.extend_from_slice(&self.mw_reg); // m_mw_reg @14764 u8[3]
+            b.extend_from_slice(&[0u8; 1]); // pad @14767 (align-4)
+            for x in self.rw_value.iter() {
+                b.extend_from_slice(&x.to_le_bytes()); // m_rw_value @14768
+            }
+            b.extend_from_slice(&self.rw_reg); // m_rw_reg @14780 u8[3]
+            b.extend_from_slice(&[0u8; 1]); // pad @14783
+            for x in self.index_value.iter() {
+                b.extend_from_slice(&x.to_le_bytes()); // m_index_value @14784
+            }
+            for x in self.index_active.iter() {
+                b.push(*x as u8); // m_index_active @14796 bool[3]
+            }
+            b.extend_from_slice(&[0u8; 1]); // pad @14799
+            for x in self.memw_value.iter() {
+                b.extend_from_slice(&x.to_le_bytes()); // m_memw_value @14800
+            }
+            for x in self.memr_value.iter() {
+                b.extend_from_slice(&x.to_le_bytes()); // m_memr_value @14812
+            }
+            for x in self.t_value.iter() {
+                b.extend_from_slice(&x.to_le_bytes()); // m_t_value @14824 s16[2]
+            }
+            for x in self.memw_active.iter() {
+                b.push(*x as u8); // m_memw_active @14828 bool[3]
+            }
+            for x in self.memr_active.iter() {
+                b.push(*x as u8); // m_memr_active @14831 bool[3]
+            }
+            b.extend_from_slice(&[0u8; 2]); // pad @14834-14835 (align-4 for m_delay_3)
+            b.extend_from_slice(&self.delay_3.to_le_bytes()); // @14836
+            b.extend_from_slice(&self.delay_2.to_le_bytes()); // @14840
+            b.extend_from_slice(&self.ram_read.to_le_bytes()); // @14844
+            b.extend_from_slice(&self.ram_write.to_le_bytes()); // @14848
+            b.extend_from_slice(&self.ram_index.to_le_bytes()); // @14852
+            b.extend_from_slice(&self.sample_counter.to_le_bytes()); // @14856
+            b.extend_from_slice(&self.program_address.to_le_bytes()); // @14860 u16
+            b.extend_from_slice(&self.pc.to_le_bytes()); // @14862 u16
+            b.extend_from_slice(&self.icount.to_le_bytes()); // @14864 int
+            b.extend_from_slice(&self.retval.to_le_bytes()); // @14868 u32
+            debug_assert_eq!(b.len(), Self::STATE_POD_SIZE);
+            s.raw(&mut b);
+        } else {
+            let mut b = vec![0u8; Self::STATE_POD_SIZE];
+            s.raw(&mut b);
+            if !s.ok() {
+                return;
+            }
+            let mut o = 0usize;
+            for d in self.decoded.iter_mut() {
+                d.state_load(&b[o..o + Decoded::STATE_SIZE]);
+                o += Decoded::STATE_SIZE;
+            }
+            o += 8; // m_swp @9600 — DISCARDED (pointer rebuilt at wiring time)
+            for x in self.program.iter_mut() {
+                *x = u64::from_le_bytes(b[o..o + 8].try_into().unwrap());
+                o += 8;
+            }
+            for x in self.konst.iter_mut() {
+                *x = i16::from_le_bytes(b[o..o + 2].try_into().unwrap());
+                o += 2;
+            }
+            for x in self.offset.iter_mut() {
+                *x = u16::from_le_bytes(b[o..o + 2].try_into().unwrap());
+                o += 2;
+            }
+            for x in self.lfo.iter_mut() {
+                *x = u16::from_le_bytes(b[o..o + 2].try_into().unwrap());
+                o += 2;
+            }
+            for x in self.lfo_increment.iter_mut() {
+                *x = u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+                o += 4;
+            }
+            for x in self.lfo_counter.iter_mut() {
+                *x = u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+                o += 4;
+            }
+            for x in self.map.iter_mut() {
+                *x = u16::from_le_bytes(b[o..o + 2].try_into().unwrap());
+                o += 2;
+            }
+            for x in self.m.iter_mut() {
+                *x = i32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+                o += 4;
+            }
+            for x in self.r.iter_mut() {
+                *x = i32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+                o += 4;
+            }
+            for x in self.t.iter_mut() {
+                *x = i16::from_le_bytes(b[o..o + 2].try_into().unwrap());
+                o += 2;
+            }
+            self.p = i64::from_le_bytes(b[o..o + 8].try_into().unwrap());
+            o += 8;
+            for x in self.mw_value.iter_mut() {
+                *x = i32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+                o += 4;
+            }
+            self.mw_reg.copy_from_slice(&b[o..o + 3]);
+            o += 3;
+            o += 1; // pad
+            for x in self.rw_value.iter_mut() {
+                *x = i32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+                o += 4;
+            }
+            self.rw_reg.copy_from_slice(&b[o..o + 3]);
+            o += 3;
+            o += 1; // pad
+            for x in self.index_value.iter_mut() {
+                *x = i32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+                o += 4;
+            }
+            for x in self.index_active.iter_mut() {
+                *x = b[o] != 0;
+                o += 1;
+            }
+            o += 1; // pad
+            for x in self.memw_value.iter_mut() {
+                *x = i32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+                o += 4;
+            }
+            for x in self.memr_value.iter_mut() {
+                *x = i32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+                o += 4;
+            }
+            for x in self.t_value.iter_mut() {
+                *x = i16::from_le_bytes(b[o..o + 2].try_into().unwrap());
+                o += 2;
+            }
+            for x in self.memw_active.iter_mut() {
+                *x = b[o] != 0;
+                o += 1;
+            }
+            for x in self.memr_active.iter_mut() {
+                *x = b[o] != 0;
+                o += 1;
+            }
+            o += 2; // pad
+            self.delay_3 = u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+            o += 4;
+            self.delay_2 = u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+            o += 4;
+            self.ram_read = u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+            o += 4;
+            self.ram_write = u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+            o += 4;
+            self.ram_index = i32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+            o += 4;
+            self.sample_counter = u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+            o += 4;
+            self.program_address = u16::from_le_bytes(b[o..o + 2].try_into().unwrap());
+            o += 2;
+            self.pc = u16::from_le_bytes(b[o..o + 2].try_into().unwrap());
+            o += 2;
+            self.icount = i32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+            o += 4;
+            self.retval = u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+            o += 4;
+            debug_assert_eq!(o, Self::STATE_POD_SIZE);
+        }
+    }
 }

@@ -12,7 +12,9 @@
 //
 // Deviations (reported to ledger author, do NOT "fix" silently):
 // - Unimplemented flags are ACCEPTED and warn-ignored on stderr (one line each).
-//   Disk truth for --usb :356, --bootcache :358/370-374 (M5), --dump-dac/-meg
+//   Disk truth for --usb :356 (--bootcache is LIVE since M5-W5a —
+//   bootcache.rs; disk seams render.cpp:194/272-273/380/391-398/413-414;
+//   --state-at :252/534-540 is LIVE since M5-W4), --dump-dac/-meg
 //   :338-352/594-599, --trace-meg :346-352, --lcd-at/--lcd-every :466-506,
 //   --voices-every :477-490, --part-rms :475/480-487, --adc-in :289-290/559-563
 //   (A/D capture row), --card :302/642-649, --replay-swp :304-332/566-570,
@@ -35,7 +37,7 @@
 //   audio path and not gated (the machine does not expose m_dbg_notes fields).
 
 use smu_compat::{paths, roms};
-use smu_machine::Machine;
+use smu_machine::{bootcache, Machine};
 use smu_smf::{self, Event};
 
 use std::io::Write;
@@ -335,11 +337,15 @@ fn main() {
     let mut meg_tr_pc1: u32 = 0;
     let _single = false; // :179 (parsed; no-op — single-threaded build)
     let mut boot = -1.0f64; // :180 (<0 -> boot-wait on midi_ready)
+    let mut use_bootcache = false; // :194 --bootcache。起動後の写しから始める（確かめ用）
     // DEV pc-trace window (boot->RE timers hunt; mirrors boot.rs:123-140 /
     // boot.cpp:39-50+84-89). No flag = byte-identical default behavior.
     let mut pctrace: Option<String> = None;
     let mut pcskip: u64 = 0;
     let mut pccount: u64 = 0;
+    // origin: render.cpp:195 --state-at（確かめ用）— M5-W4 LIVE
+    let mut state_at: Option<String> = None; // :195 const char *state_at
+    let mut state_sample: usize = 0; // :195 size_t state_sample
 
     // origin: render.cpp:205-274 flag loop, raw[i] == argv[i+1]; loop starts at
     // argv[4] -> raw index 3.
@@ -427,10 +433,12 @@ fn main() {
             eprintln!("(rust render: --midi-block は未実装 — 無視)"); // :248-249
             i += 2;
         } else if a == "--bootcache" {
-            eprintln!("(rust render: --bootcache は未実装 — 無視)"); // :250-251 M5
+            use_bootcache = true; // :272-273 — LIVE (M5-W5a, bootcache.rs)
             i += 1;
         } else if a == "--state-at" && i + 2 < raw.len() {
-            // :252-255 accept-ignored (state serializer M5)
+            // :252-255 — LIVE (M5-W4): --state-at <sample> <file>
+            state_sample = parse_u64_base0(&nxt(i + 1)) as usize; // :275 strtoull base 0
+            state_at = Some(nxt(i + 2)); // :276
             i += 3;
         } else if a == "--reset" {
             // :256-267 validate
@@ -537,10 +545,13 @@ fn main() {
         }
     }
 
-    // :354 set_threaded(!single) / :355 apply_engine_options / :356 set_usb_host:
-    // single-threaded (no slave thread), firmware path (native off), usb off
-    // default — all no-ops on this path. :358 bootcache key ignored (M5).
-    // :359 reset AFTER the trace sink is installed.
+    // render.cpp:376-377 set_threaded(!single) / apply_engine_options:
+    // single-threaded (no slave thread), firmware path (native off) — no-ops.
+    // :378 set_usb_host — M7: --usb warn-ignored above, so this stays false
+    // (behavior AND the key input below stay the consistent DIN-path pair).
+    // :379-380 鍵は起動に使うワーク RAM も混ぜるので reset() の前に作る
+    let boot_key = if use_bootcache { bootcache::key(&m) } else { 0 }; // :380
+    // :381 reset AFTER the trace sink is installed.
     m.reset();
 
     // DEV: AFTER reset, exactly boot.rs:198-200 (boot.cpp:83-89).
@@ -550,24 +561,46 @@ fn main() {
 
     let mut pcm: Vec<i16> = Vec::new();
 
-    // origin: render.cpp:376-393 boot-wait (boot < 0). NOT used by the gate
+    // origin: render.cpp:383-398 — 起動後の写しから始める（--bootcache）。
+    // **確かめ用**で既定では使わない (:391-392). Try-cache BEFORE the boot
+    // wait; a hit skips boot entirely (boot = 0.0, :396).
+    if use_bootcache && boot < 0.0 {
+        // :393 condition use_bootcache && boot < 0.0 (the harness passes
+        // --boot, so this arm — like the whole boot-wait — is not exercised
+        // by the fingerprint gate)
+        if bootcache::load(&mut m, boot_key) {
+            // :395 printf text-mode -> CRLF on Windows (ledger CRLF pitfall)
+            print!("起動: 前の写しから\r\n");
+            boot = 0.0; // :396
+        }
+    }
+
+    // mu2000.h:918 m_cycle_debt — the machine owns the debt (render.cpp's
+    // loop calls mu.run_sample, same member). 0 after reset; a snapshot load
+    // restores it (state leg mu2000.cpp:3545). Read AFTER the load attempt.
+    let mut debt: u64 = m.cycle_debt;
+
+    // origin: render.cpp:399-419 boot-wait (boot < 0). NOT used by the gate
     // (harness passes --boot). Faithful transliteration for the no---boot path.
     if boot < 0.0 {
-        let limit = (30.0 * RATE as f64) as usize; // :377
+        let limit = (30.0 * RATE as f64) as usize; // :400
         let mut n = 0usize;
         while n < limit && !m.midi_ready(0) {
-            // :379 midi_ready() -> mu2000.h:112 port default 0
-            let (l, r) = run_sample(&mut m, &sintab, &mut 0u64); // :381
-            pcm.push(to_s16(l)); // :382
-            pcm.push(to_s16(r)); // :383
+            // :402 midi_ready() -> mu2000.h:112 port default 0
+            let (l, r) = run_sample(&mut m, &sintab, &mut debt); // :404 (member debt)
+            pcm.push(to_s16(l)); // :405
+            pcm.push(to_s16(r)); // :406
             n += 1;
         }
-        boot = n as f64 / RATE as f64; // :385
-        if n >= limit {
-            eprintln!("起動を待ったが MIDI 受信が有効にならなかった"); // :389
-            std::process::exit(1); // :390
+        boot = n as f64 / RATE as f64; // :412
+        if use_bootcache && n < limit {
+            bootcache::save(&mut m, boot_key); // :413-414 起動に成功したときだけ
         }
-        println!("起動に {boot:.6} 秒。ここから MIDI を流す"); // :392
+        if n >= limit {
+            eprintln!("起動を待ったが MIDI 受信が有効にならなかった"); // :416
+            std::process::exit(1); // :417
+        }
+        println!("起動に {boot:.6} 秒。ここから MIDI を流す"); // :419
     }
 
     // origin: render.cpp:395-398
@@ -592,7 +625,8 @@ fn main() {
     } else {
         usize::MAX
     };
-    let mut debt: u64 = 0; // mu2000.h:918 m_cycle_debt = 0
+    // debt: declared above (:556-581) — continuous member debt through the
+    // boot-wait / snapshot load into this loop (mu2000.h:918).
     let mut re_seen = false; // diagnostic: proof RE (midi_ready) rises in-session
     let mut tmr_seen = false; // diagnostic: first finite emu_timer due-time (sci4 enable)
 
@@ -667,6 +701,21 @@ fn main() {
             next += 1; // :555
         }
         // :559-563 --adc-in: empty (ignored); :564-570 --replay-swp: empty (ignored)
+
+        // origin: render.cpp:534-540 --state-at（確かめ用, M5-W4）— absolute
+        // sample i == size_t(boot*rate) + state_sample. NOTE disk :534 uses
+        // `size_t(boot * rate)` TRUNCATION, not the +0.5-rounded
+        // boot_samples of :395/:574 — transliterated as written. fopen "wb"
+        // failure is SILENT on disk (`if (FILE *sf = ...)`)
+        if let Some(path) = &state_at {
+            if i == (boot * RATE as f64) as usize + state_sample {
+                let st = smu_machine::state::save_state(&mut m); // :535
+                if let Ok(mut f) = std::fs::File::create(path) {
+                    // :536-538 fwrite(st.data(),1,size) — silent on fail
+                    let _ = std::io::Write::write_all(&mut f, &st);
+                }
+            }
+        }
 
         // origin: render.cpp:571-577 — run_sample + DAC scale + clamp + push
         let (l, r) = run_sample(&mut m, &sintab, &mut debt);
