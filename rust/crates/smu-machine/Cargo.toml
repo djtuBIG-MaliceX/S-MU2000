@@ -14,3 +14,8 @@ smu-dev = { path = "../smu-dev" }
 [[test]]
 name = "boot_golden"
 path = "../../tests/boot_golden.rs"
+
+# Row gate "MIDI OUT ring" (W-TX): same mount pattern as boot_golden.
+[[test]]
+name = "midi_out"
+path = "../../tests/midi_out.rs"

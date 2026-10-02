@@ -1825,6 +1825,10 @@ pub struct Machine {
     /// DIN MIDI lines + cable routing + USB receiver half (mu2000.h:981-1015;
     /// `midi lines` row — the render/port_b feed lands here)
     pub midi: midi::Midi,
+    /// reusable PIN-ring drain buffer for `drain_sci_pins` (the disk
+    /// `write_sci_tx<0>` devcb call, mu2000.cpp:1179). Preallocated to the
+    /// sci.rs ring bound — no allocation in run_cycles (Invariant 6 shape)
+    tx_pin_buf: Vec<(u8, bool)>, // sci.rs:1049-1055 poll_pin sink
 }
 
 impl Machine {
@@ -1949,6 +1953,7 @@ impl Machine {
             wave: Vec::new(),
             ad_in: [0, 0], // mu2000.h:868 = {}
             midi: midi::Midi::new(), // mu2000.h:990-1010 (every field explicit)
+            tx_pin_buf: Vec::with_capacity(smu_sh2::periph::sci::PIN_RING), // sci.rs:114
         }
     }
 
@@ -1995,9 +2000,23 @@ impl Machine {
         self.swps.borrow_mut().reset(); // :1138 m_swps.reset()
         self.pair.borrow_mut().do_rx_w(0, 1); // :1141 sci_rx_w<0>(1) line idle high
         self.pair.borrow_mut().do_rx_w(1, 1); // :1142
-        // :1145-1147 m_tx ring + write_sci_tx<0> — MIDI OUT (M4).
+        // :1145-1147 m_tx ring + write_sci_tx<0> — MIDI OUT (M4). The
+        // disk-faithful clear (mu2000.cpp:1177-1178): r/w wrap to 0, bit back
+        // to -1; m_tx_cur/m_tx_buf deliberately NOT cleared (disk doesn't —
+        // both are fully overwritten before any take observes them). The
+        // :1179 devcb bind lives at the pump sites as `drain_sci_pins`
+        // (ch0 PIN_TX only; PIN_CLK and ch1 are UNBOUND on disk — rg
+        // mu2000.cpp write_sci_clk/write_sci_tx: only :1179 ch0 matches).
+        self.midi.tx_r = 0; // mu2000.cpp:1177 (m_tx_r = m_tx_w = 0)
+        self.midi.tx_w = 0; // :1177
+        self.midi.tx_bit = -1; // :1178 (ctor agrees: mu2000.h:1030)
         self.start_devices(); // :1149
         self.reset_devices(); // :1151-1152
+        // :1183-1184 device_reset() fires do_sci_tx(1) (sh_sci.cpp:367 ->
+        // sci.rs:322) synchronously through the :1179 bind — flush the
+        // born-high edges now (each is a tx_line no-op at bit=-1,
+        // mu2000.cpp:1273-1278), so the ring is empty at loop entry
+        self.drain_sci_pins();
     }
 
     /// origin: mu2000.cpp:1151-1152 `for d : m_devices d->device_reset()` —
@@ -2150,7 +2169,45 @@ impl Machine {
             };
             self.emit_upd(cur);
         }
+        // internal_update_at fan-out above ran the SCI TX state machines
+        // (sh_sci.cpp internal_update -> tx_*_step -> do_sci_tx); disk fed
+        // tx_line inside those synchronous calls (:1179). Ring FIFO keeps
+        // ch0 edge order exactly.
+        self.drain_sci_pins();
         aborts
+    }
+
+    /// MIDI OUT pin drain — the Rust shape of disk
+    /// `m_cpu->write_sci_tx<0>().set(tx_line)` (mu2000.cpp:1179): every
+    /// PIN_TX edge of SCI **ch0** goes to `midi.tx_line` in ring order
+    /// (sci.rs:1028-1030 push -> :1050 poll). PIN_CLK entries are dropped:
+    /// `write_sci_clk` has no `.set` in mu2000.cpp (rg: defined sh7042.h:39,
+    /// fired sh_sci.cpp, unbound devcb = no-op on disk), and ch1 is dropped
+    /// for the same reason (:1179 wires ch0 only). Called at every pump
+    /// site that can move the SCI TX state machine — event_tick fan-out
+    /// (sh7042.cpp:282-292), pump_resched (sticky internal_update sites
+    /// sh_sci.cpp:477/486/505 reach it through `internal_update_at`) and
+    /// reset_devices (sh_sci.cpp:367) — so the ring is empty at every loop
+    /// boundary and `midi_out_take` (mu2000.h:232) sees bytes at the same
+    /// host-visible point as disk. No allocation: `tx_pin_buf` is
+    /// preallocated to PIN_RING (sci.rs:114), emptied by the drain itself.
+    fn drain_sci_pins(&mut self) {
+        let mut p = self.pair.borrow_mut();
+        for (id, s) in p.sci.iter_mut().enumerate() {
+            if s.pin_len == 0 {
+                continue; // hot path: ring empty (the norm — poll per pump)
+            }
+            self.tx_pin_buf.clear();
+            s.poll_pin(&mut self.tx_pin_buf); // sci.rs:1050-1055
+            if id == 0 {
+                // mu2000.cpp:1179 — only ch0's TX line is wired to MIDI OUT
+                for &(code, level) in self.tx_pin_buf.iter() {
+                    if code & smu_sh2::periph::sci::PIN_TX != 0 {
+                        self.midi.tx_line(level); // -> mu2000.cpp:1271
+                    } // PIN_CLK (code 0x00) dropped — unbound on disk
+                }
+            }
+        }
     }
 
     /// Apply the queued bus-side actions IN ORDER. Disk anchors:
@@ -2339,6 +2396,10 @@ impl Machine {
                 self.hn.borrow_mut().in_event = true; // sh7042.cpp:249
                 self.soc.event_tick(); // :1186
                 self.hn.borrow_mut().in_event = false; // sh7042.cpp:251
+                // disk called tx_line synchronously INSIDE this fan-out
+                // (write_sci_tx<0> devcb, mu2000.cpp:1179) — ch0 TX edges
+                // leave the pin ring here, before the recursion below
+                self.drain_sci_pins();
                 // g_upd_trace (sh7042.cpp:295-297) — emitted after the tick;
                 // current_time == now (in_event current_cycles == total),
                 // event == recomputed, pc unchanged between them.

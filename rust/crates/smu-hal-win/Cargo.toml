@@ -4,7 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# The `windows` crate (WASAPI/winmm/MMCSS/console) is added at the M6 row, not before.
+# The `windows` crate was NOT needed: winmm/MMCSS/kernel32 are hand-rolled
+# extern blocks (paths.rs style) in sys.rs / midi.rs / waveout.rs. WASAPI
+# (`audio out` row, M6b) may still want it later.
 [dependencies]
 smu-hal = { path = "../smu-hal" }
 smu-machine = { path = "../smu-machine" }

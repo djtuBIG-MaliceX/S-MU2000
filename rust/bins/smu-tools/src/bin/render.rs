@@ -15,7 +15,8 @@
 //   Disk truth for --usb :356 (--bootcache is LIVE since M5-W5a —
 //   bootcache.rs; disk seams render.cpp:194/272-273/380/391-398/413-414;
 //   --state-at :252/534-540 is LIVE since M5-W4), --dump-dac/-meg
-//   :338-352/594-599, --trace-meg :346-352, --lcd-at/--lcd-every :466-506,
+//   :338-352/594-599, --trace-meg :346-352 (--lcd-at/--lcd-every LIVE since
+//   M5-LCD — disk seams render.cpp:233-236/493-533),
 //   --voices-every :477-490, --part-rms :475/480-487, --adc-in :289-290/559-563
 //   (A/D capture row), --card :302/642-649, --replay-swp :304-332/566-570,
 //   --midi-block :533-538, --native-* / engine options (render.cpp:243
@@ -346,6 +347,10 @@ fn main() {
     // origin: render.cpp:195 --state-at（確かめ用）— M5-W4 LIVE
     let mut state_at: Option<String> = None; // :195 const char *state_at
     let mut state_sample: usize = 0; // :195 size_t state_sample
+    // origin: render.cpp:200-202 --lcd-at 秒 / --lcd-every 秒 — LIVE (M5-LCD)
+    let mut lcd_at: f64 = -1.0; // :200 double lcd_at
+    let mut lcd_every: f64 = 0.0; // :202 double lcd_every
+    let mut lcd_next: f64 = 0.0; // :207 double lcd_next
 
     // origin: render.cpp:205-274 flag loop, raw[i] == argv[i+1]; loop starts at
     // argv[4] -> raw index 3.
@@ -372,10 +377,10 @@ fn main() {
             boot = atof(&nxt(i + 1)); // :210-211 HONORED
             i += 2;
         } else if a == "--lcd-at" && i + 1 < raw.len() {
-            eprintln!("(rust render: --lcd-at は未実装 — 無視)"); // :212-214
+            lcd_at = atof(&nxt(i + 1)); // :233-234 HONORED
             i += 2;
         } else if a == "--lcd-every" && i + 1 < raw.len() {
-            eprintln!("(rust render: --lcd-every は未実装 — 無視)"); // :215-216
+            lcd_every = atof(&nxt(i + 1)); // :235-236 HONORED
             i += 2;
         } else if a == "--voices-every" && i + 1 < raw.len() {
             eprintln!("(rust render: --voices-every は未実装 — 無視)"); // :217-218
@@ -665,6 +670,47 @@ fn main() {
                 tmr_seen = true;
                 eprintln!("[diag] first finite next_timer_cycles={nt} at sample {i}");
             }
+        }
+
+        // origin: render.cpp:493-501 --lcd-at one-shot LCD dump (M5-LCD). The
+        // dump sits at the disk seam :493 — BEFORE t (:557) and MIDI delivery
+        // (:566). ddram = m.lcd (mu2000.h m_lcd; hd44780.rs:74-75 m_ddram);
+        // borrow ends in the block, never held across run_sample.
+        if lcd_at >= 0.0 && i >= ((boot + lcd_at) * RATE as f64) as usize {
+            lcd_at = -1.0; // :494
+            let dd = { m.lcd.borrow().m_ddram }; // :495 const u8 *dd = mu.lcd().ddram()
+            // printf text mode on Windows emits CRLF (ledger CRLF pitfall; cf. 起動:)
+            print!("LCDHEX"); // :496
+            for line in 0..2 {
+                // :497-499
+                for pos in 0..24 {
+                    print!(" {:02x}", dd[line * 0x40 + pos]); // :499
+                }
+            }
+            print!("\r\n"); // :500 "\n" text mode
+        }
+        // :502-503 --part-rms: ignored (unimplemented, warn at parse)
+        // :504-517 --voices-every: ignored (unimplemented, warn at parse)
+        // origin: render.cpp:518-533 --lcd-every periodic LCD+CG dump (M5-LCD)
+        if lcd_every > 0.0 && i >= ((boot + lcd_next) * RATE as f64) as usize {
+            let now = lcd_next; // :519 const double now
+            lcd_next += lcd_every; // :520
+            let dd = { m.lcd.borrow().m_ddram }; // :521
+            print!("LCD {now:.3}"); // :522 printf "LCD %.3f"
+            for line in 0..2 {
+                // :523-525
+                for pos in 0..24 {
+                    print!(" {:02x}", dd[line * 0x40 + pos]); // :525
+                }
+            }
+            print!("\r\n"); // :526
+            // 外字（音色の絵）も出す。1 文字 8 バイト × 8 文字
+            let cg = { m.lcd.borrow().m_cgram }; // :528 (hd44780.rs:88-89 m_cgram)
+            print!("CG {now:.3}"); // :529 printf "CG %.3f"
+            for k in 0..64 {
+                print!(" {:02x}", cg[k]); // :531
+            }
+            print!("\r\n"); // :532
         }
 
         // origin: render.cpp:530 — 起動ぶんは整数で引く (no cancellation drift)

@@ -9,43 +9,63 @@ on this repo MUST read this file in full before touching anything, then work the
 > both ways (same key `44a70e24df97f686`, C++ HIT Rust-mint mtime-unchanged); nvram
 > 3-way interchange `8EF4A086…`; state-at cross-dump = 9 residual bytes, all documented
 > stub scopes (card ctrl / slave-mach u32 / encoder panel bytes — see session-S2 log).
-> All M0–M5 ✅. Residual ×-list = xg/sampling/panel exe-skips + メーター/演奏画面 LCD-seam.
+> All M0–M5 ✅. (S2's NEXT was rewritten by S3 — see the S3-close pointer below.)
 >
-> **NEXT: M6 — HAL/live (rows: `midi in`, `audio out`, `waveout fallback`, `live main`,
-> `midi_out ring`; + `--lcd-at` dumper seam kills メーター/演奏画面).** Read `src/live.cpp`
-> rows in the M6 table first. NOTE: `midisend` is in the deferred backlog but the M6 GATE
-> uses it — first decide: port a minimal midisend (winmm `outMidiLongMsg`) OR gate live
-> with `--midi <file>` feeding the SPSC ring directly (Rust-side seam, no C++ pairing needed).
-> live.cpp bootcache: `refresh()`-on-exist row detail is S2/W5a; live must call it too —
-> grep `bootcache` in live.cpp (none: cache is render-side ONLY, disk truth — do not invent).
+> ASK USER CLOSED (S3): S2 tree COMMITTED as `dbd2f72` "Rust my anus" (verified contains
+> the full M5 delta: state_io/nvram/bootcache/card/statetest/state + AGENTS + ledger).
 >
-> ASK USER: **commit the S2 tree** — the entire M5 port (~30 files, state/ state-io/
-> statetest/ bootcache/ nvram) is UNCOMMITTED on top of `9625f37`.
+> **NEXT (S3 close): M6b → M7 → M8. S3 landed: LCD seam (render ✅), `midi_out ring` ✅,
+> `live main` ✅ + `waveout fallback` ✅ (C++↔Rust idle live wav BYTE-EQ; Ctrl+C+nvram ✅;
+> `--midi-file` seam), `midi in` ported. Residual × = {xg, sampling, パネル} exe-skips.**
+> Row order from here:
+> 1. **`audio out` (WASAPI shared, `ui/audio_out.cpp` 25.7 KB)** — last M6 row; live's
+>    default path is a stand-in until it lands. Gate: Rust live default (no --waveout) C++
+>    byte-vs-byte wav parity like GATE A + starve/padding stats per row notes.
+> 2. `midi in` deep gate: port `midisend` (winmm outMidiShort — deferred backlog) then
+>    C++ midisend→live(`--midi`) vs Rust same = capture byte parity; also xgtest port
+>    consumes midi_out_take (ring finally LIVE).
+> 3. M7 `fast_midi` + USB (M37640): 42 cases `--fast-midi` bit-identical; --usb case;
+>    usb.rs TX ring replaces the INERT arm in midi_out_take (midi.rs S3 cite :237-240).
+> 4. M8: blocktime bin (stub!) → perf table; threaded slave == --single (harness 別糸 is
+>    already 合 single-vs-single — real slave-thread row still owed); Rust live ≤ C++
+>    interpreter (now ~1.55× RT headless — see S3 log).
+> ASK USER: **commit the S3 tree** (render.rs + midi_out + live/hal-win, ALL UNCOMMITTED
+> on `dbd2f72`; ~13 files).
+> Cold-start (all S2 §0-3 traps live): ws now **514**; flat exes stamp 21:13; exes at
+> session end verified config-nvram EMPTY; suite = detached + PYTHONIOENCODING=utf-8
+> (verdict at 7256 ch — don't panic-poll on size). Ctrl+C testing recipe = S3 log.
+> Full-suite wall clock ≈ 8-10 min (threaded), not 25.
 >
 > Cold-start (pwsh), one command each:
 > ```
 > # 0. SANITY: git status --short src/ tests/ clean. Baseline: `cargo test` from
-> #    workdir rust\ = **503/503**. NVRAM pin 3A27AF73… == %TEMP%\smu_nvram_pin_m2;
-> #    config-dir nvram/ MUST be EMPTY; boot\ holds 44a70f24df97f839.bin (Oct-1) +
-> #    44a70e24df97f686.bin (S2, both 6097273 B) — do not delete.
+> #    workdir rust\ = **514/514** (503 + 8 midi_out + 3 hal layout). NVRAM pin
+> #    3A27AF73… == %TEMP%\smu_nvram_pin_m2; config-dir nvram/ MUST be EMPTY (live
+> #    writes it — clear after live gates, S3 recipe); boot\ holds 44a70f24df97f839.bin
+> #    (Oct-1) + 44a70e24df97f686.bin (S2, both 6097273 B) — do not delete.
 > # 1. TRAPS (all bitten): cargo ONLY from rust\ (root = exit 101); flat exes are
 > #    MANUAL copies — refresh from ROOT `Copy-Item build-rust\target\release\*.exe
-> #    build-rust\`, current stamp 10-02 18:45; ⚠ from workdir rust\ do NOT prefix
-> #    paths with `rust\` (double-prefix, orchestrator ate it 3× this session);
-> #    SMU_BUILD per-process — `$env:SMU_BUILD="build-rust"; python tools/run_tests.py`
-> #    ONE command; `fc.exe` not fc; Measure-Object drops blanks; suite log via
-> #    Tee = cp437 mojibake — fix-read with python utf8→cp437→utf8 round-trip
-> #    (%TEMP%\suite_fixed.txt pattern); swp30.cpp = 4800 L range-reads only;
-> #    g++ needs C:\msys64\mingw64\bin ON PATH (0xC0000135 empty-stderr death).
+> #    build-rust\`, current stamp 10-02 21:13; ⚠ from workdir rust\ do NOT prefix
+> #    paths with `rust\` (double-prefix — S3 ate it ×3, incl. one `..\build-rust`
+> #    from ROOT); SMU_BUILD per-process — `$env:SMU_BUILD="build-rust"; python
+> #    tools/run_tests.py` ONE command; `fc.exe` not fc; Measure-Object drops blanks;
+> #    suite log = Start-Process -RedirectStandardOutput + PYTHONIOENCODING=utf-8
+> #    (raw UTF-8, cp437 round-trip OBSOLETE S3; verdict at 7256 ch/8778 B — mid-run
+> #    polls can show that size already, read the VERDICT TEXT); python inline CJK
+> #    prints need PYTHONIOENCODING=utf-8 too; swp30.cpp = 4800 L range-reads only;
+> #    g++ + ALL build\*.exe need C:\msys64\mingw64\bin ON PATH (0xC0000135).
 > # 2. DISPATCH: ≤1 writer in flight, prompts ≤2000 chars, cargo piped
 > #    `| Select-Object -Last 30`. Dispatch bombs ~50% (10 so far) — after ANY dispatch
 > #    error poll mtimes (ghosts RUN and contribute; never edit during ghost flight;
 > #    gate their disk after idle ≥20 min). Workers NEVER touch ledger/src/tests.
-> # 3. M6 GATE (milestone table): `live --seconds 60 --midi … --wav x.wav` fingerprint
-> #    match vs C++ live + latency/CPU lines. WASAPI exclusive + loopMIDI are INTERACTIVE
-> #    machine state — confirm the box has loopMIDI running before starting M6 audio rows;
-> #    fall back to `--waveout` path + file-driven MIDI for automation.
+> #    S3 UPDATE: 3/3 dispatches SURVIVED (lean one-row prompts keep the bomb away).
+> # 3. LIVE GATE (S3-proven recipe): factory-clear nvram → C++ & Rust live `--waveout
+> #    --nomidi --seconds 3 --wav x.wav` → wavs BYTE-EQ (532,524 B; 起動中 7.96 秒 both).
+> #    MIDI: `--midi-file build\tests\piano.mid` deterministic ×2 (Rust-only seam).
+> #    Ctrl+C: AttachConsole+GenerateConsoleCtrlEvent (S3 log). loopMIDI still unproven;
+> #    WASAPI DEFAULT path = stand-in until `audio out` row (M6b #1 above).
 > ```
+>
 
 ---
 
@@ -60,9 +80,9 @@ Session log. Status: ⬜ todo · 🟡 in progress · ✅ done · ⏸ blocked.
 | M1 | Compat layer | `cargo test -p smu-compat` green: bus read/write BE widths vs golden table; timer-queue event order identical to `--trace-upd` log captured from C++ `boot.exe roms` (golden file kept under `rust/tests/golden/`, text logs are committable — no ROM-derived *audio*, trace only; keep traces < 1 MB and do not include firmware bytes) | ✅ | 2026-09-30: all 5 rows paired — bus 8/8, timers 14/14 (golden replay byte-identical), paths+console 36/36, rom loaders 50/50, smf 9/9 (ws 59/59 total, `cargo build --release` exit 0). Gates now: `cargo test` from `rust\` = 59/59 |
 | M2 | SH-2 + SH7042 boot | Rust `boot roms --hash-pc out.bin` first 8×65536 instructions == C++ `build/boot.exe roms --hash-pc out.bin`; boot-time-in-samples identical; `--trace-upd` schedules identical | ✅ | 2026-09-30 session H pass 2: **BINARY GATE GREEN, FULL 28M-cycle default** (far exceeds 8×65536 instrs) — `build-rust\boot.exe roms --hash-pc` vs `build\boot.exe`: hash .bin, `--trace-upd` .txt AND full stdout FC /B **no differences** (repo root, exit 0 both). boot.rs `C44BD7AD…` 208 L raw-SHA1, boot.exe `636BE6D5…`. ws 344/344 re-run in-session. ⚠ "boot-time-in-samples" sub-item is UNOBSERVABLE pre-M3 (RE is SWP30-gated, Pitfalls) — carried as re-gate on first M3 render row |
 | M3 | SWP30 first sound | Rust `verify` green; `--trace-swp` boot log identical; `render piano/chord/drums` `pcm_sha1` identical to C++ | ✅ | 2026-10-01 session K: `voice engine` + `MEG` (A+worker-L; ws 412/412 re-gated in-session) ✅ paired (harness vectors + regs wiring + keyon; ws **373/373**; trace-swp boot log FC /B identical + DEFERRED_HITS absent; see row). Session I: `sample fetch` ✅ paired (harness vectors, ws 354/354, pitch_base float gate `4dbe40e1…`; see row). 2026-09-30 H pass 3: trace-swp boot log **identical** (reads on+off, FC /B, 28M cycles) — reg-dispatch row ✅ paired, deferred_hits=0. Left: `verify` bin (✅ session M) + render pcm gate. **render R-A ported session R-A** (render.rs `437CD277…` 601 L, build 0 / ws 444, WAV shape + cycles exact) but **GATE RED**: RE never rises → silent body — MACHINE blocker (`timer_fires=0` vs 29110, emu_timer queue never armed past 1 s; see render row + NEXT §4), NOT the render row, NOT the deferred wave arms (deferred_hits=0). M2 carry: boot-time-in-samples re-gates at first render row **Q: boot-reached/timer/+2 hunt CLOSED (364M upd byte-EQ uC==uR10, probes stripped, ws 449); render red is now the upstream-merge re-baseline delta (Rust==old-C++ 91e42c66 vs new want 80490b02) — see NEXT.** **Q2: CLOSED — piano+drums 合 on NEW baseline in-session; boot 364M/28M fc-EQ vs clean rebuilt C++; ws 448.** |
-| M4 | Full render parity (63/63 post-merge) | `$env:SMU_BUILD="build-rust"; python tools/run_tests.py` (verify/statetest/render cases; threaded gate runs `--single`); xgtest/samptest steps skipped w/ documented note | ✅ | **R/T8 DEFINITIVE: 63 合 / 0 × renders; JIT入切 合 63/63; 別糸 合; native 合. × = statetest×3 (M5) + xg/sampling/panel exe-skips + メーター/演奏画面 LCD-seam (M5/M6).** calshort fixed R (to_s16 fold). **S2 re-gate post-M5: statetest×3 now 合 — residual × = xg/sampling/panel exe-skips + メーター/演奏画面 LCD-seam (M6-scope --lcd-at dumper).** Baseline Q: C++ 63/63 green on RE-BASELINED json |
+| M4 | Full render parity (63/63 post-merge) | `$env:SMU_BUILD="build-rust"; python tools/run_tests.py` (verify/statetest/render cases; threaded gate runs `--single`); xgtest/samptest steps skipped w/ documented note | ✅ | **R/T8 DEFINITIVE: 63 合 / 0 × renders; JIT入切 合 63/63; 別糸 合; native 合. × = statetest×3 (M5) + xg/sampling/panel exe-skips + メーター/演奏画面 LCD-seam (M5/M6).** calshort fixed R (to_s16 fold). **S2 re-gate post-M5: statetest×3 now 合 — residual × = xg/sampling/panel exe-skips + メーター/演奏画面 LCD-seam (M6-scope --lcd-at dumper).** **S3: --lcd-at seam landed (render.rs `7669CF0A…`) — メーター/演奏画面 now 合; residual × = {xg,sampling,パネル} exe-skips ONLY.** Baseline Q: C++ 63/63 green on RE-BASELINED json |
 | M5 | State mirror | Rust `statetest` green + cross-load both ways: C++ boot→snapshot→Rust render `piano` identical; Rust snapshot→C++ render identical; NVRAM files interchangeable | ✅ | **S2 10-02**: statetest 合×3 (DIN/USB/軽量; orch re-ran DIN+USB exit 0, 50-sample 完全一致); bootcache exchange both ways (Rust HIT C++ `44a70e24…` 合; C++ HIT Rust-mint, mtime UNCHANGED, piano 合); nvram 3-way interchange `8EF4A086…`; full suite 63/63 renders 合, ×-list == documented set; ws 503. LCD-seam cases (メーター/演奏画面) remain M6-scope × |
-| M6 | Windows HAL + live | Rust `live --seconds 60 --midi <loopMIDI> --wav x.wav` with C++ `midisend` playing a fingerprint case → fingerprint match; latency/CPU lines printed like C++ | ⬜ | |
+| M6 | Windows HAL + live | Rust `live --seconds 60 --midi <loopMIDI> --wav x.wav` with C++ `midisend` playing a fingerprint case → fingerprint match; latency/CPU lines printed like C++ | 🟡 | **S3: live main+waveout+midi_out ring+LCD seam PAIRED; idle C++↔Rust live wav BYTE-EQ (headless waveout PROVEN WORKING); `--midi-file` seam replaces loopMIDI for determinism (S3 decision). Owed: `audio out` WASAPI row + midisend/midi-in deep capture gate (M6b). Latency/CPU lines printed (69.7 ms / %)** |
 | M7 | fast_midi + USB C/D | 42 cases re-run `--fast-midi` bit-identical C++↔Rust; `--usb` host mode case identical; `port_b` green both modes | ⬜ | |
 | M8 | Slave thread + perf | threaded==single bit-identical (harness #4 pattern) on 5 heaviest cases; `blocktime` Rust ≤ C++ interpreter(no-JIT); perf table updated | ⬜ | |
 | M9 | (optional) JIT | Only if M8 misses goal: dynasmrt SH2 JIT; gate = JIT on/off byte-identical 42/42 + measurable win; else mark cancelled | ⬜ | |
@@ -133,17 +153,17 @@ Granularity ≈ one C++ file / device unit. Status: todo → wip → ported (com
 | bootcache | `bootcache.h` | `src/bootcache.rs` | M5 | ✅ **paired (S2/W5a)** | bootcache.rs `569358ED…` (all : cites; FNV via pinned paths::fnv1a64/fnv1a_mix — same key `44a70e24df97f686` minted by BOTH builds, 6097273 B), lib.rs `BBBCBC75…`, render.rs `337635D9…` (try-before-boot / save-on-boot-success / 「起動: 前の写しから」CRLF; render never prunes = disk-faithful; ⚠ debt now continuous via m.cycle_debt — full-suite re-gate W5b **DONE: 63/63 合, 5 × = documented set only**). **CROSS-LOAD PROVEN BOTH WAYS in-session**: Rust HIT C++ cache 合; Rust-minted cache (18:02:49) → C++ harness piano 合 ×2 with mtime UNCHANGED (true hit). Old Oct-1 key `44a70f24df97f839` untouched. Deviations: refresh() sintab param, &mut save lineage, ja read-error line. ws 495 |
 | nvram | `nvram.h` | `src/nvram.rs` | M5/M6 | ✅ **paired (S2/W5b-f)** | nvram.rs `CCB6D970…` 322 L (dead-worker draft AUDITED vs nvram.h 105 L: rom_key FNV via pinned paths :37-46, subdir_keyed_path :54-65, +1-buffer exact-size gate :76-79, .tmp+replace :89-99, fail-open; 2 compile-shape defects fixed), lib `08B0A995…`, tests `698BD1BB…` (LOCALAPPDATA env-redirect; real config-dir nvram VERIFIED empty). INTERCHANGE: C++ save→Rust load RAM byte-identical + Rust save→real-C++ memcmp==0; 3-way SHA1 `8EF4A086…` (262144 B). GT key `95e194267f637e3b` pinned; harness %TEMP%\opencode\nvramgt `69D67D98…` |
 | smartmedia stub | `smartmedia.h` interface | `src/card.rs` | M4 | todo | empty-slot reads only; authoring deferred |
-| midi_out ring | `m_tx_buf` 4096 SPSC | `src/midi.rs` | M6 | todo | not serialized into state (starts empty) — mirror |
+| midi_out ring | `m_tx_buf` 4096 SPSC | `src/midi.rs` | M6 | ✅ **paired (S3/W-TX; orch re-gated IN-SESSION)** | not serialized into state (starts empty) — mirror CONFIRMED (state.rs zero tx refs; S2 state tests green unamended). S3/W-TX: midi.rs `BA7A504868769EBCFD68AE2ABDBA2C193D849227` 771 L (+88: fields :1028-1031 explicit ctor inits, tx_bit=-1 ctor==reset disk-verified; `tx_line` :1271-1294 line-exact incl. stop-bit-drop/full-drop `next==r`; `midi_out_take` :232-246 with usb divert as INERT arm — usb_host=false until M7); lib.rs `6040B0A4DBBD1F06B9BCA39695C20898142B43B8` 2742 L (+62: `drain_sci_pins` = the :1179 devcb shape — ch0 PIN_TX only, PIN_CLK/ch1 dropped (`write_sci_clk` 0 `.set` on disk — orch rg re-verified); drain at event_tick fan-out + pump_resched tail + post-reset_devices; `tx_pin_buf` preallocated PIN_RING, no-alloc hot path); reset stub-comment :1998 replaced by :1177-1178 faithful clear (tx_cur/tx_buf NOT cleared — disk). DEVIATION (audited-OK): drain AFTER fan-out vs disk's synchronous INSIDE — only TX-consumer-visible timing, order-preserving FIFO, no harness consumer (C++ consumers = xgtest/fx_probe ONLY, orch rg: live.cpp has ZERO midi_out_take — THRU/OUT wire-up belongs to `live main`+`midi in` rows). tests/midi_out.rs `B8A83516…` 152 L ×8 (frame LSB/stop-drop/mid-byte-guard :1273/full-4095+free/r-wrap/empty-None/usb-inert/reset-noop); Cargo.toml shim `953C144F…` (boot_golden pattern). Gates: ws **511/511**, boot_golden byte-EQ, piano 合 on fresh 20:31 exes, boot 28M stdout FC /B vs C++ no-diff |
 
 ### M6 — smu-hal / smu-hal-win / bins
 
 | Row | C++ source | Rust target | Gate | Status | Pitfalls / notes |
 |---|---|---|---|---|---|
-| midi in | `ui/midi_in.cpp` (winmm) | `smu-hal-win/src/midi.rs` | M6 | todo | SPSC 65536 + 4×8192 SysEx requeue; open-default heuristic = open when ≥1 devices |
+| midi in | `ui/midi_in.cpp` (winmm) | `smu-hal-win/src/midi.rs` | M6 | 🟡 **ported (S3/W-LIVE); deep byte-capture gate owed M6b** | SPSC 65536 + 4×8192 SysEx requeue PORTED (`8ADC0CAD70BADE709CA480B185E8DDE7FF5C0CFE` 459 L raw-SHA1; UnsafeCell ring + atomics, no alloc/lock in cb; running-status table, SysEx interleave, requeue-on-DONE :110-116, close drain :118-157). OPENED REAL DEV0 (loopback) in S3 smoke (open/close/name clean; MidiHdr 112 B + MidiInCapsW **76 B** — 72 returns MMSYSERR_INVALPARAM 0xB, field-tested + tested). ⚠ NOT yet gated: live byte-exact capture vs C++ through a real sender (needs midisend/loopMIDI pair = M6b); `--list` uses W+UTF16 vs disk A/CP932 (names match on this box). open-default heuristic = open when ≥1 devices — disk-true, exercised (auto-0 fired: "MIDI 入力: 0: Default Basic App Loopback") |
 | audio out | `ui/audio_out.cpp` WASAPI | `smu-hal-win/src/wasapi.rs` | M6 | todo | event-driven; own sinc resampler (NEVER OS converter); starve stat = `GetCurrentPadding==0` right after event; exclusive rounds to power-of-two period |
-| waveout fallback | `live.cpp run_waveout` | `smu-hal-win/src/waveout.rs` | M6 | todo | fire-all-then-fifo order (requeue-after-write overwrote playing buffers — comment in live.cpp) |
-| live main | `live.cpp` | `bins/live` | M6 | 🟡 ported (skeleton, session H pass 1) | 2026-09-30: compiles+smokes (user directive). live.rs `7330A411…` raw-SHA1; `--seconds` honored, rest accepted-ignored (M6 stub list in code); ROM dir positional, no env fallback; `Machine::boot` + `run_cycles(CPU_HZ/441≈63.5kcyc≈100smp)` boot-wait w/ `pair.midi_ready(0)`. ⚠ MEASURED: RE never rises pre-M3 — firmware idles at 0x41xxx/0x42xxx after 0x115e0e poll (SWP30 handshake gates RE → M3); disk-fatal exit-1 downgraded to warn-and-continue until then. Smoke: `build-rust\live.exe ..\roms --seconds 1` exit 0 (52 s wall = 840M wait + 28M run). boot_golden still green. Full M6 gate (WASAPI/MIDI/NVRAM/Ctrl+C) still owed — row NOT paired |
-| render | `render.cpp` (689 L — disk-recount; earlier "689" prompt was right, my first `wc` said 649, trust the Read tool byte-count) | `bins/render` (render.rs) | M4 (R-A gate closes M3) | ✅ **paired (Q2)** — R-A + re-baseline delta pass; --float not needed by harness (M7 backlog). **R: to_s16=`l/4` (GCC-folds; wrapping_mul overflowed |l|≥65536 = calshort frame 421764); --dump-dac/--dump-meg stderr seams ported; keyon-event arm + --lcd-at dumper still owed (display-only)** | **R-A CODE (render.rs `437CD277C9F87252A8B9F4917253B1ADA2ED86B6` raw-SHA1, 601 L):** argv `<roms> <mid> <wav> [sec]` + ALL flags parsed (`// origin:` cites to render.cpp). Core path live: ROM bus (prog/wave fatal :293-298, sintab warn-only :299-300, `roms::load_sintab`→`Vec<u16>` fed to `run_sample_pair`; wave→`Machine.wave`→`Wave::new` in `run_sample_pair` = the deferred build_bus `set_wave/sintab` glue), `smu_smf::load`→events (:276-288) + `--reset` erase/insert (`reset_name/reset_bytes/insert_reset` :91-133, full impl, gate-neutral), `--trace-swp` BEFORE reset w/ silent-fopen (`if(tf)` :334-336, NOT boot.cpp's 書けない), boot-wait on `midi_ready(0)` (:376-393, faithful, NOT the harness path), sample loop `i=pcm.len()/2..` (:412-581): MIDI feed `events[next].time<=t` with `F5` port-switch consume (`clamp(ev[1]-1,0,MIDI_PORTS-1)` :541-542) else `mu_port(ev.port,true,false)`→`midi_in(b,to)` (:544-551), `run_sample` helper = cycle-debt `debt+=28_000_000; cycles=debt/44100; debt-=cycles*44100` (:3186-3189) → `run_cycles(cycles)` (:3388) → `run_sample_pair(sintab)` (:3401-3453); `to_s16`=`(l.wrapping_mul(32768)/DAC_FULL_SCALE).clamp(-32768,32767)` (:574-577, C++ two's-complement wrap + trunc-toward-0); `write_wav` (:37-51) exact RIFF/fmt/data LE. `--boot` HONORED (fixed). **DISK CHECK:** harness `run_tests.py:230` = `render <roms> <mid> <wav> 5.000 --boot 8.000 -v` → argv[4]="5.000"=seconds POSITIONAL (duration_given=true), --boot=8.0 fixed, `boot_samples=round(8*44100)=352800`==piano.json; `pcm_sha1`=`sha1(raw[cut*2:])` cut=boot*ch → **body from boot_samples onward** (fingerprint.py:131), boot audio excluded but still written. Warn-ignored (+stderr line): `--usb --fast-midi --bootcache --dump-dac/-meg --trace-meg --lcd-at/-every --voices-every --part-rms --adc-in --card --replay-swp --native-* --midi-block` (:206-249) — all outside the firmware audio path. `--single`=no-op (single-threaded; else-arm == `run_sample_pair`). `--state-at` accept-ignored (M5). Engine flags (no-value) via matches! catch. **BUILD:** `cargo build --release` EXIT 0; ws `cargo test --release` **444/444 GREEN** (render.rs has no tests; boot_golden green); flat exes refreshed (render.exe relink 11:54). git `src/ tests/` clean. **GATE RED (M3 NOT closed):** `$env:SMU_BUILD=build-rust; run_tests.py --only piano` → rc 0, wav 573300 frames (13 s, frames/2-ch boot==352800 ✓ correct!), but BODY ALL SILENT (peak[0,0], rms 0, `pcm_sha1 91e42c66→034ad8bd`). **ROOT CAUSE = machine (NOT render):** run is EXACT cycle math (364000000 cyc/573300 = 634.921 == C++ byte-for-byte), CPU runs, but `midi_ready(0)` NEVER rises → every MIDI byte dropped → no keyon → silence. Instrumented probes (render.rs `[re]/[diag]`, stderr — kept for the fixer): `timer_fires=0` vs **C++ 29110**, `rm.next_timer_cycles()==u64::MAX` for whole run (emu_timer queue NEVER armed), `deferred_hits=0` (SWP arms NOT implicated — the mixer-row deferred `0x08e..0x14f` wave/rec arms are not the blocker). SWP-bus `--trace-swp` Rust vs C++ (`t=`/`s=` stripped) are **identical for 4005 lines then Rust STOPS emitting SWP bus traffic** (last = `W 00802000 0fc9 f0ff pc=0012e34e`); C++ continues (33897 lines by 8.5 s: exits the ~5 s `0x0fc9` slave poll, arms sci4, RE rises ~7.88 s, keyon @PC0x407998/sample407998 per C++ `.log`). Rust parks in a WAI/idle at PC≈0x426fe (289M run_cycles loops, no SWP) waiting on the completion IRQ the C++ sci4 timers (the 29110) deliver. `0x115e0e` RE-poll matches the pitfall. boot_golden (28M=1 s) green because boot arms no timers — the boot→RE (≈5–8 s) timer/IRQ path was NEVER gated by any prior row. **NEXT:** new machine row `boot→RE timers` (sci4 tx/rx timers armed by firmware `enable_w`/`wait`/`adjust` never fire in Rust, OR the SWP→SH2 completion IRQ/devcb is unwired); needs its own timer-fire-schedule vectors + boot-to-RE re-gate; DO NOT attempt inside render row. render.rs R-A is otherwise complete & ready to close M3 the instant RE rises. |
+| waveout fallback | `live.cpp run_waveout` | `smu-hal-win/src/waveout.rs` | M6 | ✅ **paired (S3/W-LIVE)** | fire-all-then-fifo order PROVEN live: 69.7 ms（1024×3） printed both builds, 3×532524-B device-captured runs incl. byte-EQ C++↔Rust (live main GATE A) + `--frames 512` short-buffer warn path. `waveout.rs` `31FF719860FF3B4D9C3F16A594B8A7787DC75DAD` 88 L: WaveHdr packed 48 B + WaveFormatEx 18 B offset-tested vs mingw mmeapi.h pshpack1; requeue-after-DONE never overwrites in-flight (:295-306 comment honored). 100 ms WaitForSingleObject pump = disk |
+| live main | `live.cpp` | `bins/live` | M6 | ✅ **paired (S3/W-LIVE; supersedes H-pass-1 skeleton. Full-M6 loopMIDI/midisend real-time leg = M6b, per adopted file-seam decision)** | **S3/W-LIVE (orch re-gates in-session): live.rs rewrite `D89AB4951AFCAE5A157E9C86F579D0556D53CD36` 785 L (raw-SHA1 Get-FileHash; worker reported SHA256-prefix `34A65B3A…` — tool named, same file). GATE A (idle parity): C++ vs Rust `--waveout --nomidi --seconds 3 --wav` from factory nvram → 起動中 7.96 秒 identical + **wav 532,524 B BYTE-EQ** (full boot→generator→waveOut→rec chain sample-identical through the real device). GATE B (file seam): `--midi-file piano.mid` ×2 → **BYTE-EQ wavs**, peak 2450 audible (≈ harness piano 2451). GATE C (Ctrl+C): AttachConsole+GenerateConsoleCtrlEvent → exit 0 + **nvram saved 262144 B** (key `acecfc0a8ad6d49f`), disk tail order :573-587 wav→close→save→終了 line mirrored; config nvram restored empty. Full suite post-W-LIVE: 63 renders 合, × = exe-skips only. ws 514 (+3 hal layout tests, `offset_of!` pinned vs mingw headers). Flags: --list/--midi/--frames/--buffers/--nomidi/--seconds/--wav/--waveout/--factory/-v honored; WASAPI-only+native+fast-midi accept-ignore w/ notes; usage :477-487 verbatim; boot-wait EXACT incl disk exit-1 起動しなかった (skeleton deviation CLOSED — RE rises, measured 7.96 s both builds). DEVIATIONS: --midi-file = Rust-only seam (feed at exact event sample via render's F5/mu_port path); WASAPI default = device-less stand-in (`audio out` row owes the real one); HW-MIDI drain paced 1 byte/14.112 smp (disk drains per block — byte stream equal); stdout LF (render precedent); --single note (M8). 2026-09-30 skeleton history: `7330A411…` era — RE-never-rises workaround now historical.** |
+| render | `render.cpp` (689 L — disk-recount; earlier "689" prompt was right, my first `wc` said 649, trust the Read tool byte-count) | `bins/render` (render.rs) | M4 (R-A gate closes M3) | ✅ **paired (Q2) — LCD dumper seam ✅ PAIRED S3/W-LCD (gates orch-rerun in-session; see session-S3 log)** | **S3/W-LCD: render.rs `7669CF0A2C73FE704F8C87925E8E73D74C61377F` 841 L (was `437CD277…` 601 L) — `--lcd-at`/`--lcd-every` transliterated from render.cpp :195-207/:233-236/:493-501/:518-533 at the disk seam (pre-`t`/pre-MIDI-delivery, `((boot+X)*RATE as f64) as usize` truncation verbatim, `now` before `+=`, one-shot `lcd_at=-1.0`); ddram/cgram read via existing `pub Machine.lcd` (Rc<RefCell>) — NO machine/hd44780 edit needed; CRLF on dump lines (printf-text-mode mirror). DEVIATION (documented, by design): Rust build has no native engine ⇒ harness fw/ne legs degenerate to the SAME firmware path — gate still proves seam + firmware LCD drawing; C++↔Rust cross-dump is the real discriminator and is byte-identical. **R: to_s16=`l/4` (GCC-folds; wrapping_mul overflowed |l|≥65536 = calshort frame 421764); --dump-dac/--dump-meg stderr seams ported; keyon-event arm still owed (display-only)** | **R-A CODE (render.rs `437CD277C9F87252A8B9F4917253B1ADA2ED86B6` raw-SHA1, 601 L):** argv `<roms> <mid> <wav> [sec]` + ALL flags parsed (`// origin:` cites to render.cpp). Core path live: ROM bus (prog/wave fatal :293-298, sintab warn-only :299-300, `roms::load_sintab`→`Vec<u16>` fed to `run_sample_pair`; wave→`Machine.wave`→`Wave::new` in `run_sample_pair` = the deferred build_bus `set_wave/sintab` glue), `smu_smf::load`→events (:276-288) + `--reset` erase/insert (`reset_name/reset_bytes/insert_reset` :91-133, full impl, gate-neutral), `--trace-swp` BEFORE reset w/ silent-fopen (`if(tf)` :334-336, NOT boot.cpp's 書けない), boot-wait on `midi_ready(0)` (:376-393, faithful, NOT the harness path), sample loop `i=pcm.len()/2..` (:412-581): MIDI feed `events[next].time<=t` with `F5` port-switch consume (`clamp(ev[1]-1,0,MIDI_PORTS-1)` :541-542) else `mu_port(ev.port,true,false)`→`midi_in(b,to)` (:544-551), `run_sample` helper = cycle-debt `debt+=28_000_000; cycles=debt/44100; debt-=cycles*44100` (:3186-3189) → `run_cycles(cycles)` (:3388) → `run_sample_pair(sintab)` (:3401-3453); `to_s16`=`(l.wrapping_mul(32768)/DAC_FULL_SCALE).clamp(-32768,32767)` (:574-577, C++ two's-complement wrap + trunc-toward-0); `write_wav` (:37-51) exact RIFF/fmt/data LE. `--boot` HONORED (fixed). **DISK CHECK:** harness `run_tests.py:230` = `render <roms> <mid> <wav> 5.000 --boot 8.000 -v` → argv[4]="5.000"=seconds POSITIONAL (duration_given=true), --boot=8.0 fixed, `boot_samples=round(8*44100)=352800`==piano.json; `pcm_sha1`=`sha1(raw[cut*2:])` cut=boot*ch → **body from boot_samples onward** (fingerprint.py:131), boot audio excluded but still written. Warn-ignored (+stderr line): `--usb --fast-midi --bootcache --dump-dac/-meg --trace-meg --lcd-at/-every --voices-every --part-rms --adc-in --card --replay-swp --native-* --midi-block` (:206-249) — all outside the firmware audio path. `--single`=no-op (single-threaded; else-arm == `run_sample_pair`). `--state-at` accept-ignored (M5). Engine flags (no-value) via matches! catch. **BUILD:** `cargo build --release` EXIT 0; ws `cargo test --release` **444/444 GREEN** (render.rs has no tests; boot_golden green); flat exes refreshed (render.exe relink 11:54). git `src/ tests/` clean. **GATE RED (M3 NOT closed):** `$env:SMU_BUILD=build-rust; run_tests.py --only piano` → rc 0, wav 573300 frames (13 s, frames/2-ch boot==352800 ✓ correct!), but BODY ALL SILENT (peak[0,0], rms 0, `pcm_sha1 91e42c66→034ad8bd`). **ROOT CAUSE = machine (NOT render):** run is EXACT cycle math (364000000 cyc/573300 = 634.921 == C++ byte-for-byte), CPU runs, but `midi_ready(0)` NEVER rises → every MIDI byte dropped → no keyon → silence. Instrumented probes (render.rs `[re]/[diag]`, stderr — kept for the fixer): `timer_fires=0` vs **C++ 29110**, `rm.next_timer_cycles()==u64::MAX` for whole run (emu_timer queue NEVER armed), `deferred_hits=0` (SWP arms NOT implicated — the mixer-row deferred `0x08e..0x14f` wave/rec arms are not the blocker). SWP-bus `--trace-swp` Rust vs C++ (`t=`/`s=` stripped) are **identical for 4005 lines then Rust STOPS emitting SWP bus traffic** (last = `W 00802000 0fc9 f0ff pc=0012e34e`); C++ continues (33897 lines by 8.5 s: exits the ~5 s `0x0fc9` slave poll, arms sci4, RE rises ~7.88 s, keyon @PC0x407998/sample407998 per C++ `.log`). Rust parks in a WAI/idle at PC≈0x426fe (289M run_cycles loops, no SWP) waiting on the completion IRQ the C++ sci4 timers (the 29110) deliver. `0x115e0e` RE-poll matches the pitfall. boot_golden (28M=1 s) green because boot arms no timers — the boot→RE (≈5–8 s) timer/IRQ path was NEVER gated by any prior row. **NEXT:** new machine row `boot→RE timers` (sci4 tx/rx timers armed by firmware `enable_w`/`wait`/`adjust` never fire in Rust, OR the SWP→SH2 completion IRQ/devcb is unwired); needs its own timer-fire-schedule vectors + boot-to-RE re-gate; DO NOT attempt inside render row. render.rs R-A is otherwise complete & ready to close M3 the instant RE rises. |
 | verify/statetest/boot/blocktime | `src/verify.cpp`, `statetest.cpp`, `boot.cpp`, `blocktime.cpp` | `bins/*` | M3–M4 | 🟡 boot ✅ verify ✅ **statetest ✅ paired (S2/W4)** (blocktime stub = M8) | boot.rs `C44BD7AD…` 208 L; 2M-cycle FC parity + FULL 28M M2 binary gate green (see M2 row). flags: `--trace-swp`/`--reads`/`--trace-port` accept-ignored (M3 sinks unported, `書けない:` exit-1 check kept); strtoull base-0 helper (0x/octal/ws/sign/saturate) C99-faithful. **verify (session M worker, orchestrator re-gated):** verify.rs `60881FC8…` 167 L; stdout fc.exe /B byte-identical vs C++ (exit 0/0), ws 430/430 held. Standalone Swp30 (64MiB zero wave, sintab seam call-time). Rand `574a3af2 de214fbe 610c06da` = default seed 0x9d14abd7 LCG draws 1-3, zero pre-consumption. DEVIATION: meg_jit_selftest — disk truth = **x86-64 build HAS SMU2000_MEG_JIT=1** (swp30_jit.cpp:30-31; dispatch premise "x86=not run" corrected by worker) — Rust runs honest interpreter-vs-re-transliteration sweep (revram/m1_expand :2428-455/:3502-509, masks &0xffff) = 0 mismatches both sides; a64 literal 0 (a64asm.cpp:950 x86 stub). smu-tools/Cargo.toml `22CA40FE…` +smu-swp30 dep. ⚠ building from repo root bypasses `.cargo/config.toml` (cwd-relative) → exes land `rust\target`, not build-rust — build from `rust\`. statetest/blocktime stubs remain |
 
 ---
@@ -266,6 +286,64 @@ Deviation log (intentional):
 ---
 
 ## Session log (append-only, newest first)
+
+### 2026-10-02 — session S3 (M6 pass 1: **LCD dumper seam → render row re-PAIRED; メーター/演奏画面 ×→合; residual × now ONLY the exe-skip trio**)
+
+- Cold protocol: ledger IN FULL (1205 L); `git status src/ tests/` CLEAN; S2 "ASK commit"
+  CLOSED — S2 tree = `dbd2f72` (verified: state_io/nvram/bootcache/card/statetest all in
+  commit stat). Pin `3A27AF733D08CD46B5F97363A873588C8C9713C2` re-hashed; config-dir
+  boot\ = the two 6097273-B caches, nvram/ ABSENT(=empty); flat exes 18:45 == target.
+  Baseline ws **503/503**. 0 embedded commands executed; cited lines re-read from disk.
+- ENV PROBE (for live/M6 hardware gates): winmm MIDI 10 out / 6 in endpoints; audio
+  devices exist (USB Audio, Steinberg, NVIDIA). loopMIDI NOT provable non-interactively —
+  live-row gate plan stays per S2 NEXT (file-fed MIDI + waveout fallback).
+- W-LCD (single writer, survived, clean report — all claims disk-verified by orch):
+  render.rs 601→841 L `7669CF0A…`; seam + flags + CRLF per row. lib.rs UNTOUCHED
+  (lcd already pub). `cargo build --release` exit 0 (orch re-ran, exes fresh 19:51,
+  flat refresh from ROOT). ws `cargo test --release` **503/503** IN-SESSION (boot_golden
+  green = dumps boot-neutral, stdout-only).
+- CROSSED-DUMP GATE (the real one, argv = harness): meter `--boot 8.000 --lcd-at 3.4`:
+  C++ vs Rust `LCDHEX` line **byte-identical (152 B)**, bars moving (cf cb ab c8 9c cb c6
+  — not-all-`89` leg of step_meter true). progchg `--lcd-every 0.1`: **71×`LCD ` + 71×`CG `
+  lines, ALL-BYTE-EQ** both tags; 4 distinct 音色名, 3 prog changes (step_screen legs).
+- FULL SUITE `SMU_BUILD=build-rust` detached (`Start-Process -RedirectStandardOutput` +
+  `PYTHONIOENCODING=utf-8` = raw UTF-8 log — **obsoletes the cp437 fix-read round-trip**,
+  new technique logged): **63 render 合; メーター 合 16/16 マス; 演奏画面 合 71 点×4 音色名;
+  JIT入切/別糸/native/USB/写し取り/2回目 合. Residual × = {xg, sampling, パネル} = exe-skips
+  ONLY** — the LCD-seam half of the old ×-list is dead. Log %TEMP%\suite_rust_s3.txt.
+- Repo (pass-1 state; final tree at W-LIVE entry below): ONLY render.rs modified (+ledger).
+  src/tests/golden untouched; no commits; no ROM/WAV committed.
+- W-TX (pass 2, single writer, survived; disk hashes re-verified, diff read line-by-line
+  by orch): `midi_out ring` row → PAIRED. midi.rs `BA7A5048…` +88, lib.rs `6040B0A4…`
+  +62 (`drain_sci_pins` @ event_tick/pump_resched/reset — the :1179 devcb shape),
+  tests/midi_out.rs ×8 `B8A83516…`, Cargo.toml shim. ctor==reset `m_tx_bit=-1`
+  mu2000.h:1030 disk-verified. ORCH ADDS: write_sci_clk 0 binds re-rg'd; C++
+  midi_out_take consumers = xgtest/fx_probe ONLY (live.cpp ZERO — live THRU wire-up is
+  `live main` scope; xgtest = future M7 gate, ring is its feed). Gates IN-SESSION: ws
+  **511/511** (+8), boot_golden byte-EQ (×2: ws + dedicated), piano 合 on FRESH 20:31
+  exes (stale-exe trap re-bit: first `--only piano` silently ran 19:51 exes because the
+  refresh used `..\build-rust` from ROOT — root-relative paths, NEXT §1 re-proven),
+  boot 28M --trace-upd stdout FC /B C++↔Rust **no differences**. Deviation logged on
+  row: drain-after-fan-out vs disk-synchronous (order-preserving, no harness consumer).
+- W-LIVE (pass 3, single writer, survived; all hashes re-hashed by orch, gate tails
+  re-read): `live main` + `waveout fallback` → **PAIRED**, `midi in` → ported (deep
+  capture gate = M6b). live.rs rewrite 785 L `D89AB495…`; smu-hal-win NEW: midi.rs 459
+  `8ADC0CAD…` (SPSC+SysEx requeue, no-alloc cb), waveout.rs 88 `31FF7198…`, sys.rs 91
+  `004C5858…`, lib.rs 14. ENV GROUND FACT: **headless real-time waveout WORKS on this
+  box** (probe: C++ `live --waveout --nomidi --seconds 3` → boot 7.96 s, 待ち時間 69.7 ms,
+  exit 0) — earlier "interactive-state required" assumption PARTLY VOID; loopMIDI still
+  unproven, file-seam decision stands. GATES IN-SESSION (orch): GATE A C++↔Rust idle
+  live wavs **BYTE-EQ 532,524 B** (factory-nvram both sides, 起動中 7.96 秒 identical);
+  GATE B `--midi-file` ×2 determinism **BYTE-EQ** + peak 2450 audible; GATE C Ctrl+C
+  (AttachConsole+GenerateConsoleCtrlEvent) exit 0 + nvram 262,144 B saved key
+  `acecfc0a8ad6d49f`, config nvram RESTORED EMPTY after every probe; ws **514/514**;
+  FULL SUITE post-W-TX+W-LIVE: **63 合 / × = {xg,sampling,パネル} only**
+  (%TEMP%\suite_rust_s3b.txt — log COMPLETES at 7256 ch ≈ 8778 B: a "stalled at
+  8778" poll mid-run is misleading, final size is identical — check verdict text, not
+  size). Skeleton-era deviations CLOSED: disk exit-1 boot-wait fatal + --seconds.
+  ⚠ Rust live runs ~1.55× realtime single-threaded (busy>100% lines) — M8 perf row
+  owns this; waveout absorbs it (no dropouts in captures). --single/M8 + WASAPI +
+  xgtest/fx_probe consumers (midi_out ring LIVE consumers) = remaining M6b/M7/M8 scope.
 
 ### 2026-10-02 — session S2 (M5 state row: W1-W5a all survived — **cross-load PROVEN both ways via bootcache**; W5b ghost in flight)
 

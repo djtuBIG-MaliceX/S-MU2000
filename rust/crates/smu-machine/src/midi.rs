@@ -10,6 +10,12 @@
 //!   MIDI pump in the run_sample region)
 //! - `src/mu2000.cpp:1061-1064` — cable reset inside `mu2000::reset`
 //! - `src/mu2000.cpp:1270-1283` — `usb_midi_in` receiver half (F5 framing)
+//! - `src/mu2000.h:227-246` + `src/mu2000.h:1024-1031` +
+//!   `src/mu2000.cpp:1271-1294` — MIDI OUT: `midi_out_take`, the TX pin
+//!   frame builder `tx_line` and the 4096-byte ring (`W-TX row`)
+//! - `src/mu2000.cpp:1176-1179` — the MIDI OUT part of `mu2000::reset`
+//!   (ring clear, then the `write_sci_tx<0>` bind consumed by
+//!   `Machine::drain_sci_pins`, lib.rs)
 //!
 //! Timing math (mu2000.h:538-539, disk): 1 byte = 10 bits / 31250 baud
 //! = 8960 CPU cycles @ 28 MHz = **exactly 14.112 samples** @ 44100
@@ -50,6 +56,11 @@ pub const MIDI_PORTS: usize = 4;
 pub const MIDI_QUEUE_LIMIT: usize = 1usize << 22;
 /// origin: src/mu2000.cpp:36-37 — `constexpr u64 MIDI_BIT_CYCLES = 28000000 / 31250`
 pub const MIDI_BIT_CYCLES: u64 = 28_000_000 / 31_250; // = 896; mu2000.h:538: 10 bits = 8960 cyc = 14.112 smp
+/// origin: src/mu2000.h:1027 — `TX_SIZE = 4096, TX_MASK = TX_SIZE - 1`
+/// (mu2000.h:230: "溜めは 4096 バイトで、溢れたら捨てる")
+pub const MIDI_TX_SIZE: usize = 4096;
+/// origin: src/mu2000.h:1027 — `TX_MASK = TX_SIZE - 1`
+pub const MIDI_TX_MASK: usize = MIDI_TX_SIZE - 1;
 
 /// origin: src/mu2000.h:983-988 `struct midi_line`.
 /// `bit`: -1 idle/waiting / 0 start / 1-8 data / 9 stop (disk comment :985).
@@ -149,6 +160,19 @@ pub struct Midi {
     pub cable: [i32; MIDI_PORTS],
     /// mu2000.h:1010 `std::array<bool, MIDI_PORTS> m_cable_wait = {}`
     pub cable_wait: [bool; MIDI_PORTS],
+    /// mu2000.h:1028 `u8 m_tx_buf[TX_SIZE] = {}` — MIDI OUT byte ring
+    /// (SCI ch0 TX wire frame assembly; NOT saved in state, mu2000.h:231)
+    pub tx_buf: [u8; MIDI_TX_SIZE],
+    /// mu2000.h:1029 `size_t m_tx_r = 0` — take side
+    pub tx_r: usize,
+    /// mu2000.h:1029 `size_t m_tx_w = 0` — push side (tx_line stop bit)
+    pub tx_w: usize,
+    /// mu2000.h:1030 `int m_tx_bit = -1` — -1 waiting / 0-7 data / 8 stop.
+    /// Ctor init (:1030) and reset (mu2000.cpp:1178) BOTH pin this to -1 —
+    /// verified on disk, no ctor-vs-reset divergence for this field.
+    pub tx_bit: i32,
+    /// mu2000.h:1031 `u8 m_tx_cur = 0` — byte under construction
+    pub tx_cur: u8,
 }
 
 impl Midi {
@@ -162,6 +186,11 @@ impl Midi {
             usb: UsbIn::new(),                         // :1014
             cable: [0, 1, 2, 3],                       // :1009
             cable_wait: [false; MIDI_PORTS],           // :1010 {}
+            tx_buf: [0u8; MIDI_TX_SIZE],               // :1028 {}
+            tx_r: 0,                                   // :1029
+            tx_w: 0,                                   // :1029
+            tx_bit: -1,                                // :1030 (= reset :1178)
+            tx_cur: 0,                                 // :1031
         }
     }
 
@@ -181,6 +210,65 @@ impl Midi {
             self.cable[p] = p as i32; // mu2000.cpp:1062
             self.cable_wait[p] = false; // :1063
         }
+    }
+
+    /// origin: src/mu2000.cpp:1271-1294 `tx_line` — assemble the MIDI OUT
+    /// frame off the SCI ch0 TX wire. The SCI reports the line exactly once
+    /// per bit (mu2000.h:1024-1025), so "0 starts, 8 bits LSB-first, 1 ends"
+    /// reads without looking at time. Driven from `Machine::drain_sci_pins`
+    /// (lib.rs) — the Rust shape of the disk `write_sci_tx<0>` bind
+    /// (mu2000.cpp:1179). device_reset's born-high edge (sci.rs:322,
+    /// sh_sci.cpp:367) lands here and no-ops at :1273-1278 (bit=-1, high).
+    pub fn tx_line(&mut self, state: bool) {
+        if self.tx_bit < 0 {
+            // :1273-1278 — only a falling edge starts a byte; anything
+            // else (incl. a mid-idle HIGH) returns untouched
+            if !state {
+                // スタートビット (:1274)
+                self.tx_bit = 0; // :1275
+                self.tx_cur = 0; // :1276
+            }
+            return; // :1278
+        }
+        if self.tx_bit < 8 {
+            // :1280-1283 — LSB first; disk `u8((state?1:0) << m_tx_bit)`
+            // shifts as int then truncates; bit<8 so the widths agree
+            self.tx_cur |= ((state as u32) << self.tx_bit) as u8; // :1281
+            self.tx_bit += 1; // :1282
+            return; // :1283
+        }
+        // :1285-1288 — stop bit. 0 here means the framing slipped, so the
+        // byte is dropped
+        self.tx_bit = -1; // :1286
+        if !state {
+            return; // :1287
+        }
+        let next = (self.tx_w + 1) & MIDI_TX_MASK; // :1289
+        if next == self.tx_r {
+            return; // :1290-1291 — 溢れ。誰も読んでいない
+        }
+        self.tx_buf[self.tx_w] = self.tx_cur; // :1292
+        self.tx_w = next; // :1293
+    }
+
+    /// origin: src/mu2000.h:232-246 `midi_out_take` — one firmware-emitted
+    /// MIDI OUT byte, or None when the ring is empty (:241-242). Same-thread
+    /// contract as `run_sample` (mu2000.h:230). Ring is NOT saved in state
+    /// (mu2000.h:231 — a restore starts empty).
+    pub fn midi_out_take(&mut self) -> Option<u8> {
+        // :237-240 — disk diverts to `usb_out_take(v, port)` when USB is
+        // active ("firmware は返事も USB 側へ出す"). UNREACHABLE here:
+        // usb_host is pinned false until the M7 usb.rs row, and M7 owns
+        // usb_out_take — inert arm, no assert, no ring side effects.
+        if self.usb_host {
+            return None; // M7 replaces this arm with its own ring read
+        }
+        if self.tx_r == self.tx_w {
+            return None; // :241-242
+        }
+        let v = self.tx_buf[self.tx_r]; // :243
+        self.tx_r = (self.tx_r + 1) & MIDI_TX_MASK; // :244
+        Some(v) // :245
     }
 
     /// origin: src/mu2000.h:133-163 `midi_in`. Returns the port the byte
