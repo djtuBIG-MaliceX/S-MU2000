@@ -432,14 +432,104 @@ impl Sh7042Bus {
     }
     #[inline]
     fn region_word(&self, a: u32) -> Option<u16> {
-        // membus.h:76-77: p[0]<<8|p[1] from the SAME region pointer
+        // membus.h:76-77: p[0]<<8|p[1] from the SAME region pointer.
+        // S7 (2026-10-03): per-ACCESS region select (== C++ picking one `p`),
+        // then direct byte pair. Aligned SH-2 accesses never straddle a region
+        // (all regions even-sized; ROM short-vector UB stays on the fallback
+        // per-byte path, only len==0x400000 takes the fast leg).
+        // SAFETY (all legs below): the range guard proves i+1 < region len
+        // (arrays are fixed-size Box<[u8; N]>; len is a compile-time constant)
+        if self.rom.len() == 0x400000 && a <= 0x3ffffe {
+            let r = &self.rom;
+            unsafe {
+                return Some((u16::from(*r.get_unchecked(a as usize)) << 8)
+                    | u16::from(*r.get_unchecked(a as usize + 1)));
+            }
+        }
+        if let Some(i) = a.checked_sub(0x400000) {
+            if i <= 0x43fffe - 0x400000 {
+                let r = &self.ram[..];
+                unsafe {
+                    return Some((u16::from(*r.get_unchecked(i as usize)) << 8)
+                        | u16::from(*r.get_unchecked(i as usize + 1)));
+                }
+            }
+        }
+        if let Some(i) = a.checked_sub(0x1000000) {
+            if i <= 0x107fffe - 0x1000000 {
+                let r = &self.dram[..];
+                unsafe {
+                    return Some((u16::from(*r.get_unchecked(i as usize)) << 8)
+                        | u16::from(*r.get_unchecked(i as usize + 1)));
+                }
+            }
+        }
+        if a >= 0xfffff000 && a <= 0xfffffffe {
+            let i = (a - 0xfffff000) as usize;
+            let r = &self.iram[..];
+            unsafe {
+                return Some((u16::from(*r.get_unchecked(i)) << 8)
+                    | u16::from(*r.get_unchecked(i + 1)));
+            }
+        }
+        // faithful fallback (ROM-short-UB / hypothetical straddle): two scans
         let b0 = self.region_byte(a)?;
         let b1 = self.region_byte(a + 1)?;
         Some((u16::from(b0) << 8) | u16::from(b1))
     }
     #[inline]
     fn region_long(&self, a: u32) -> Option<u32> {
-        // membus.h:89-92
+        // membus.h:89-92 — S7 per-access select (see region_word)
+        // SAFETY: range guards prove i+3 < region len (see region_word note)
+        if self.rom.len() == 0x400000 && a <= 0x3ffffc {
+            let r = &self.rom;
+            unsafe {
+                return Some(
+                    (u32::from(*r.get_unchecked(a as usize)) << 24)
+                        | (u32::from(*r.get_unchecked(a as usize + 1)) << 16)
+                        | (u32::from(*r.get_unchecked(a as usize + 2)) << 8)
+                        | u32::from(*r.get_unchecked(a as usize + 3)),
+                );
+            }
+        }
+        if let Some(i) = a.checked_sub(0x400000) {
+            if i <= 0x43fffc - 0x400000 {
+                let r = &self.ram[..];
+                unsafe {
+                    return Some(
+                        (u32::from(*r.get_unchecked(i as usize)) << 24)
+                            | (u32::from(*r.get_unchecked(i as usize + 1)) << 16)
+                            | (u32::from(*r.get_unchecked(i as usize + 2)) << 8)
+                            | u32::from(*r.get_unchecked(i as usize + 3)),
+                    );
+                }
+            }
+        }
+        if let Some(i) = a.checked_sub(0x1000000) {
+            if i <= 0x107fffc - 0x1000000 {
+                let r = &self.dram[..];
+                unsafe {
+                    return Some(
+                        (u32::from(*r.get_unchecked(i as usize)) << 24)
+                            | (u32::from(*r.get_unchecked(i as usize + 1)) << 16)
+                            | (u32::from(*r.get_unchecked(i as usize + 2)) << 8)
+                            | u32::from(*r.get_unchecked(i as usize + 3)),
+                    );
+                }
+            }
+        }
+        if a >= 0xfffff000 && a <= 0xfffffffc {
+            let i = (a - 0xfffff000) as usize;
+            let r = &self.iram[..];
+            unsafe {
+                return Some(
+                    (u32::from(*r.get_unchecked(i)) << 24)
+                        | (u32::from(*r.get_unchecked(i + 1)) << 16)
+                        | (u32::from(*r.get_unchecked(i + 2)) << 8)
+                        | u32::from(*r.get_unchecked(i + 3)),
+                );
+            }
+        }
         let b0 = u32::from(self.region_byte(a)?);
         let b1 = u32::from(self.region_byte(a + 1)?);
         let b2 = u32::from(self.region_byte(a + 2)?);
@@ -513,8 +603,20 @@ impl Sh7042Bus {
     pub fn internal_r8(&mut self, a: u32) -> u8 {
         match a {
             // map:15-26 sci0 81a0-81a5 / sci1 81b0-81b5
-            0xffff81a0..=0xffff81a5 => self.periph.as_mut().map_or(0, |x| x.sci_r8(0, a)),
-            0xffff81b0..=0xffff81b5 => self.periph.as_mut().map_or(0, |x| x.sci_r8(1, a)),
+            // M9 S7 (2026-10-03) selective dirty: sci/mtu/cmt/adc reads can
+            // drain the device irq FIFO, clear a flag, or arm the sticky
+            // internal_update resched — batch-stop. Port/bsc/dmac/intc/pcf
+            // reads are side-effect-free for the pump (porta's encoder is
+            // device-local, clock-free — mu2000.cpp:1083-1105), so those
+            // stretches batch through. (Was: blanket set in the bus arm.)
+            0xffff81a0..=0xffff81a5 => {
+                self.dev_dirty.set(true);
+                self.periph.as_mut().map_or(0, |x| x.sci_r8(0, a))
+            }
+            0xffff81b0..=0xffff81b5 => {
+                self.dev_dirty.set(true);
+                self.periph.as_mut().map_or(0, |x| x.sci_r8(1, a))
+            }
             // map:27-~100 mtu family (mtu3/mtu4/mtu/mtu0/1/2 interleaved)
             0xffff8200..=0xffff820b
             | 0xffff820d
@@ -522,7 +624,10 @@ impl Sh7042Bus {
             | 0xffff8240..=0xffff8241
             | 0xffff8260..=0xffff826f
             | 0xffff8280..=0xffff828b
-            | 0xffff82a0..=0xffff82ab => self.periph.as_mut().map_or(0, |x| x.mtu_r8(a)),
+            | 0xffff82a0..=0xffff82ab => {
+                self.dev_dirty.set(true);
+                self.periph.as_mut().map_or(0, |x| x.mtu_r8(a))
+            }
             // intc 8348-835b
             0xffff8348..=0xffff835b => self.periph.as_mut().map_or(0, |x| x.intc_r8(a)),
             // porta dr/io 8380-8387
@@ -570,12 +675,17 @@ impl Sh7042Bus {
             0xffff83c8 => (self.pcf_if_r() >> 8) as u8,
             0xffff83c9 => self.pcf_if_r() as u8,
             // cmt 83d0-83dd
-            0xffff83d0..=0xffff83dd => self.periph.as_mut().map_or(0, |x| x.cmt_r8(a)),
+            0xffff83d0..=0xffff83dd => {
+                self.dev_dirty.set(true);
+                self.periph.as_mut().map_or(0, |x| x.cmt_r8(a))
+            }
             // adc0 83e0-83e1,83f0-8407,8410,8412 / adc1 8408-840f,8411,8413
             0xffff83e0..=0xffff83e1 | 0xffff83f0..=0xffff8407 | 0xffff8410 | 0xffff8412 => {
+                self.dev_dirty.set(true);
                 self.periph.as_mut().map_or(0, |x| x.adc0_r8(a))
             }
             0xffff8408..=0xffff840f | 0xffff8411 | 0xffff8413 => {
+                self.dev_dirty.set(true);
                 self.periph.as_mut().map_or(0, |x| x.adc1_r8(a))
             }
             // bsc 8620-8627,862a-8631 / dmac 86b0-86b1 / dmac0-3 16-byte blocks
@@ -597,10 +707,13 @@ impl Sh7042Bus {
     // (holes 0xffff820c..., bsc 0xffff8628 stay misses; odd always -> miss).
     pub fn internal_r16(&mut self, a: u32) -> u16 {
         match a {
+            // M9 S7 selective dirty — see internal_r8 (sci/mtu/cmt/adc stop)
             0xffff81a0 | 0xffff81a2 | 0xffff81a4 => {
+                self.dev_dirty.set(true);
                 self.periph.as_mut().map_or(0, |x| x.sci_r16(0, a))
             } // map:328-330
             0xffff81b0 | 0xffff81b2 | 0xffff81b4 => {
+                self.dev_dirty.set(true);
                 self.periph.as_mut().map_or(0, |x| x.sci_r16(1, a))
             } // map:331-333
             0xffff8200..=0xffff820a
@@ -611,6 +724,7 @@ impl Sh7042Bus {
             | 0xffff82a0..=0xffff82aa
                 if a & 1 == 0 =>
             {
+                self.dev_dirty.set(true);
                 self.periph.as_mut().map_or(0, |x| x.mtu_r16(a)) // mtu family union
             }
             (0xffff8348..=0xffff835a) if a & 1 == 0 => {
@@ -641,12 +755,15 @@ impl Sh7042Bus {
             0xffff83ba => self.pcf_e_r() as u16,
             0xffff83c8 => self.pcf_if_r(),
             (0xffff83d0..=0xffff83dc) if a & 1 == 0 => {
+                self.dev_dirty.set(true);
                 self.periph.as_mut().map_or(0, |x| x.cmt_r16(a))
             }
             0xffff83e0 | 0xffff83f0..=0xffff8406 | 0xffff8410 | 0xffff8412 if a & 1 == 0 => {
+                self.dev_dirty.set(true);
                 self.periph.as_mut().map_or(0, |x| x.adc0_r16(a))
             }
             (0xffff8408..=0xffff840e) if a & 1 == 0 => {
+                self.dev_dirty.set(true);
                 self.periph.as_mut().map_or(0, |x| x.adc1_r16(a))
             }
             // bsc r16 cases SKIP 8628 (disk set: 8620,8622,8624,8626,862a,..)
@@ -683,15 +800,22 @@ impl Sh7042Bus {
     }
 
     // origin: src/mame/cpu/sh7042_map.hxx:517-791 (internal_w8)
+    // M9 S7 (2026-10-03) selective dirty (see internal_r8 note): sci/mtu/
+    // intc/cmt/adc writes can queue an Evt, arm the sticky resched, or move
+    // the irq line (intc_w8 -> Evt::CpuIrq; the blanket-stop for intc keeps
+    // the S6-gated shape even for non-arbitrating ICR writes — rare, cheap).
+    // Port/pcF/bsc/dmac writes touch device-local state only -> clean.
     pub fn internal_w8(&mut self, a: u32, v: u8) {
         match a {
             // map:520-531 sci — NOTE no 81a5/81b5 (RDR read-only on disk)
             0xffff81a0..=0xffff81a4 => {
+                self.dev_dirty.set(true);
                 if let Some(p) = self.periph.as_mut() {
                     p.sci_w8(0, a, v)
                 }
             }
             0xffff81b0..=0xffff81b4 => {
+                self.dev_dirty.set(true);
                 if let Some(p) = self.periph.as_mut() {
                     p.sci_w8(1, a, v)
                 }
@@ -704,11 +828,13 @@ impl Sh7042Bus {
             | 0xffff8260..=0xffff826f
             | 0xffff8280..=0xffff828b
             | 0xffff82a0..=0xffff82ab => {
+                self.dev_dirty.set(true);
                 if let Some(p) = self.periph.as_mut() {
                     p.mtu_w8(a, v)
                 }
             }
             0xffff8348..=0xffff835b => {
+                self.dev_dirty.set(true);
                 if let Some(p) = self.periph.as_mut() {
                     p.intc_w8(a, v)
                 }
@@ -766,18 +892,21 @@ impl Sh7042Bus {
             0xffff83c8 => self.pcf_if_w(u16::from(v) << 8, 0xff00),      // map:685
             0xffff83c9 => self.pcf_if_w(u16::from(v), 0x00ff),           // map:686
             0xffff83d0..=0xffff83dd => {
+                self.dev_dirty.set(true);
                 if let Some(p) = self.periph.as_mut() {
                     p.cmt_w8(a, v)
                 }
             }
             // adc0 byte writes ONLY 83e0-83e1,8410,8412 (ADCDR ro)
             0xffff83e0..=0xffff83e1 | 0xffff8410 | 0xffff8412 => {
+                self.dev_dirty.set(true);
                 if let Some(p) = self.periph.as_mut() {
                     p.adc0_w8(a, v)
                 }
             }
             // adc1 byte writes ONLY the odd 8411/8413
             0xffff8411 | 0xffff8413 => {
+                self.dev_dirty.set(true);
                 if let Some(p) = self.periph.as_mut() {
                     p.adc1_w8(a, v)
                 }
@@ -804,14 +933,17 @@ impl Sh7042Bus {
     }
 
     // origin: src/mame/cpu/sh7042_map.hxx:793-933 (internal_w16)
+    // M9 S7 selective dirty — see internal_w8 note
     pub fn internal_w16(&mut self, a: u32, v: u16) {
         match a {
             0xffff81a0 | 0xffff81a2 | 0xffff81a4 => {
+                self.dev_dirty.set(true);
                 if let Some(p) = self.periph.as_mut() {
                     p.sci_w16(0, a, v)
                 }
             }
             0xffff81b0 | 0xffff81b2 | 0xffff81b4 => {
+                self.dev_dirty.set(true);
                 if let Some(p) = self.periph.as_mut() {
                     p.sci_w16(1, a, v)
                 }
@@ -824,11 +956,13 @@ impl Sh7042Bus {
             | 0xffff82a0..=0xffff82aa
                 if a & 1 == 0 =>
             {
+                self.dev_dirty.set(true);
                 if let Some(p) = self.periph.as_mut() {
                     p.mtu_w16(a, v)
                 }
             }
             (0xffff8348..=0xffff835a) if a & 1 == 0 => {
+                self.dev_dirty.set(true);
                 if let Some(p) = self.periph.as_mut() {
                     p.intc_w16(a, v)
                 }
@@ -873,11 +1007,13 @@ impl Sh7042Bus {
             0xffff83ba => self.pcf_e_w(u32::from(v), 0x0000_ffff),       // map:878
             0xffff83c8 => self.pcf_if_w(v, 0xffff),                      // map:879
             (0xffff83d0..=0xffff83dc) if a & 1 == 0 => {
+                self.dev_dirty.set(true);
                 if let Some(p) = self.periph.as_mut() {
                     p.cmt_w16(a, v)
                 }
             }
             0xffff83e0 | 0xffff8410 | 0xffff8412 => {
+                self.dev_dirty.set(true);
                 if let Some(p) = self.periph.as_mut() {
                     p.adc0_w16(a, v)
                 }
@@ -1069,7 +1205,8 @@ impl Sh2Bus for Sh7042Bus {
                         .map_or(0, |p| p.usb_r8(a - 0xf80000)) // mu2000.cpp:979
                 }
                 Dev::Internal => {
-                    self.dev_dirty.set(true); // M9: sci/mtu/cmt/adc/sticky legs
+                    // M9 S7: selective dirty lives in the per-register arms of
+                    // internal_r8 (sci/mtu/cmt/adc stop; port/bsc/dmac pass)
                     return self.internal_r8(a); // mu2000.cpp:988
                 }
             }
@@ -1146,7 +1283,7 @@ impl Sh2Bus for Sh7042Bus {
                     return 0;
                 }
                 Dev::Internal => {
-                    self.dev_dirty.set(true); // M9
+                    // M9 S7: selective dirty per register arm (see internal_r8)
                     return self.internal_r16(a); // mu2000.cpp:989
                 }
             }
@@ -1162,9 +1299,11 @@ impl Sh2Bus for Sh7042Bus {
         }
         if let Some(d) = self.find_dev(a) {
             if d == Dev::Internal {
-                self.dev_dirty.set(true); // M9
                 // membus.h:93-95: d->r32 present only for the internal device
                 // (mu2000.cpp:990). SWP has NO r32 -> word pair (membus.h:96).
+                // M9 S7: r32 cases are porta/portd/pcf/dmac only — all pump-
+                // clean; the `_` fallback chain into internal_r16 carries any
+                // sci/mtu/cmt/adc stop.
                 return self.internal_r32(a);
             }
         }
@@ -1229,8 +1368,7 @@ impl Sh2Bus for Sh7042Bus {
                     }
                 }
                 Dev::Internal => {
-                    self.dev_dirty.set(true); // M9
-                    self.internal_w8(a, v) // mu2000.cpp:991
+                    self.internal_w8(a, v) // mu2000.cpp:991 (S7 selective dirty inside)
                 }
             }
         }
@@ -1268,8 +1406,7 @@ impl Sh2Bus for Sh7042Bus {
                     }
                 }
                 Dev::Internal => {
-                    self.dev_dirty.set(true); // M9
-                    self.internal_w16(a, v) // mu2000.cpp:992
+                    self.internal_w16(a, v) // mu2000.cpp:992 (S7 selective dirty inside)
                 }
                 _ => {
                     // membus.h:120 r8-pair fallback on the SAME handler:
@@ -1373,8 +1510,7 @@ impl Sh2Bus for Sh7042Bus {
             match d {
                 // mu2000.cpp:993 internal (its w32 has the w16-pair tail)
                 Dev::Internal => {
-                    self.dev_dirty.set(true); // M9
-                    self.internal_w32(a, v);
+                    self.internal_w32(a, v); // S7: dirty via w16-pair fallback when relevant
                     return;
                 }
                 // membus.h:136 d->w32 exists for the SWP devices

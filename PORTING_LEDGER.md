@@ -14,55 +14,46 @@ on this repo MUST read this file in full before touching anything, then work the
 > ASK USER CLOSED (S3): S2 tree COMMITTED as `dbd2f72` "Rust my anus" (verified contains
 > the full M5 delta: state_io/nvram/bootcache/card/statetest/state + AGENTS + ledger).
 >
-> **NEXT (S6 open — M9 IN FLIGHT, uncommitted work in rust/):** read the
-> `### 2026-10-03 — session S6` log FIRST. Mission (USER, S5/S6): CPU usage —
-> JIT or firmware-path optimization; samptest SKIPPED by user
-> (`build-rust\samptest.exe` renamed `samptest.exe.hold` → harness sampling
-> step ×-skips "無い" — EXPECTED).
-> 1. **TREE STATE = fully-gated batched interpreter** (E1 experiment was
->    REVERTED before close; re-run boot_golden + piano to confirm the rebuild,
->    then re-attack the ~1.05× today-box gap / bar re-measure).
->    `cargo build --release` (workdir rust\) + flat refresh from ROOT, verify
->    `cargo test --release` ws green + `SMU_BUILD=build-rust python
->    tools/run_tests.py --only piano` 合.
-> 2. Remaining levers (measure each, keep only wins): single hn borrow in
->    instruction() tail (pc_exec + now share one borrow); Ctx::read_word ROM
->    fast path (a<=0x3fffff && rom.len()==0x400000 → unchecked byte pair —
->    all Ctx intercepts sit above 0x400000); selective Internal-arm dirty
->    (sci/mtu/cmt/adc/intc-w dirty; ports/bsc/dmac/intc-r clean) to lengthen
->    batches; cheaper pump block at device-op stops.
-> 3. Gates per step: `cargo test --release` (workdir rust\) ws green, boot_golden
->    byte-EQ, `$env:SMU_BUILD="build-rust"; python tools/run_tests.py --only piano`
->    合 ×2. FINAL: full suite (SYNCHRONOUS, timeout ≥2400000, -u + Tee for
->    progress — S6 ate TWO 40-min hangs caused by FOREIGN
->    `D:\Downloads\S-MU2000\live_rust.exe roms --midi 4 --fast-midi` sharing
->    %LOCALAPPDATA%\S-MU2000; kill `live_rust` before re-running) + live
->    no-starvation (waveout 3 s dense-ish) + blocktime ≤ bar 8.887/11.75
->    (⚠ TODAY's box runs C++-interp single at ~10.8 ms avg / RT 93% — machine
->    drift vs S4 record; recipe `SMU2000_SINGLE=1 SMU2000_SH2_JIT=0
->    SMU2000_MEG_JIT=0`, C++ JITs are ON unless =0).
-> 4. JIT (dynasmrt SH-2) only if interpreter polish can't reach the bar —
->    S6 batched-interp took SH-2 27805→10797 ns/smp (2.58×), dense block
->    19.497/26.58 → 11.38/16.5; gap vs SAME-BOX C++-interp now only ~1.05×
->    (recorded bar 8.887 = box drift). Idle live CPU 78.4% (was 159.8%);
->    dense-live + full suite still owed.
-> 5. Refresh flat exes from ROOT (`Copy-Item build-rust\target\release\*.exe
->    build-rust\`) after EVERY cargo build; verify stamps. samptest.exe stays
->    `.hold` until user says otherwise.
+> **NEXT (S8 open — M9 polish PAIRED-in-session ×2, uncommitted rust/ delta):** read
+> the `### 2026-10-03 — session S7` log FIRST. S7 = fetch-path polish on top of the
+> committed S6 batched interpreter (`99edf62`): dense single 0.247→0.203 ms avg
+> (RT 108.9→89.5% — SUB-REALTIME vs today's C++-interp 0.186/81.9), SH-2
+> 10881→7029-7576 ns/smp ≈ SAME-BOX C++ (7213); live idle CPU 64.2% no-starvation,
+> live wavs BYTE-EQ ×2, boot 28M trace-swp/stdout/stderr byte-EQ, ws 562 ×2,
+> piano/dense 合 ×2. samptest SKIPPED per user (note: `build-rust\samptest.exe`
+> EXISTS on disk @20:24 gated build — the `.hold` rename was undone by USER;
+> confirm state before concluding).
+> 1. **TREE STATE = fully-gated S7** (all levers above landed + kept; the ONE
+>    rejected experiment = SWP-write dirty removal → dense RED keyon 60→0,
+>    reverted; SWP w8/w16/w32 dirty arms are LOAD-BEARING — see Pitfalls).
+>    Confirm cold: `cargo build --release` (workdir rust\) + flat refresh from
+>    ROOT + ws 562 + `SMU_BUILD=build-rust python tools/run_tests.py --only
+>    piano` 合.
+> 2. **ASK USER: commit `rust/`** (lib.rs + sh7042.rs — S7 uncommitted;
+>    `git add rust PORTING_LEDGER.md && git commit`).
+> 3. Remaining perf levers (measure each, keep only wins; goal = full-suite
+>    re-gate + blocktime ≤ SAME-BOX C++, not the drifted 8.887 bar):
+>    (a) cheaper pump block at the ~3.2 dirty stops/smp (pump_resched 6-cell
+>    scan + drain_sci_pins pair borrow — stop-class hint from batch_stop;
+>    estimated ≤0.15 ms — measure first, may be noise);
+>    (b) SWP30 master term 13190 vs C++ 11277 ns/smp — the MEG/awm2 hot
+>    loops in smu-swp30 (same transliterate-faithful micro-polish class:
+>    borrow counts, per-voice iteration, `run_sample_pair` overhead);
+>    (c) JIT (dynasmrt SH-2) — NOT needed for interpreter parity; only if
+>    USER wants native-speed (C++ JIT dense = 2.9 ms).
+> 4. Full 63-case suite STILL OWED (S6+S7 skipped by user directive — JIT on/off
+>    byte-identical legs run per-case in suite; SYNCHRONOUS, timeout ≥2400000,
+>    PYTHONIOENCODING=utf-8, `python -u` + Tee; BEFORE suite: `Get-Process
+>    live_rust` — foreign `D:\Downloads\S-MU2000\live_rust.exe` shares
+>    %LOCALAPPDATA%\S-MU2000 and hung S6 twice; if it respawns, ASK USER).
 > Row order: W-PANEL (port panel.cpp) still owed AFTER M9 — deferred by user
 > directive "work CPU". midi-in RT re-gate: still ENV-BLOCKED (reboot).
 > Cold-start (traps live unless struck): ws **562**; flat exes stamp 10-03
-> **20:24** (= target, gated batched-interp build — E1 was reverted before this
-> build); suite = SYNCHRONOUS + PYTHONIOENCODING=utf-8 +
-> `python -u` + Tee for progress, timeout ≥2400000; SMU_BUILD per-process;
-> fc.exe not fc; `make rust` from ROOT works (S5/W-BUILD; `.cargo/config.toml`
-> twin'd root+rust\ — never build cargo from elsewhere); samptest.exe is
-> `.hold` (user-skip) so harness sampling step prints ×-無い (EXPECTED, not a
-> regression); **before any suite: `Get-Process live_rust` — a FOREIGN
-> D:\Downloads\S-MU2000\live_rust.exe sharing %LOCALAPPDATA%\S-MU2000 caused
-> two 40-min suite hangs S6 (killed PID 50144 @~21:0x; if it respawns, ask
-> USER)**. "起動ぶんの長さが 352799" print on althh/reltail/xgmwvib/xgvibdly =
-> informational (run_tests.py:238, quantization), not a delta.
+> **21:56** (= S7 target build); SMU_BUILD per-process; fc.exe not fc;
+> `make rust` from ROOT works (`.cargo/config.toml` twin'd root+rust\ — never
+> build cargo from elsewhere; workdir rust\ double-prefix trap — S7 ate it
+> AGAIN ×2, absolute paths safest); "起動ぶんの長さが 352799" print on
+> althh/reltail/xgmwvib/xgvibdly = informational (run_tests.py:238), not a delta.
 > **LIVE GATE RECIPE (S4): clear config nvram BEFORE EACH live run (per-side).
 > WASAPI real-device headless WORKS (UR824 shared 48k float). build.rs needs
 > MSYS2 (gtmath.lib; SMU_MINGW_ROOT/SMU_GT_SKIP overrides).**
@@ -73,22 +64,27 @@ on this repo MUST read this file in full before touching anything, then work the
 > #    --release` from workdir rust\ = **562/562**. Pin 3A27AF73… ==
 > #    %TEMP%\smu_nvram_pin_m2; config-dir nvram/ MUST be EMPTY; boot\ holds
 > #    44a70f24df97f839.bin + 44a70e24df97f686.bin (both 6097273 B) — do not
-> #    delete. S6 tree COMMITTED? NO — rust/ carries UNCOMMITTED M9 batched-interp
-> #    (core.rs+sh7042.rs+lib.rs); git stash -u would nuke the port. Ask USER to
-> #    commit after gates.
+> #    delete. S7 tree COMMITTED? NO — rust/ carries the UNCOMMITTED S7 delta
+> #    (crates/smu-machine/src/lib.rs + crates/smu-sh2/src/sh7042.rs + ledger);
+> #    git stash -u would nuke it. Ask USER to commit.
 > # 1. TRAPS: flat exes MANUAL refresh from ROOT; ⚠ double-prefix trap (from
-> #    workdir rust\, `..\build-rust` OK, `rust\build-rust` WRONG — S6 ate it
-> #    ×2, absolute paths safest); SMU_BUILD per-process ONE command; `fc.exe`;
-> #    swp30.cpp 4800 L range-reads only; g++ + build\*.exe need
-> #    C:\msys64\mingw64\bin ON PATH; blocktime bar recipe = SMU2000_SINGLE=1
-> #    SMU2000_SH2_JIT=0 SMU2000_MEG_JIT=0 (C++ JITs ON otherwise — S6 measured
-> #    default-on C++ at 2.9 ms dense and mistook it for the bar).
-> # 2. PERF baseline to beat (S6): Rust dense single 11.38/16.5 ms, SH-2 10797,
-> #    SWP-m 11410 ns/smp; C++ single today 10.8 ms RT 93% (SH-2 8203, SWP 12858);
-> #    ledger bar 8.887/11.75.
+> #    workdir rust\ `..\build-rust` OK, `rust\build-rust` WRONG); SMU_BUILD
+> #    per-process ONE command; `fc.exe`; swp30.cpp 4800 L range-reads only;
+> #    g++ + build\*.exe need C:\msys64\mingw64\bin ON PATH; blocktime recipe
+> #    SMU2000_SINGLE=1 SMU2000_SH2_JIT=0 SMU2000_MEG_JIT=0 for C++ side
+> #    (C++ JITs ON otherwise = 2.9 ms — NOT the bar); MIDI fixtures live in
+> #    build\tests\*.mid (generated) — `build-rust\blocktime.exe roms
+> #    build\tests\dense.mid 10`.
+> # 2. PERF (S7, same box): Rust dense single 0.203 avg / RT 89.5%, SH-2
+> #    7029-7576, SWP-m 13190 ns/smp; C++ single-interp 0.186 / 81.9% / SH-2
+> #    7213 / SWP 11277. live idle CPU 64.2%. Bar = SAME-BOX C++ numbers.
 > # 3. LIVE GATE (S3 recipe): factory-clear nvram → live `--waveout --nomidi
 > #    --seconds 3 --wav x.wav` → no starvation (busy<100% lines), C++↔Rust wav
-> #    BYTE-EQ still expected for idle path.
+> #    BYTE-EQ still expected for idle path (S7: EQ ×2, fc.exe /B).
+> # 4. PROF RECIPE (S7): temporary AtomicU64 counters at the dev_dirty arms
+> #    (class-indexed) + blocktime per-rep dump gated by SMU9PROF=1 — proved
+> #    steady-state dirty stops only ~3.2/smp (ports 1.6 / swp 1.1) and the
+> #    real cost was per-INSTRUCTION bus/hook overhead, not stop count.
 > ```
 >
 
@@ -109,8 +105,8 @@ Session log. Status: ⬜ todo · 🟡 in progress · ✅ done · ⏸ blocked.
 | M5 | State mirror | Rust `statetest` green + cross-load both ways: C++ boot→snapshot→Rust render `piano` identical; Rust snapshot→C++ render identical; NVRAM files interchangeable | ✅ | **S2 10-02**: statetest 合×3 (DIN/USB/軽量; orch re-ran DIN+USB exit 0, 50-sample 完全一致); bootcache exchange both ways (Rust HIT C++ `44a70e24…` 合; C++ HIT Rust-mint, mtime UNCHANGED, piano 合); nvram 3-way interchange `8EF4A086…`; full suite 63/63 renders 合, ×-list == documented set; ws 503. LCD-seam cases (メーター/演奏画面) remain M6-scope × |
 | M6 | Windows HAL + live | Rust `live --seconds 60 --midi <loopMIDI> --wav x.wav` with C++ `midisend` playing a fingerprint case → fingerprint match; latency/CPU lines printed like C++ | 🟡 | **S3: live main+waveout+midi_out ring+LCD seam PAIRED; idle C++↔Rust live wav BYTE-EQ (headless waveout PROVEN WORKING); `--midi-file` seam replaces loopMIDI for determinism (S3 decision). S4: `audio out` WASAPI row PAIRED (real UR824 shared idle wav BYTE-EQ — WASAPI default path no longer stand-in). Only M6b residual = midisend/midi-in deep capture gate. Latency/CPU lines printed (both builds)** |
 | M7 | fast_midi + USB C/D | 42 cases re-run `--fast-midi` bit-identical C++↔Rust; `--usb` host mode case identical; `port_b` green both modes | ✅ | **S4: both module rows PAIRED; --usb chord wav BYTE-EQ + xgtest --usb fc EQ + harness USBの口/port_b 合 both modes. SWEEP DONE (S4 orch): ALL 63 fixtures `--fast-midi` C++↔Rust pcm sha1 EQ (4 batches, 0 diffs; 4-sec renders, exes 07:2x) — exceeds the 42-case bar** |
-| M8 | Slave thread + perf | threaded==single bit-identical (harness #4 pattern) on 5 heaviest cases; `blocktime` Rust ≤ C++ interpreter(no-JIT); perf table updated | 🟡 | **S4: threaded slave PORTED+PAIRED (W-M8B: lock-free tag/done rotation mu2000.cpp:286-373 1:1; 5 heaviest wavs threaded≡single≡C++-threaded byte-EQ, orch re-ran dense `33500014…`; --single REAL in render/live/blocktime/statetest; ws 552; dense+別糸 real 合). blocktime bin ✅ + perf table UPDATED. PERF GATE MISSED (19.497/26.58 vs bar 8.887/11.75; SH-2 interp 3.69×; threaded 17.573/21.78) ⇒ M9 condition MET — M9 (SH-2 dynasmrt JIT) = user/ledger decision** |
-| M9 | (optional) JIT | Only if M8 misses goal: dynasmrt SH2 JIT; gate = JIT on/off byte-identical 42/42 + measurable win; else mark cancelled | 🟡 | **S6: JIT NOT yet needed — batched interpreter (pump tax per-device-op, not per-instruction) took dense 19.497/26.58 → 11.38/16.5, SH-2 2.58×, live 78.4% CPU no-starvation; ws 562 + boot_golden byte-EQ + piano 合 in-session. UNCOMMITTED (core.rs/sh7042.rs/smu-machine lib.rs). Full 63-case suite + bar side-by-side re-measure owed (S6 suite-blocked twice by foreign live_rust.exe — see S6 log)** |
+| M8 | Slave thread + perf | threaded==single bit-identical (harness #4 pattern) on 5 heaviest cases; `blocktime` Rust ≤ C++ interpreter(no-JIT); perf table updated | 🟡 | **S4: threaded slave PORTED+PAIRED (W-M8B: lock-free tag/done rotation mu2000.cpp:286-373 1:1; 5 heaviest wavs threaded≡single≡C++-threaded byte-EQ, orch re-ran dense `33500014…`; --single REAL in render/live/blocktime/statetest; ws 552; dense+別糸 real 合). blocktime bin ✅ + perf table UPDATED. S4 gate MISSED (19.497/26.58 vs bar 8.887/11.75) ⇒ M9 armed. S7 dense-single re-measure: Rust 0.203/0.29 vs same-box C++-interp 0.186/0.30 (bar 8.887/11.75 = box-drifted, do NOT re-use — always same-box side-by-side); SH-2 7029-7576 vs 7213 ≈ parity; threaded dense 別糸 合 re-proved ×2. ≤-gate effectively met on SH-2 term; SWP-master term (13190 vs 11277) = remaining ~0.3 ms — see NEXT** |
+| M9 | (optional) JIT | Only if M8 misses goal: dynasmrt SH2 JIT; gate = JIT on/off byte-identical 42/42 + measurable win; else mark cancelled | 🟡 | **S6: batched interpreter (pump tax per-device-op, not per-instruction) dense 19.497/26.58 → 11.38/16.5, SH-2 2.58×. COMMITTED `99edf62`. S7: fetch-path polish (Ctx/region per-access ROM-RAM-DRAM-IRAM fast legs + single-borrow hook + per-op SCI cpu_now sync + dead-Snap removal + selective Internal dirty) → dense single 0.247→0.203 ms avg (RT 108.9%→89.5%), SH-2 10881→7029-7576 ns/smp vs same-box C++-interp 7213 = PARITY±5%; live idle CPU 64.2% (S6 78.4%, S4-era 159.8%), live wavs BYTE-EQ ×2 vs C++. JIT = NOT NEEDED for interpreter-parity goal; reopen only if blocktime >1.15× C++-interp recurs. Full 63-case suite still owed (S6+S7 both skipped by user directive; gates = ws 562 + boot_golden + boot 28M trace-swp/stdout/stderr byte-EQ + piano/dense 合 all in-session)** |
 
 Deferred backlog (tracked, not gates): samptest, SmartMedia authoring, A/D input,
 Linux/macOS HALs, `rec` equivalent. (xgtest ✅ S4; `midisend` ✅ ported S4, RT re-gate pending.)
@@ -291,6 +287,25 @@ Living register. Seed from doc/design.md's historically-found bugs (these killed
   `Start-Process -PassThru` does NOT escape it here (×3 lost). Run full suites
   SYNCHRONOUS with timeout ≥1500000 ms. Also empty-vs-empty: a flat==target compare run
   from the wrong cwd compares two MISSING dirs and "passes" — assert file COUNTS too.
+- **SWP-write dirty arms are LOAD-BEARING (S7):** making the SWP bus write arms
+  pump-clean (swp_wait caught at batch-end by `held` instead of stopping the batch)
+  went DENSE RED (`keyon 60→0`) even though boot_golden + piano stayed green — the
+  swp_wait consume position rides the per-sample n budget; C++ consumes at the loop
+  head, and the dirty-stop is where Rust's head cadence (2.1 周/smp) matches disk.
+  Keep `dev_dirty.set(true)` on Swpm/Swps w8/w16/w32. The S6 "+9 cyc red without
+  them" note was real for dense, not just the internal arms.
+- **SCI RX-grid `cpu_now` is one instruction STALE by design (S7):** the value fed
+  per instruction was `cpu_now()` read BEFORE `hn.now` was updated = pre of the
+  PREVIOUS instruction − 1, NOT the current-instruction `hn.cpu_now()` (they differ
+  by the previous instruction's cycle count). When moving the sync off the hook
+  (Hub::sci_sync_now at the bus-op entry), carry it verbatim via `HubNow::pre_seam`
+  (written in the hook's existing borrow) — a "more correct" live `hn.cpu_now()` at
+  the handler re-anchors the RX grid (the exact P3-class bug). Readers are ONLY
+  sci.rs:563/571 (inside the bus-op handlers); internal_update syncs its own value
+  at sci.rs:643; the midi pump syncs at the loop head.
+- **MIDI fixtures for blocktime/manual runs = `build\tests\*.mid` (generated by
+  run_tests.py via make_test_midi; NOT `tests\fixtures\`)** — S7 guessed the path
+  once and ate a 「MIDI ファイルを開けない」.
 - **Dead-worker regenerated vectors can mix ground-truth generations (Q2):** T5 ghost re-dumped
   meg_b_*.txt but the `Y,` telemetry lines came from an OLDER gt build → parser breaks. Always
   re-run extraction+verify (fc /B windows vs disk) and byte-compare regen vs committed-minus-Y
@@ -318,6 +333,65 @@ Deviation log (intentional):
 ---
 
 ## Session log (append-only, newest first)
+
+### 2026-10-03 — session S7 (M9 fetch-path polish: SH-2 10881→~7029-7576 ns/smp = SAME-BOX C++ parity; dense RT 89.5% SUB-REALTIME; live CPU 64.2%; UNCOMMITTED rust/ delta = the gated state)
+
+- Cold protocol: ledger IN FULL; `git status --short src/ tests/` CLEAN; S6 tree
+  FOUND COMMITTED as `99edf62` (ledger's "UNCOMMITTED" note stale — user committed
+  at 20:34 after S6 close; flat exes 20:38 == target). Baseline ws **562/562** ×1
+  in-session. No foreign `live_rust` process (checked per S6 trap). samptest.exe
+  EXISTS @20:24 (the `.hold` rename was undone by USER — noted, harness steps not
+  run per user "skip samptest + skip full suite" directives). 0 embedded commands
+  executed; cited lines re-read from disk.
+- Baselines taken FIRST (same box): S6-tree dense single 0.247 ms avg / RT 108.9%
+  / SH-2 10881; same-box C++-interp (JITs off recipe) 0.186 / 81.9% / SH-2 7213
+  / SWP 11277 — gap 1.51× SH-2. Recorded bar 8.887 confirmed box-drifted.
+- **PROF FIRST (new recipe in NEXT §4):** temporary AtomicU64 class-counters at
+  the dev_dirty arms + per-rep SMU9PROF dump in blocktime → steady state (dense)
+  dirty stops ≈3.2/smp ONLY (int-ports 1.6, swp 1.1, sci/mtu/cmt/adc ≈0; boot
+  warmup was cmt-heavy 27/smp — the RE-poll era). VERDICT: stop count is NOT the
+  gap; the per-INSTRUCTION bus/hook seam is. Reverted prof (`git checkout`) before
+  any optimization gates.
+- LEVERS LANDED (each measured, all kept — every step boot_golden byte-EQ +
+  piano 合; SH-2 ns/smp after each): **(A)** Ctx ROM fast path read_byte/word/long
+  (len==0x400000 + bound-checked-then-`get_unchecked` byte pairs, SAFETY cites;
+  intercepts all ≥0xc80000) + sh7042 region_word/region_long per-ACCESS region
+  select (C++ selects ONE region pointer; Rust was doing 2–4 per-byte Option scans
+  — RAM/DRAM/IRAM legs unchecked too) + RunHook single hn borrow (now/pc_exec/
+  pre_seam in one borrow) → **8370** (−23%). **(B)** selective Internal dirty per
+  NEXT §2: per-arm sets in internal_r8/r16 (sci/mtu/cmt/adc only) + internal_w8/
+  w16 (sci/mtu/cmt/adc + intc-w kept dirty; non-arbitrating ICR writes stop
+  conservatively); port/bsc/dmac/intc-r/pcf and ALL r32 direct arms clean (porta
+  encoder read proven clock-free — mu2000.cpp:1083-1105/`porta_pins`) → **8219**.
+  **(C)** SWP-write dirty removal EXPERIMENT → dense RED (`keyon 60→0`,
+  peak/rms wrong) — REVERTED, `held` batch-end check is NOT equivalent for the
+  sample-n-budget wait position; three dirty arms restored verbatim (Pitfall).
+  **(D)** dead-Snap per-instruction write REMOVED (snap never read anywhere —
+  rg proof; core exceptions use live sr/r15/vbr; struct/plumbing kept) → **7961**.
+  **(E)** SCI RX-grid sync moved from the hook (280/smp pair borrow) to
+  Hub::sci_sync_now at the four SCI bus-op arms via new `HubNow::pre_seam`
+  (value-exact pre-stale cc — Pitfall entry; RunHook pair field removed,
+  `RunHook<'a>`→`RunHook`) → **7576** (final full row 0.203 ms avg / RT 89.5%,
+  CPU 7070, SH-2 7029 — run-to-run thermal band 7029-7576).
+- FINAL GATES (all in-session, all green): ws `cargo test --release` **562/562 ×2**
+  (boot_golden byte-replay inside — RX-seam-move proof #1); `--only piano` **合
+  ×2** 全部そろっている (incl. statetest 戻し一致, JIT入切, 別糸); `--only dense`
+  **合 ×2** (peak 14627/rms 2257.4/低域比 9.173 — the DIN/SCI-heavy case); boot
+  28M `--trace-swp` + stdout + stderr fc.exe /B **NO DIFFERENCES ×3 streams** vs
+  C++ boot.exe; live `--waveout --nomidi --seconds 3`: **CPU 64.2%** (S6 78.4%,
+  S4-era 159.8%) no starvation, idle wav **BYTE-EQ vs C++** `fc.exe /B` ×2 runs
+  (GATE A recipe, factory-nvram both sides), config nvram CLEARED at close
+  (verified count 0); `git status --short src/ tests/` CLEAN all session; golden
+  untouched; flat exes refreshed after every build (final 21:56; samptest left
+  untouched @20:24).
+- Numbers: SH-2 gap vs same-box C++-interp 1.51× → **~1.0×** (parity band);
+  dense blocktime 0.247→0.203 ms avg; live idle CPU 78.4→64.2%; loop cadence
+  2.1 周/smp preserved (matches disk). Remaining structural delta ≈ C++-hook-free
+  fetch seam (Rust still pays the clock-seam hook per instruction; C++ release
+  hook = NULL branch) + SWP30 master term (13190 vs 11277 — next lever, NEXT §3b).
+- Repo: rust/ UNCOMMITTED (crates/smu-machine/src/lib.rs, crates/smu-sh2/src/
+  sh7042.rs + ledger); no commits; **USER ASK: `git add rust PORTING_LEDGER.md &&
+  git commit`** — the whole S7 speedup lives only on disk otherwise.
 
 ### 2026-10-03 — session S6 (M9 batched SH-2 interpreter: pump tax 59ns→~0 per ROM insn; SH-2 2.58×; UNCOMMITTED tree = the gated state, live no-starvation proven)
 

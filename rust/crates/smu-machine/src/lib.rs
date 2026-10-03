@@ -182,6 +182,14 @@ pub struct HubNow {
     /// at the instruction head, the exact C++ debug-pc position — sh2.cpp:268).
     /// Read by the SWP `--trace-swp` sink as `m_cpu->pc()` (mu2000.cpp:864).
     pub pc: u32,
+    /// M9 S7 (2026-10-03): the SCI RX-grid clock = the value the retired
+    /// per-instruction pair write fed `s.cpu_now` (pre-of-PREVIOUS
+    /// instruction − 1 == `cpu_now()` read BEFORE this instruction's hook
+    /// updated `now` — the S6-proven value, see session-S7 log for why it is
+    /// one instruction stale vs `now`). Hook writes it in its existing
+    /// borrow; Hub::sci_sync_now stamps it into the SCI devices at the bus-op
+    /// entry (the only readers: sci.rs:563/571 inside those handlers).
+    pub pre_seam: u64,
 }
 
 impl HubNow {
@@ -672,6 +680,18 @@ pub struct Hub {
 }
 
 impl Hub {
+    /// M9 S7 (2026-10-03): the per-instruction `s.cpu_now` sync that used to
+    /// ride `RunHook::instruction` moved HERE (the SCI bus-op entry) — the RX
+    /// grid (sci.rs:563/571, sh_sci.cpp:475/484) only reads cpu_now INSIDE
+    /// these handlers; internal_update sites host-sync at their own entry
+    /// (sci.rs:643) and the midi pump syncs at the loop head. Value-exact:
+    /// `hn.pre_seam` == the cc the hook fed per instruction (pre of PREVIOUS
+    /// instruction − 1; still live because the hook runs at every instruction
+    /// head BEFORE any handler of that instruction can read it).
+    #[inline]
+    fn sci_sync_now(&self, pair: &mut Sh2SciPair, sci: usize) {
+        pair.sci[sci].cpu_now = self.hn.borrow().pre_seam;
+    }
     /// Drain the `irq_req` FIFOs (disk: `irq_req` -> intc synchronously).
     /// Order = sh7042.cpp:285-292 update dispatch (cmt, mtu0..4, sci0, sci1).
     fn drain(&mut self) {
@@ -928,21 +948,37 @@ impl Sh7042Peripherals for Hub {
 
     // ---- SCI0/1 (sh7042.cpp:237-238; address decode inside Sh2SciPair) ----
     fn sci_r8(&mut self, sci: usize, a: u32) -> u8 {
-        let r = self.pair.borrow_mut().sci_r8(sci, a);
+        let r = {
+            let mut p = self.pair.borrow_mut();
+            self.sci_sync_now(&mut p, sci);
+            p.sci_r8(sci, a)
+        };
         self.drain();
         r
     }
     fn sci_r16(&mut self, sci: usize, a: u32) -> u16 {
-        let r = self.pair.borrow_mut().sci_r16(sci, a);
+        let r = {
+            let mut p = self.pair.borrow_mut();
+            self.sci_sync_now(&mut p, sci);
+            p.sci_r16(sci, a)
+        };
         self.drain();
         r
     }
     fn sci_w8(&mut self, sci: usize, a: u32, v: u8) {
-        self.pair.borrow_mut().sci_w8(sci, a, v);
+        {
+            let mut p = self.pair.borrow_mut();
+            self.sci_sync_now(&mut p, sci);
+            p.sci_w8(sci, a, v);
+        }
         self.drain();
     }
     fn sci_w16(&mut self, sci: usize, a: u32, v: u16) {
-        self.pair.borrow_mut().sci_w16(sci, a, v);
+        {
+            let mut p = self.pair.borrow_mut();
+            self.sci_sync_now(&mut p, sci);
+            p.sci_w16(sci, a, v);
+        }
         self.drain();
     }
 
@@ -1768,6 +1804,16 @@ impl Ctx<'_> {
 
 impl Sh2Bus for Ctx<'_> {
     fn read_byte(&mut self, a: u32) -> u8 {
+        // S7 (2026-10-03) ROM fast path: every Ctx intercept (SCI4 0xf00000,
+        // LED 0xc80000, D80 0xd80000) sits above 0x400000, so a program-ROM
+        // byte can skip them and the bus scan (membus.h:183-184 hot read).
+        // len==0x400000 = loader exact size (mu2000.cpp:379); short-ROM keeps
+        // the faithful get→unwrap_or(0) path through the bus.
+        if a <= 0x3fffff && self.bus.rom.len() == 0x400000 {
+            // SAFETY: the two guards above prove a < len (0x3fffff < 0x400000)
+            let r = &self.bus.rom;
+            return unsafe { *r.get_unchecked(a as usize) };
+        }
         if (SCI4_BASE..=SCI4_END).contains(&a) {
             return self.sci4_r(a); // mu2000.cpp:969
         }
@@ -1782,6 +1828,15 @@ impl Sh2Bus for Ctx<'_> {
 
     fn read_word(&mut self, a: u32) -> u16 {
         let a = a & !1u32; // membus.h:75 `a &= ~1u`
+        // S7 ROM fast path — see read_byte (a even ⇒ a+1 ≤ 0x3fffff in-region)
+        if a <= 0x3ffffe && self.bus.rom.len() == 0x400000 {
+            // SAFETY: guards prove a+1 ≤ 0x3fffff < len == 0x400000
+            let r = &self.bus.rom;
+            unsafe {
+                return ((u16::from(*r.get_unchecked(a as usize)) << 8)
+                    | u16::from(*r.get_unchecked(a as usize + 1)));
+            }
+        }
         if (SCI4_BASE..=SCI4_END - 1).contains(&a) {
             // r8 chain demotion (mu2000.cpp:969 registers r8 only;
             // membus.h:81 `(d->r8(a) << 8) | d->r8(a + 1)` — BOTH bytes call
@@ -1820,6 +1875,17 @@ impl Sh2Bus for Ctx<'_> {
 
     fn read_long(&mut self, a: u32) -> u32 {
         let a = a & !3u32; // membus.h:88
+        // S7 ROM fast path — see read_byte (a quad-aligned ⇒ a+3 ≤ 0x3fffff)
+        if a <= 0x3ffffc && self.bus.rom.len() == 0x400000 {
+            // SAFETY: guards prove a+3 ≤ 0x3fffff < len == 0x400000
+            let r = &self.bus.rom;
+            unsafe {
+                return (u32::from(*r.get_unchecked(a as usize)) << 24)
+                    | (u32::from(*r.get_unchecked(a as usize + 1)) << 16)
+                    | (u32::from(*r.get_unchecked(a as usize + 2)) << 8)
+                    | u32::from(*r.get_unchecked(a as usize + 3));
+            }
+        }
         if (SCI4_BASE..=SCI4_END - 3).contains(&a) {
             // r8 chain demotion (mu2000.cpp:969 registers r8 only)
             let b0 = self.sci4_r(a) as u32;
@@ -1924,32 +1990,36 @@ impl Sh2Bus for Ctx<'_> {
 // snapshot. Fired BEFORE the opcode fetch, AFTER delay-slot application —
 // exactly the C++ position (sh2.cpp:268).
 // ---------------------------------------------------------------------------
-pub struct RunHook<'a> {
+pub struct RunHook {
     pub hash: bool,  // g_pc_hash != nullptr (boot.cpp:94-96)
     pub trace: bool, // g_pc_trace != nullptr (boot.cpp:84-89)
     pub snap: Rc<RefCell<Snap>>,
+    // M9 (2026-10-03): per-instruction clock seam lives in `hn` —
+    // `hn.now` = this instruction's pre + `hn.pre_seam` carries the SCI
+    // RX-grid clock (S6-proven value, see HubNow::pre_seam). The pair
+    // stamp itself moved to Hub::sci_sync_now at the bus-op entry (S7).
     pub hn: Rc<RefCell<HubNow>>,
-    /// M9 (2026-10-03): per-instruction clock seam moved here from the
-    /// machine inner-loop pre-block (identical order/values — see
-    /// `instruction`): `s.cpu_now` = the OLD `hn.now` − 1 (== pre of the
-    /// PREVIOUS instruction, exactly what the per-instruction loop fed the
-    /// SCI RX grid), then `hn.now` = this instruction's pre.
-    pub pair: &'a RefCell<Sh2SciPair>,
 }
 
-impl InstructionHook for RunHook<'_> {
+impl InstructionHook for RunHook {
     fn instruction(&mut self, core: &Sh2Core) {
         // M9 batch clock sync — mirrors the retired pre-block
         // (2026-10-03, lib.rs @ 552-gate): cc read BEFORE hn.now update.
+        // S7 (2026-10-03) single-borrow polish: ONE hn borrow feeds now,
+        // pc_exec and the SCI pre_seam — identical values/order. The old
+        // per-instruction pair.sci[].cpu_now write moved to
+        // Hub::sci_sync_now (bus-op entry, the only readers) — pre_seam
+        // carries the S6-proven value (cc == pre-of-PREVIOUS instruction − 1,
+        // read here BEFORE `now` is updated, exactly as the loop fed it).
         let pre = core.total_cycles();
+        let pc_exec = if core.m_delay != 0 { core.m_delay } else { core.pc.wrapping_add(2) };
         {
-            let cc = self.hn.borrow().cpu_now();
-            let mut p = self.pair.borrow_mut();
-            for s in p.sci.iter_mut() {
-                s.cpu_now = cc;
-            }
+            let mut h = self.hn.borrow_mut();
+            let cc = h.cpu_now();
+            h.now = pre;
+            h.pc = pc_exec;
+            h.pre_seam = cc;
         }
-        self.hn.borrow_mut().now = pre;
         // origin: src/compat/mamecompat.h:75-79 — hash fold first, then
         // g_pc_cycles = total_cycles() + pc_trace(pc, regs_text()).
         if self.hash {
@@ -1968,19 +2038,15 @@ impl InstructionHook for RunHook<'_> {
             }
         }
         // PC for the SWP `--trace-swp` sink = the value `m_cpu->pc()` holds
-        // DURING this instruction's memory accesses (mu2000.cpp:864). MAME's
-        // SH2 advances pc at the fetch, BEFORE execute (sh2.cpp:274-282 ==
-        // core.rs step-3: `m_delay != 0 ? m_delay : pc+2`), so the pc a bus
-        // handler sees is that POST-fetch value, not the head-hook value.
-        // Replicating step-3 exactly: a delay-slot store reports the branch
-        // target (`m_delay`); an ordinary 16-bit store reports `pc + 2` (the
-        // 32-bit extension word fetch never moves pc, so `+2` holds there too).
-        let pc_exec = if core.m_delay != 0 { core.m_delay } else { core.pc.wrapping_add(2) };
-        self.hn.borrow_mut().pc = pc_exec;
-        let mut s = self.snap.borrow_mut();
-        s.sr = core.sr;
-        s.r15 = core.r[15];
-        s.vbr = core.vbr;
+        // DURING this instruction's memory accesses (mu2000.cpp:864) — the
+        // post-fetch step-3 value, computed and stored into hn.pc in the
+        // single clock-sync borrow above (see S7 note there).
+        // S7 (2026-10-03): the Snap write that used to live here is GONE —
+        // nothing consumes the snapshot anymore (the core exceptions read
+        // live sr/r15/vbr; rg proof in session-S7 log), so the per-
+        // instruction borrow_mut + 3 stores were pure overhead. The Snap
+        // type/plumbing stays (harmless, zero hot-path work) for the
+        // exception-signature seam it was designed for.
     }
 }
 
@@ -2256,7 +2322,7 @@ impl Machine {
         rm.set_clock_hz(CPU_HZ); // mu2000.cpp:81 — before any timer exists
         let mut soc = Sh7042::new_a(CPU_HZ, prog); // mu2000.cpp:72 (SH7043A, die_a)
         let sci4 = Sci4::new(SCI4_HZ); // mu2000.cpp:78 (default 8 MHz)
-        let hn = Rc::new(RefCell::new(HubNow { now: 0, in_event: false, pc: 0 }));
+        let hn = Rc::new(RefCell::new(HubNow { now: 0, in_event: false, pc: 0, pre_seam: 0 }));
         let q = Rc::new(RefCell::new(VecDeque::new()));
         let pair = Rc::new(RefCell::new(Sh2SciPair::new())); // :237-238
         let mtu = Rc::new(RefCell::new(Sh2Mtu::new())); // :178-229
@@ -3349,7 +3415,6 @@ impl Machine {
                         trace: self.trace_on,
                         snap: Rc::clone(&self.snap),
                         hn: Rc::clone(&self.hn),
-                        pair: &self.pair,
                     };
                     let w0 = *self.swp_wait.borrow();
                     let budget = (chunk - ran).min(i32::MAX as u64) as i32;
