@@ -1737,14 +1737,17 @@ pub struct Ctx<'a> {
 
 impl Ctx<'_> {
     /// origin: mu2000.cpp:965-972 (m_sci4->read8/write8 with `a - 0xf00000`).
+    /// M9: sci4 reads/writes move `irq_line` (sync_sci4 leg) — batch-stopper.
     #[inline]
     fn sci4_r(&mut self, a: u32) -> u8 {
+        self.bus.dev_dirty.set(true);
         let off = a - SCI4_BASE;
         let v = self.sci4.borrow_mut().read8(&mut *self.rm, off);
         v
     }
     #[inline]
     fn sci4_w(&mut self, a: u32, v: u8) {
+        self.bus.dev_dirty.set(true);
         let off = a - SCI4_BASE;
         self.sci4.borrow_mut().write8(&mut *self.rm, off, v);
     }
@@ -1893,6 +1896,16 @@ impl Sh2Bus for Ctx<'_> {
         }
     }
 
+    /// M9 (2026-10-03): end the CPU burst at the first instruction that
+    /// touched a device space with pump-visible side effects (dev_dirty set
+    /// in the `Sh7042Bus` arms / Ctx sci4 intercept / `exception_taken`).
+    /// The machine pump block then runs exactly where the per-instruction
+    /// loop ran it; region-only stretches batch through, like the C++
+    /// `m_cpu->run_cycles(chunk)` (mu2000.cpp:1219) does.
+    fn batch_stop(&self) -> bool {
+        self.bus.dev_dirty.take()
+    }
+
     /// origin: mu2000 Ctx = sh7042_device in the disk stack — the
     /// sh2_exception_internal override tail (sh7042.cpp:400). The core calls
     /// this AFTER the base exception (pushes + vector fetch); queueing keeps
@@ -1900,6 +1913,7 @@ impl Sh2Bus for Ctx<'_> {
     /// handler's first instruction (run_cycles(1) per-instruction pump).
     /// `irqline` is unused on disk (intc.rs interrupt_taken, sh_intc.cpp:66-73).
     fn exception_taken(&mut self, vector: u32) {
+        self.bus.dev_dirty.set(true); // M9: ack must reach pump before handler insn
         self.q.borrow_mut().push_back(Evt::Ack { vector: vector as i32 });
     }
 }
@@ -1910,15 +1924,32 @@ impl Sh2Bus for Ctx<'_> {
 // snapshot. Fired BEFORE the opcode fetch, AFTER delay-slot application —
 // exactly the C++ position (sh2.cpp:268).
 // ---------------------------------------------------------------------------
-pub struct RunHook {
+pub struct RunHook<'a> {
     pub hash: bool,  // g_pc_hash != nullptr (boot.cpp:94-96)
     pub trace: bool, // g_pc_trace != nullptr (boot.cpp:84-89)
     pub snap: Rc<RefCell<Snap>>,
     pub hn: Rc<RefCell<HubNow>>,
+    /// M9 (2026-10-03): per-instruction clock seam moved here from the
+    /// machine inner-loop pre-block (identical order/values — see
+    /// `instruction`): `s.cpu_now` = the OLD `hn.now` − 1 (== pre of the
+    /// PREVIOUS instruction, exactly what the per-instruction loop fed the
+    /// SCI RX grid), then `hn.now` = this instruction's pre.
+    pub pair: &'a RefCell<Sh2SciPair>,
 }
 
-impl InstructionHook for RunHook {
+impl InstructionHook for RunHook<'_> {
     fn instruction(&mut self, core: &Sh2Core) {
+        // M9 batch clock sync — mirrors the retired pre-block
+        // (2026-10-03, lib.rs @ 552-gate): cc read BEFORE hn.now update.
+        let pre = core.total_cycles();
+        {
+            let cc = self.hn.borrow().cpu_now();
+            let mut p = self.pair.borrow_mut();
+            for s in p.sci.iter_mut() {
+                s.cpu_now = cc;
+            }
+        }
+        self.hn.borrow_mut().now = pre;
         // origin: src/compat/mamecompat.h:75-79 — hash fold first, then
         // g_pc_cycles = total_cycles() + pc_trace(pc, regs_text()).
         if self.hash {
@@ -3285,37 +3316,22 @@ impl Machine {
                 continue; // :1216
             }
 
-            // ---- INNER: the `m_cpu->run_cycles(int(chunk))` equivalent
-            // (:1219). C++ runs the WHOLE frozen chunk inside the CPU core;
-            // the per-instruction pump below stands in for the synchronous
-            // device behavior that happens INSIDE C++ execute_one (sticky
-            // internal_update sites, SWP holds, intc lines). The burst stops
-            // exactly where C++ stops: first boundary ≥ chunk (:1222 done),
-            // or the abort_timeslice of recompute_timer (:267-269) / SWP hold
-            // (mu2000.cpp:855) at the instruction that moved the schedule.
-            // The chunk's tmr/ev/midi clamps are FROZEN here — a timer armed
-            // mid-burst must NOT stop the CPU (ground truth 2026-10-02: the
-            // L182 sci4 ISR armed due 178723314 during a burst that C++ ran
-            // to 178791872; stopping at the fresh due cost +2 cyc by L183).
-            // rm.set_cycles / midi_step stay OUT here — machine().cycles()
-            // stays frozen mid-burst exactly as C++ (:1171 head-only).
-            // The IRQ test is the single in-loop sh2.cpp:284-288 check
-            // inside step() — P6 2026-10-02 removed the seam.
+            // ---- INNER: M9 2026-10-03 — batched chunk (was: ONE instruction
+            // per call + full pump block, ~59 ns of RefCell/pump bookkeeping
+            // per instruction). The burst now runs inside execute_run
+            // (sh2.cpp:290 do/while, the SAME shape as the C++
+            // `m_cpu->run_cycles(chunk)` at mu2000.cpp:1219) and stops at the
+            // first instruction whose bus access has pump-visible side effects
+            // (Sh2Bus::batch_stop / dev_dirty) or at the frozen chunk budget —
+            // then the unchanged pump block below runs, i.e. at EXACTLY the
+            // instruction boundaries the per-instruction loop stopped at.
+            // The per-instruction clock seam (hn.now=pre, s.cpu_now) rode
+            // along into RunHook::instruction at the identical position.
             let mut ran = 0u64;
             let mut core_abort = false;
             loop {
-                let pre = self.total_cycles();
-                {
-                    let cc = { self.hn.borrow().cpu_now() };
-                    let mut p = self.pair.borrow_mut();
-                    for s in p.sci.iter_mut() {
-                        s.cpu_now = cc;
-                    }
-                    let mut h = self.hn.borrow_mut();
-                    h.now = pre; // hn.now == pre-instruction total (C++
-                    // current_cycles() mid-instr == sh.h:229-232 live total)
-                }
-                let done = {
+                self.soc.bus.dev_dirty.set(false); // consumed by batch_stop
+                let (done, held) = {
                     let mut ctx = Ctx {
                         bus: &mut self.soc.bus,
                         rm: &mut self.rm,
@@ -3333,12 +3349,13 @@ impl Machine {
                         trace: self.trace_on,
                         snap: Rc::clone(&self.snap),
                         hn: Rc::clone(&self.hn),
+                        pair: &self.pair,
                     };
                     let w0 = *self.swp_wait.borrow();
-                    let d = self.soc.dev.core.run_cycles(&mut ctx, &mut hook, 1);
+                    let budget = (chunk - ran).min(i32::MAX as u64) as i32;
+                    let d = self.soc.dev.core.run_cycles(&mut ctx, &mut hook, budget);
                     (d, *self.swp_wait.borrow() > w0) // held = SWP-write abort (:855)
                 };
-                let (done, held) = done;
                 // sticky write-site `m_cpu->internal_update()` sites — disk
                 // ran them INSIDE the instruction at current_cycles() == hn
                 let ev_changed = self.pump_resched(None);

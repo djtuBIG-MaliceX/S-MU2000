@@ -1,0 +1,5 @@
+# Twin of rust\.cargo\config.toml: cargo reads .cargo\config.toml from the CWD,
+# so this makes root builds (cargo build --manifest-path rust\Cargo.toml) land
+# in the same canonical build-rust/target tree instead of a stray rust\target.
+[build]
+target-dir = "build-rust/target"

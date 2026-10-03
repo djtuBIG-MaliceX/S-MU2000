@@ -351,6 +351,14 @@ pub struct Sh7042Bus {
     pub m_pcf_if: u16,
     // un-ported peripheral seam (None until the wiring row attaches a machine)
     pub periph: Option<Box<dyn Sh7042Peripherals>>,
+    /// M9 (2026-10-03) batch-stop flag: set by every device-space arm that can
+    /// push an `Evt`, set a sticky `resched`, move an `irq_line`, or arm
+    /// `swp_wait` (Internal registers, SWP writes, SCI4, USB, exception acks).
+    /// Region/hot-path accesses never touch it (the C++ `membus.h` hot tests
+    /// pay nothing either). Consumed by `Ctx::batch_stop` in the core's
+    /// execute_run loop — replaces the per-instruction return to the machine
+    /// pump with a return at the first instruction that needs one.
+    pub dev_dirty: std::cell::Cell<bool>,
 }
 
 impl Sh7042Bus {
@@ -372,6 +380,7 @@ impl Sh7042Bus {
             m_pcf_e: 0,
             m_pcf_if: 0,
             periph: None, // required_device wiring deferred to the machine row
+            dev_dirty: std::cell::Cell::new(false), // M9 flag (see field doc)
         }
     }
 
@@ -1046,18 +1055,23 @@ impl Sh2Bus for Sh7042Bus {
                 Dev::CardData => return self.periph.as_mut().map_or(0, |p| p.card_data_r8()),
                 Dev::CardCtrl => return 0xff, // mu2000.cpp:960 `return 0xff` literal
                 Dev::Sci4 => {
+                    self.dev_dirty.set(true); // M9: read can deassert irq (fifo_r)
                     return self
                         .periph
                         .as_mut()
                         .map_or(0, |p| p.sci4_r8(a - 0xf00000)) // mu2000.cpp:969
                 }
                 Dev::Usb => {
+                    self.dev_dirty.set(true); // M9: read-0 clears+drops IRQ3 (M7 row)
                     return self
                         .periph
                         .as_mut()
                         .map_or(0, |p| p.usb_r8(a - 0xf80000)) // mu2000.cpp:979
                 }
-                Dev::Internal => return self.internal_r8(a), // mu2000.cpp:988
+                Dev::Internal => {
+                    self.dev_dirty.set(true); // M9: sci/mtu/cmt/adc/sticky legs
+                    return self.internal_r8(a); // mu2000.cpp:988
+                }
             }
         }
         0 // membus.h:70 unmapped read -> 0
@@ -1112,6 +1126,7 @@ impl Sh2Bus for Sh7042Bus {
                 Dev::Sci4 => {
                     // membus.h:81 r8 pair; offsets per mu2000.cpp:969 rule,
                     // TWO real device accesses (state may change per read)
+                    self.dev_dirty.set(true); // M9
                     let p = self.periph.as_mut();
                     if let Some(p) = p {
                         let hi = p.sci4_r8(a - 0xf00000);
@@ -1121,6 +1136,7 @@ impl Sh2Bus for Sh7042Bus {
                     return 0;
                 }
                 Dev::Usb => {
+                    self.dev_dirty.set(true); // M9
                     let p = self.periph.as_mut();
                     if let Some(p) = p {
                         let hi = p.usb_r8(a - 0xf80000);
@@ -1129,7 +1145,10 @@ impl Sh2Bus for Sh7042Bus {
                     }
                     return 0;
                 }
-                Dev::Internal => return self.internal_r16(a), // mu2000.cpp:989
+                Dev::Internal => {
+                    self.dev_dirty.set(true); // M9
+                    return self.internal_r16(a); // mu2000.cpp:989
+                }
             }
         }
         0 // membus.h:83 unmapped -> 0
@@ -1143,6 +1162,7 @@ impl Sh2Bus for Sh7042Bus {
         }
         if let Some(d) = self.find_dev(a) {
             if d == Dev::Internal {
+                self.dev_dirty.set(true); // M9
                 // membus.h:93-95: d->r32 present only for the internal device
                 // (mu2000.cpp:990). SWP has NO r32 -> word pair (membus.h:96).
                 return self.internal_r32(a);
@@ -1166,6 +1186,7 @@ impl Sh2Bus for Sh7042Bus {
                 Dev::Swpm | Dev::Swps => {
                     // mu2000.cpp:869-876 — 16-bit reg RMW, byte lane = (a&1)
                     // resolved INSIDE the handler (trait keeps absolute a)
+                    self.dev_dirty.set(true); // M9: swp_hold can arm swp_wait
                     if let Some(p) = self.periph.as_mut() {
                         p.swp_w8(d == Dev::Swpm, a, v)
                     }
@@ -1196,16 +1217,21 @@ impl Sh2Bus for Sh7042Bus {
                     }
                 }
                 Dev::Sci4 => {
+                    self.dev_dirty.set(true); // M9: irq level may move (sync_sci4)
                     if let Some(p) = self.periph.as_mut() {
                         p.sci4_w8(a - 0xf00000, v) // mu2000.cpp:970
                     }
                 }
                 Dev::Usb => {
+                    self.dev_dirty.set(true); // M9
                     if let Some(p) = self.periph.as_mut() {
                         p.usb_w8(a - 0xf80000, v) // mu2000.cpp:980
                     }
                 }
-                Dev::Internal => self.internal_w8(a, v), // mu2000.cpp:991
+                Dev::Internal => {
+                    self.dev_dirty.set(true); // M9
+                    self.internal_w8(a, v) // mu2000.cpp:991
+                }
             }
         }
         // unmapped or read-only-ROM write: dropped (membus.h:105-109 falls off)
@@ -1236,14 +1262,22 @@ impl Sh2Bus for Sh7042Bus {
             match d {
                 Dev::Swpm | Dev::Swps => {
                     // mu2000.cpp:906-918 single 16-bit reg write
+                    self.dev_dirty.set(true); // M9: swp_hold can arm swp_wait
                     if let Some(p) = self.periph.as_mut() {
                         p.swp_w16(d == Dev::Swpm, a, v)
                     }
                 }
-                Dev::Internal => self.internal_w16(a, v), // mu2000.cpp:992
+                Dev::Internal => {
+                    self.dev_dirty.set(true); // M9
+                    self.internal_w16(a, v) // mu2000.cpp:992
+                }
                 _ => {
                     // membus.h:120 r8-pair fallback on the SAME handler:
                     // d->w8(a, v>>8); d->w8(a+1, v)
+                    self.dev_dirty.set(true); // M9: usb/sci4 pair legs carry
+                    // IRQ state; led/panel/d80/card (self-contained, and the
+                    // machine's Ctx intercepts led/panel/d80 before the bus)
+                    // just cost one extra batch stop.
                     match d {
                         Dev::Led => {
                             if let Some(p) = self.periph.as_mut() {
@@ -1339,12 +1373,14 @@ impl Sh2Bus for Sh7042Bus {
             match d {
                 // mu2000.cpp:993 internal (its w32 has the w16-pair tail)
                 Dev::Internal => {
+                    self.dev_dirty.set(true); // M9
                     self.internal_w32(a, v);
                     return;
                 }
                 // membus.h:136 d->w32 exists for the SWP devices
                 // (mu2000.cpp:881-905): ONE 32-bit handler does two reg writes
                 Dev::Swpm | Dev::Swps => {
+                    self.dev_dirty.set(true); // M9: two regs, hold can arm
                     if let Some(p) = self.periph.as_mut() {
                         p.swp_w32(d == Dev::Swpm, a, v)
                     }

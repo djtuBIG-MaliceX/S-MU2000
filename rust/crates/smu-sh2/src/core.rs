@@ -75,6 +75,15 @@ pub trait Sh2Bus {
     /// their pending bit there — without this call internal IRQs latch forever.
     /// Default no-op matches the CPU-only test buses.
     fn exception_taken(&mut self, _vector: u32) {}
+    /// M9 (2026-10-03): batch-stop predicate. `execute_run` breaks its
+    /// do/while after any instruction where this returns true, handing the
+    /// machine its per-instruction pump sequence at the same instruction
+    /// boundary the 1-instruction loop used. Default false = test buses
+    /// (and any bus without device side effects) run the whole chunk,
+    /// exactly like the C++ `m_cpu->run_cycles(chunk)` (:1219).
+    fn batch_stop(&self) -> bool {
+        false
+    }
 }
 
 /// Per-instruction observation hook. Fired exactly at the C++
@@ -2425,10 +2434,12 @@ impl Sh2Core {
 
         // origin: src/mame/cpu/sh2.cpp:261-266 (use_jit == false in this port)
         // origin: src/mame/cpu/sh2.cpp:290 (do/while icount > 0 — at least one
-        // instruction always executes)
+        // instruction always executes). M9 2026-10-03: batch_stop() ends the
+        // burst at an instruction boundary where the machine must run its
+        // pumps (device side effect, exception ack, SWP hold) — see Sh2Bus doc.
         loop {
             self.step(bus, hook);
-            if !(self.icount > 0) {
+            if !(self.icount > 0) || bus.batch_stop() {
                 break;
             }
         }
