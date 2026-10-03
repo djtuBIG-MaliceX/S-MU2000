@@ -1223,33 +1223,47 @@ pub fn run_program(meg: &mut MegState, swp: &mut MegSwp, ops: &[Op; 0x180]) {
     let mut flag_z = *swp.flag_z;
     let mut skip_to: u32 = 0; // :3991 (device m_meg_skip_to NOT used)
 
+    // S8 bounds-check elision (bit-exact): the ring indices `d3`/`d2` are the
+    // delay-line cursors, maintained by `d3 = if d3==2 {0} else {d3+1}` (:4161)
+    // and `d2 ^= 1` (:4162) from entry values that are themselves `delay_3`/
+    // `delay_2` (reset 0..2 / 0..1, state restore preserves the same range —
+    // the :1951/1952 and state_load legs only ever hold those sets). So every
+    // `i3` ∈ {0,1,2} indexes the `[_;3]` ring arrays and every `i2` ∈ {0,1}
+    // indexes `t_value[_;2]`, always in range — the same indices C++ reads with
+    // unchecked `[]` (swp30.cpp:3996-4011). get_unchecked here only drops the
+    // redundant Rust guard, never the value. Bank writes `m[r]`/`r[r]` are
+    // likewise in range: `r = mw_reg/rw_reg` was latched from `o.dm`/`o.dr`,
+    // which `build_ops` masks to the bank width (`d.dm = bit(..,6)`<0x40=m,
+    // `d.dr = bit(..,7)`<0x80=r; :3542-3543), a hard arithmetic bound.
     for pc in 0..0x180usize {
         let o = ops[pc]; // :3994
         let i3 = d3 as usize; // local ring indices (C++ `d3`/`d2`)
         let i2 = d2 as usize;
 
         // :3996-4011 — 3/2-cycle delayed register/memory drains (live banks)
-        if meg.mw_reg[i3] != 0 {
-            let r = meg.mw_reg[i3] as usize;
-            meg.m[r] = meg.mw_value[i3]; // :3997
+        let mwr = unsafe { *meg.mw_reg.get_unchecked(i3) };
+        if mwr != 0 {
+            let r = mwr as usize;
+            unsafe { *meg.m.get_unchecked_mut(r) = *meg.mw_value.get_unchecked(i3) }; // :3997
         }
-        if meg.rw_reg[i3] != 0 {
-            let r = meg.rw_reg[i3] as usize;
-            meg.r[r] = meg.rw_value[i3]; // :3999
+        let rwr = unsafe { *meg.rw_reg.get_unchecked(i3) };
+        if rwr != 0 {
+            let r = rwr as usize;
+            unsafe { *meg.r.get_unchecked_mut(r) = *meg.rw_value.get_unchecked(i3) }; // :3999
         }
-        if meg.index_active[i3] {
-            meg.ram_index = meg.index_value[i3]; // :4001
+        if unsafe { *meg.index_active.get_unchecked(i3) } {
+            meg.ram_index = unsafe { *meg.index_value.get_unchecked(i3) }; // :4001
         }
-        if swp.ix2_act[i3] != 0 {
-            *swp.ram_index2 = swp.ix2_value[i3]; // :4002-4003
+        if unsafe { *swp.ix2_act.get_unchecked(i3) } != 0 {
+            *swp.ram_index2 = unsafe { *swp.ix2_value.get_unchecked(i3) }; // :4002-4003
         }
-        if meg.memw_active[i2] {
-            meg.ram_write = meg.memw_value[i2] as u32; // :4005
-            meg.memw_active[i2] = false; // :4006
+        if unsafe { *meg.memw_active.get_unchecked(i2) } {
+            meg.ram_write = unsafe { *meg.memw_value.get_unchecked(i2) } as u32; // :4005
+            unsafe { *meg.memw_active.get_unchecked_mut(i2) = false }; // :4006
         }
-        if meg.memr_active[i2] {
-            meg.ram_read = meg.memr_value[i2] as u32; // :4009
-            meg.memr_active[i2] = false; // :4010
+        if unsafe { *meg.memr_active.get_unchecked(i2) } {
+            meg.ram_read = unsafe { *meg.memr_value.get_unchecked(i2) } as u32; // :4009
+            unsafe { *meg.memr_active.get_unchecked_mut(i2) = false }; // :4010
         }
 
         // :4013-4031 — branch (same as step): skipped instructions do nothing
@@ -1282,10 +1296,10 @@ pub fn run_program(meg: &mut MegState, swp: &mut MegSwp, ops: &[Op; 0x180]) {
         // :4033-4079 — ALU
         if o.alu != 0 {
             let mut m1: i64 = if o.m1_from_t == 1 {
-                meg.t[o.t as usize] as i64
+                unsafe { *meg.t.get_unchecked(o.t as usize) as i64 }
             } else if o.m1_from_t == 2 {
                 if flag_n {
-                    meg.t[o.t as usize] as i64
+                    unsafe { *meg.t.get_unchecked(o.t as usize) as i64 }
                 } else {
                     meg.konst[pc] as i64
                 }
@@ -1296,9 +1310,9 @@ pub fn run_program(meg: &mut MegState, swp: &mut MegSwp, ops: &[Op; 0x180]) {
                 m1 = MegState::m1_expand(m1 as i16) as i64; // :4035-4036 (s64->s16 trunc quirk)
             }
             let m2: i64 = if o.m2_from_m != 0 {
-                meg.m[o.sm as usize] as i64
+                unsafe { *meg.m.get_unchecked(o.sm as usize) as i64 }
             } else {
-                meg.r[o.sr as usize] as i64
+                unsafe { *meg.r.get_unchecked(o.sr as usize) as i64 }
             }; // :4037
             let m: i64 = match o.mmode {
                 // :4040-4045
@@ -1310,8 +1324,8 @@ pub fn run_program(meg: &mut MegState, swp: &mut MegSwp, ops: &[Op; 0x180]) {
             let a: i64 = match o.asel {
                 // :4048-4054 (5-way: build_ops folded sr/sm==0 into 3)
                 0 => p,
-                1 => (meg.r[o.sr as usize] as i64).wrapping_shl(15), // :4050
-                2 => (meg.m[o.sm as usize] as i64).wrapping_shl(15), // :4051
+                1 => unsafe { *meg.r.get_unchecked(o.sr as usize) as i64 }.wrapping_shl(15), // :4050
+                2 => unsafe { *meg.m.get_unchecked(o.sm as usize) as i64 }.wrapping_shl(15), // :4051
                 3 => p >> 15,                                         // :4052
                 _ => 0,                                               // :4053
             };
@@ -1342,7 +1356,7 @@ pub fn run_program(meg: &mut MegState, swp: &mut MegSwp, ops: &[Op; 0x180]) {
         }
 
         // :4081-4100 — delayed m-bank write source
-        meg.mw_reg[i3] = o.dm;
+        unsafe { *meg.mw_reg.get_unchecked_mut(i3) = o.dm };
         if o.dm != 0 {
             let v: u32 = match o.dm_src {
                 0..=3 => meg.get_lfo(o.lfo as usize, swp.sintab), // :4085-4087
@@ -1361,16 +1375,16 @@ pub fn run_program(meg: &mut MegState, swp: &mut MegSwp, ops: &[Op; 0x180]) {
                     }
                     meg_pack24(q) // :4094
                 }
-                _ => meg.m[o.sm as usize] as u32, // :4097
+                _ => unsafe { *meg.m.get_unchecked(o.sm as usize) as u32 }, // :4097
             };
-            meg.mw_value[i3] = v as i32; // :4099 (u32->s32)
+            unsafe { *meg.mw_value.get_unchecked_mut(i3) = v as i32 }; // :4099 (u32->s32)
         }
 
         // :4102-4114 — delayed r-bank write source
-        meg.rw_reg[i3] = o.dr;
+        unsafe { *meg.rw_reg.get_unchecked_mut(i3) = o.dr };
         if o.dr != 0 {
             let v: u32 = if o.dr_from_r != 0 {
-                meg.r[o.sr as usize] as u32 // :4106 (s32->u32)
+                unsafe { *meg.r.get_unchecked(o.sr as usize) as u32 } // :4106 (s32->u32)
             } else {
                 let mut q = p; // :4108
                 if o.no_noise == 0 {
@@ -1378,7 +1392,7 @@ pub fn run_program(meg: &mut MegState, swp: &mut MegSwp, ops: &[Op; 0x180]) {
                 }
                 meg_pack24(q) // :4111
             };
-            meg.rw_value[i3] = v as i32; // :4113
+            unsafe { *meg.rw_value.get_unchecked_mut(i3) = v as i32 }; // :4113
         }
 
         // :4150-4151 (merged 6.237) — replaced idle-region ops still advance
@@ -1390,36 +1404,43 @@ pub fn run_program(meg: &mut MegState, swp: &mut MegSwp, ops: &[Op; 0x180]) {
 
         // :4153-4155 — memory write port latch. MERGED 6a18898:
         // meg_mem_value replaced `p >> 15` on disk (:4155).
-        meg.memw_active[i2] = o.memw != 0;
+        unsafe { *meg.memw_active.get_unchecked_mut(i2) = o.memw != 0 };
         if o.memw != 0 {
-            meg.memw_value[i2] = meg_mem_value(p) as i32; // :4155 (s64->s32 truncate)
+            unsafe { *meg.memw_value.get_unchecked_mut(i2) = meg_mem_value(p) as i32 }; // :4155
         }
 
         // :4120-4125 — first index + second index
-        meg.index_active[i3] = o.index != 0;
+        unsafe { *meg.index_active.get_unchecked_mut(i3) = o.index != 0 };
         if o.index != 0 {
-            meg.index_value[i3] = (p >> (15 + 8)) as i32; // :4122
+            unsafe { *meg.index_value.get_unchecked_mut(i3) = (p >> (15 + 8)) as i32 }; // :4122
         }
-        swp.ix2_act[i3] = o.index2; // :4123
+        unsafe { *swp.ix2_act.get_unchecked_mut(i3) = o.index2 }; // :4123
         if o.index2 != 0 {
-            swp.ix2_value[i3] = (p >> (15 + 8)) as i32; // :4124-4125
+            unsafe { *swp.ix2_value.get_unchecked_mut(i3) = (p >> (15 + 8)) as i32 }; // :4124-4125
         }
 
         // :4127-4130 — t write + t delay line
         if o.t_write != 0 {
-            meg.t[o.t as usize] = if o.t_from_p != 0 { meg.t_value[i2] } else { meg.konst[pc] };
+            let tv = if o.t_from_p != 0 {
+                unsafe { *meg.t_value.get_unchecked(i2) }
+            } else {
+                meg.konst[pc]
+            };
+            unsafe { *meg.t.get_unchecked_mut(o.t as usize) = tv };
         }
-        meg.t_value[i2] = if o.index != 0 || o.index2 != 0 {
-            ((p >> 8) & 0x7fff) as i16 // :4129
-        } else {
-            s16_p23_clamped(p) // :4130
+        unsafe {
+            *meg.t_value.get_unchecked_mut(i2) = if o.index != 0 || o.index2 != 0 {
+                ((p >> 8) & 0x7fff) as i16 // :4129
+            } else {
+                s16_p23_clamped(p) // :4130
+            }
         };
 
         // :4132-4158 — memory access (goto mem_done == if/else-if chains here)
         if o.memop >= 2 && o.mem_table != 0 {
             // :4132-4138 — absolute revram read (upstream 24): no map, no
             // sample-counter subtraction, u32 wrap then & 0x3ffff
-            let address = (meg.offset[o.offset_index as usize] as u32)
+            let address = (unsafe { *meg.offset.get_unchecked(o.offset_index as usize) } as u32)
                 .wrapping_add(if o.mem_use_index != 0 { meg.ram_index as u32 } else { 0 })
                 .wrapping_add(if o.mem_use_index2 != 0 {
                     *swp.ram_index2 as u32

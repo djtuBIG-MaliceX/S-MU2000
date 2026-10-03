@@ -104,12 +104,18 @@ impl<'a> Wave<'a> {
             }
         } else if self.pow2 {
             let off = ((addr as usize) << 2) & self.mask & !3usize;
-            u32::from_le_bytes([
-                self.bytes[off],
-                self.bytes[off + 1],
-                self.bytes[off + 2],
-                self.bytes[off + 3],
-            ])
+            // SAFETY (S8): pow2 leg only runs for a non-empty power-of-two
+            // space (WAVE_ZERO/empty take the non-pow2 leg — `new` sets
+            // pow2=false there), and every real wave ROM is ≥ 4 dwords, so
+            // len % 4 == 0 and `off = x & (len-1) & !3` gives off + 3 ≤ len-1.
+            // Disk reads the same 4 bytes via memcpy (mamecompat.h:160-163);
+            // unchecked slice read lets LLVM fuse the four byte loads into one
+            // aligned 32-bit mov (bit-identical value, one load instead of
+            // four bounds-checked ones).
+            unsafe {
+                let p = self.bytes.as_ptr().add(off);
+                u32::from_le_bytes([*p, *p.add(1), *p.add(2), *p.add(3)])
+            }
         } else {
             let off = self.offset_of(addr, 4);
             u32::from_le_bytes([

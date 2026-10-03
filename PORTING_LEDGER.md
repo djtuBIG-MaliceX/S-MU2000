@@ -14,46 +14,60 @@ on this repo MUST read this file in full before touching anything, then work the
 > ASK USER CLOSED (S3): S2 tree COMMITTED as `dbd2f72` "Rust my anus" (verified contains
 > the full M5 delta: state_io/nvram/bootcache/card/statetest/state + AGENTS + ledger).
 >
-> **NEXT (S8 open — M9 polish PAIRED-in-session ×2, uncommitted rust/ delta):** read
-> the `### 2026-10-03 — session S7` log FIRST. S7 = fetch-path polish on top of the
-> committed S6 batched interpreter (`99edf62`): dense single 0.247→0.203 ms avg
-> (RT 108.9→89.5% — SUB-REALTIME vs today's C++-interp 0.186/81.9), SH-2
-> 10881→7029-7576 ns/smp ≈ SAME-BOX C++ (7213); live idle CPU 64.2% no-starvation,
-> live wavs BYTE-EQ ×2, boot 28M trace-swp/stdout/stderr byte-EQ, ws 562 ×2,
-> piano/dense 合 ×2. samptest SKIPPED per user (note: `build-rust\samptest.exe`
-> EXISTS on disk @20:24 gated build — the `.hold` rename was undone by USER;
-> confirm state before concluding).
-> 1. **TREE STATE = fully-gated S7** (all levers above landed + kept; the ONE
->    rejected experiment = SWP-write dirty removal → dense RED keyon 60→0,
->    reverted; SWP w8/w16/w32 dirty arms are LOAD-BEARING — see Pitfalls).
+> **NEXT (S9 open — M9 SWP-master polish PAIRED-in-session, UNCOMMITTED rust/ delta):** read
+> the `### 2026-10-03 — session S8` log FIRST. S7 (fetch-path polish) is now
+> COMMITTED as `85a4ccc` (S7 ASK-USER closed by user). S8 = SWP-master micro-polish
+> on top: `read_dword` pow2-leg load-fusion + `meg::run_program` delay-ring/bank
+> `get_unchecked` (all PROVABLY-in-range: field-width/pc-derived indices; state-
+> sized `reverb_ram` left CHECKED — CANNOT unchecked, state.rs:96 resizes it).
+> dense single block 0.218→0.207 ms (−5%), SWP-m 14208→~13150 ns/smp (−7%),
+> SH-2 unchanged ~7600 (parity band), live idle CPU 64.2→63.0%. ALL bit-exact:
+> ws 562 ×2 (boot_golden + meg/meg_b/fetch vectors inside), dense 合 (peak
+> 14627/rms 2257.4), piano 合, live idle wav BYTE-EQ 532,524 B. INTERP_TABLE
+> unchecked tested → NOISE → reverted (kept only wins). samptest + full suite
+> SKIPPED per user ("Skip the full suite tests including samptest").
+> 1. **TREE STATE = S7 (committed `85a4ccc`) + S8 UNCOMMITTED rust/ delta**
+>    (`crates/smu-swp30/src/fetch.rs` `7F81FF71` 1192 L + `crates/smu-swp30/src/
+>    meg.rs` `AF264C43` 1771 L). The ONE rejected experiment in S8 = INTERP_TABLE
+>    unchecked (noise). Prior rejected = SWP-write dirty removal (S7, dense RED
+>    keyon 60→0 — SWP w8/w16/w32 dirty arms LOAD-BEARING, see Pitfalls).
 >    Confirm cold: `cargo build --release` (workdir rust\) + flat refresh from
->    ROOT + ws 562 + `SMU_BUILD=build-rust python tools/run_tests.py --only
->    piano` 合.
-> 2. **ASK USER: commit `rust/`** (lib.rs + sh7042.rs — S7 uncommitted;
+>    ROOT + ws 562 + `SMU_BUILD=build-rust python tools/run_tests.py --only dense` 合.
+> 2. **ASK USER: commit `rust/`** (fetch.rs + meg.rs — S8 uncommitted;
 >    `git add rust PORTING_LEDGER.md && git commit`).
-> 3. Remaining perf levers (measure each, keep only wins; goal = full-suite
->    re-gate + blocktime ≤ SAME-BOX C++, not the drifted 8.887 bar):
->    (a) cheaper pump block at the ~3.2 dirty stops/smp (pump_resched 6-cell
->    scan + drain_sci_pins pair borrow — stop-class hint from batch_stop;
->    estimated ≤0.15 ms — measure first, may be noise);
->    (b) SWP30 master term 13190 vs C++ 11277 ns/smp — the MEG/awm2 hot
->    loops in smu-swp30 (same transliterate-faithful micro-polish class:
->    borrow counts, per-voice iteration, `run_sample_pair` overhead);
->    (c) JIT (dynasmrt SH-2) — NOT needed for interpreter parity; only if
->    USER wants native-speed (C++ JIT dense = 2.9 ms).
-> 4. Full 63-case suite STILL OWED (S6+S7 skipped by user directive — JIT on/off
->    byte-identical legs run per-case in suite; SYNCHRONOUS, timeout ≥2400000,
->    PYTHONIOENCODING=utf-8, `python -u` + Tee; BEFORE suite: `Get-Process
->    live_rust` — foreign `D:\Downloads\S-MU2000\live_rust.exe` shares
->    %LOCALAPPDATA%\S-MU2000 and hung S6 twice; if it respawns, ASK USER).
+> 3. Remaining perf levers (measure each, keep only wins; ONLY same-window
+>    BUILD A/B ratios are trustworthy — this box is THERMALLY NOISY, C++ interp
+>    drifted 0.181→0.171 mid-S8; goal = blocktime ≤ SAME-BOX C++):
+>    (a) pump block at the ~3.2 dirty stops/smp — NOT done in S8; SH-2 term is
+>    already parity band (1.0-1.07×) so any pump win is <2%, likely noise; skip
+>    unless SH-2 regresses above C++ again;
+>    (b) STILL-open SWP residual ~1.2-1.3× vs C++ interp: the rest is mature
+>    -O3 C++ interpreter codegen on the ~52-byte Op table (cache) + awm2 voice
+>    codegen + the state-SIZED reverb_ram (checked `[]`, cannot unchecked).
+>    Further safe gains there need STRUCTURAL work (Op-struct packing — Op is
+>    NOT serialized so layout is free; split hot/cold fields) — bigger surface,
+>    higher risk; measure first. read_8c/dpcm + mixer_step + lfo unchecked-bank
+>    sweeps are the remaining same-class candidates if pursued; each MUST
+>    re-gate dense (MEG/audio proof) not just ws.
+>    (c) JIT (dynasmrt SH-2 + a MEG JIT) — NOT needed for interpreter parity
+>    (port is sub-realtime + SH-2 parity); only if USER wants native-speed
+>    (C++ JIT dense = 2.9 ms). SWP/MEG JIT would be the only way to beat
+>    C++-interp on the SWP term, since C++-interp ALSO runs MEG un-JIT'd here.
+> 4. Full 63-case suite STILL OWED (S6+S7+S8 all skipped by user directive — JIT
+>    on/off byte-identical legs run per-case in suite; SYNCHRONOUS, timeout
+>    ≥2400000, PYTHONIOENCODING=utf-8, `python -u` + Tee; BEFORE suite:
+>    `Get-Process live_rust` — foreign `D:\Downloads\S-MU2000\live_rust.exe`
+>    shares %LOCALAPPDATA%\S-MU2000 and hung S6 twice; if it respawns, ASK USER).
 > Row order: W-PANEL (port panel.cpp) still owed AFTER M9 — deferred by user
 > directive "work CPU". midi-in RT re-gate: still ENV-BLOCKED (reboot).
-> Cold-start (traps live unless struck): ws **562**; flat exes stamp 10-03
-> **21:56** (= S7 target build); SMU_BUILD per-process; fc.exe not fc;
-> `make rust` from ROOT works (`.cargo/config.toml` twin'd root+rust\ — never
-> build cargo from elsewhere; workdir rust\ double-prefix trap — S7 ate it
-> AGAIN ×2, absolute paths safest); "起動ぶんの長さが 352799" print on
-> althh/reltail/xgmwvib/xgvibdly = informational (run_tests.py:238), not a delta.
+> Cold-start (traps live unless struck): ws **562**; flat exes refreshed each
+> build (S8 ran `make rust` many× — verify flat==target SHA at cold open, do NOT
+> trust a stamp); SMU_BUILD per-process; fc.exe not fc; ⚠ CJK `Select-String`
+> patterns intermittently MISS blocktime output lines — match on ASCII (`SWP30`,
+> `\d\.\d+ ms `) or `Out-File -Encoding utf8` then rg; `make rust` from ROOT
+> works (never build cargo from elsewhere; workdir rust\ double-prefix trap —
+> absolute paths safest); "起動ぶんの長さが 352799" print on althh/reltail/
+> xgmwvib/xgvibdly = informational (run_tests.py:238), not a delta.
 > **LIVE GATE RECIPE (S4): clear config nvram BEFORE EACH live run (per-side).
 > WASAPI real-device headless WORKS (UR824 shared 48k float). build.rs needs
 > MSYS2 (gtmath.lib; SMU_MINGW_ROOT/SMU_GT_SKIP overrides).**
@@ -61,12 +75,12 @@ on this repo MUST read this file in full before touching anything, then work the
 > Cold-start (pwsh), one command each:
 > ```
 > # 0. SANITY: git status --short src/ tests/ clean. Baseline `cargo test
-> #    --release` from workdir rust\ = **562/562**. Pin 3A27AF73… ==
-> #    %TEMP%\smu_nvram_pin_m2; config-dir nvram/ MUST be EMPTY; boot\ holds
-> #    44a70f24df97f839.bin + 44a70e24df97f686.bin (both 6097273 B) — do not
-> #    delete. S7 tree COMMITTED? NO — rust/ carries the UNCOMMITTED S7 delta
-> #    (crates/smu-machine/src/lib.rs + crates/smu-sh2/src/sh7042.rs + ledger);
-> #    git stash -u would nuke it. Ask USER to commit.
+> #    --release` from workdir rust\ = **562/562** (sum ALL `test result` lines
+> #    — `-Last N` truncation HIDES the total, nearly mis-reported a RED). Pin
+> #    3A27AF73… == %TEMP%\smu_nvram_pin_m2; config-dir nvram/ MUST be EMPTY;
+> #    boot\ holds 44a70f24df97f839.bin + 44a70e24df97f686.bin (both 6097273 B)
+> #    — do not delete. S7 tree COMMITTED (`85a4ccc`). S8 rust/ delta COMMITTED?
+> #    NO — fetch.rs + meg.rs UNCOMMITTED (git stash -u would nuke it). Ask USER.
 > # 1. TRAPS: flat exes MANUAL refresh from ROOT; ⚠ double-prefix trap (from
 > #    workdir rust\ `..\build-rust` OK, `rust\build-rust` WRONG); SMU_BUILD
 > #    per-process ONE command; `fc.exe`; swp30.cpp 4800 L range-reads only;
@@ -75,12 +89,13 @@ on this repo MUST read this file in full before touching anything, then work the
 > #    (C++ JITs ON otherwise = 2.9 ms — NOT the bar); MIDI fixtures live in
 > #    build\tests\*.mid (generated) — `build-rust\blocktime.exe roms
 > #    build\tests\dense.mid 10`.
-> # 2. PERF (S7, same box): Rust dense single 0.203 avg / RT 89.5%, SH-2
-> #    7029-7576, SWP-m 13190 ns/smp; C++ single-interp 0.186 / 81.9% / SH-2
-> #    7213 / SWP 11277. live idle CPU 64.2%. Bar = SAME-BOX C++ numbers.
+> # 2. PERF (S8, same box, box thermally NOISY): Rust dense single 0.207-0.209
+> #    avg, SH-2 ~7600, SWP-m ~13150 ns/smp; C++ single-interp ~0.17-0.18 /
+> #    SH-2 ~6700-7100 / SWP-m ~10300-11050. live idle CPU 63.0%. Bar = SAME-BOX
+> #    C++ numbers. Only same-window BUILD A/B ratios are trustworthy this box.
 > # 3. LIVE GATE (S3 recipe): factory-clear nvram → live `--waveout --nomidi
 > #    --seconds 3 --wav x.wav` → no starvation (busy<100% lines), C++↔Rust wav
-> #    BYTE-EQ still expected for idle path (S7: EQ ×2, fc.exe /B).
+> #    BYTE-EQ still expected for idle path (S8: EQ, fc.exe /B, 532,524 B).
 > # 4. PROF RECIPE (S7): temporary AtomicU64 counters at the dev_dirty arms
 > #    (class-indexed) + blocktime per-rep dump gated by SMU9PROF=1 — proved
 > #    steady-state dirty stops only ~3.2/smp (ports 1.6 / swp 1.1) and the
@@ -105,8 +120,8 @@ Session log. Status: ⬜ todo · 🟡 in progress · ✅ done · ⏸ blocked.
 | M5 | State mirror | Rust `statetest` green + cross-load both ways: C++ boot→snapshot→Rust render `piano` identical; Rust snapshot→C++ render identical; NVRAM files interchangeable | ✅ | **S2 10-02**: statetest 合×3 (DIN/USB/軽量; orch re-ran DIN+USB exit 0, 50-sample 完全一致); bootcache exchange both ways (Rust HIT C++ `44a70e24…` 合; C++ HIT Rust-mint, mtime UNCHANGED, piano 合); nvram 3-way interchange `8EF4A086…`; full suite 63/63 renders 合, ×-list == documented set; ws 503. LCD-seam cases (メーター/演奏画面) remain M6-scope × |
 | M6 | Windows HAL + live | Rust `live --seconds 60 --midi <loopMIDI> --wav x.wav` with C++ `midisend` playing a fingerprint case → fingerprint match; latency/CPU lines printed like C++ | 🟡 | **S3: live main+waveout+midi_out ring+LCD seam PAIRED; idle C++↔Rust live wav BYTE-EQ (headless waveout PROVEN WORKING); `--midi-file` seam replaces loopMIDI for determinism (S3 decision). S4: `audio out` WASAPI row PAIRED (real UR824 shared idle wav BYTE-EQ — WASAPI default path no longer stand-in). Only M6b residual = midisend/midi-in deep capture gate. Latency/CPU lines printed (both builds)** |
 | M7 | fast_midi + USB C/D | 42 cases re-run `--fast-midi` bit-identical C++↔Rust; `--usb` host mode case identical; `port_b` green both modes | ✅ | **S4: both module rows PAIRED; --usb chord wav BYTE-EQ + xgtest --usb fc EQ + harness USBの口/port_b 合 both modes. SWEEP DONE (S4 orch): ALL 63 fixtures `--fast-midi` C++↔Rust pcm sha1 EQ (4 batches, 0 diffs; 4-sec renders, exes 07:2x) — exceeds the 42-case bar** |
-| M8 | Slave thread + perf | threaded==single bit-identical (harness #4 pattern) on 5 heaviest cases; `blocktime` Rust ≤ C++ interpreter(no-JIT); perf table updated | 🟡 | **S4: threaded slave PORTED+PAIRED (W-M8B: lock-free tag/done rotation mu2000.cpp:286-373 1:1; 5 heaviest wavs threaded≡single≡C++-threaded byte-EQ, orch re-ran dense `33500014…`; --single REAL in render/live/blocktime/statetest; ws 552; dense+別糸 real 合). blocktime bin ✅ + perf table UPDATED. S4 gate MISSED (19.497/26.58 vs bar 8.887/11.75) ⇒ M9 armed. S7 dense-single re-measure: Rust 0.203/0.29 vs same-box C++-interp 0.186/0.30 (bar 8.887/11.75 = box-drifted, do NOT re-use — always same-box side-by-side); SH-2 7029-7576 vs 7213 ≈ parity; threaded dense 別糸 合 re-proved ×2. ≤-gate effectively met on SH-2 term; SWP-master term (13190 vs 11277) = remaining ~0.3 ms — see NEXT** |
-| M9 | (optional) JIT | Only if M8 misses goal: dynasmrt SH2 JIT; gate = JIT on/off byte-identical 42/42 + measurable win; else mark cancelled | 🟡 | **S6: batched interpreter (pump tax per-device-op, not per-instruction) dense 19.497/26.58 → 11.38/16.5, SH-2 2.58×. COMMITTED `99edf62`. S7: fetch-path polish (Ctx/region per-access ROM-RAM-DRAM-IRAM fast legs + single-borrow hook + per-op SCI cpu_now sync + dead-Snap removal + selective Internal dirty) → dense single 0.247→0.203 ms avg (RT 108.9%→89.5%), SH-2 10881→7029-7576 ns/smp vs same-box C++-interp 7213 = PARITY±5%; live idle CPU 64.2% (S6 78.4%, S4-era 159.8%), live wavs BYTE-EQ ×2 vs C++. JIT = NOT NEEDED for interpreter-parity goal; reopen only if blocktime >1.15× C++-interp recurs. Full 63-case suite still owed (S6+S7 both skipped by user directive; gates = ws 562 + boot_golden + boot 28M trace-swp/stdout/stderr byte-EQ + piano/dense 合 all in-session)** |
+| M8 | Slave thread + perf | threaded==single bit-identical (harness #4 pattern) on 5 heaviest cases; `blocktime` Rust ≤ C++ interpreter(no-JIT); perf table updated | 🟡 | **S4: threaded slave PORTED+PAIRED (W-M8B: lock-free tag/done rotation mu2000.cpp:286-373 1:1; 5 heaviest wavs threaded≡single≡C++-threaded byte-EQ, orch re-ran dense `33500014…`; --single REAL in render/live/blocktime/statetest; ws 552; dense+別糸 real 合). blocktime bin ✅ + perf table UPDATED. S4 gate MISSED (19.497/26.58 vs bar 8.887/11.75) ⇒ M9 armed. S7 dense-single re-measure: Rust 0.203/0.29 vs same-box C++-interp 0.186/0.30 (bar 8.887/11.75 = box-drifted, do NOT re-use — always same-box side-by-side); SH-2 7029-7576 vs 7213 ≈ parity; threaded dense 別糸 合 re-proved ×2. ≤-gate effectively met on SH-2 term; SWP-master term (13190 vs 11277) = remaining ~0.3 ms — see NEXT. **S8: SWP-m reduced 14208→~13150 (read_dword load-fusion + MEG ring/bank unchecked, −7% same-window); dense block 0.218→0.207 ms; live idle CPU 63.0% sub-realtime no-starvation, idle wav BYTE-EQ. Still ~1.15-1.22× dense block vs same-box C++-interp (box thermally noisy); residual = mature C++-interp codegen (Op-table cache + awm2), JIT-only territory — NOT a functional/realtime miss**** |
+| M9 | (optional) JIT | Only if M8 misses goal: dynasmrt SH2 JIT; gate = JIT on/off byte-identical 42/42 + measurable win; else mark cancelled | 🟡 | **S6: batched interpreter (pump tax per-device-op, not per-instruction) dense 19.497/26.58 → 11.38/16.5, SH-2 2.58×. COMMITTED `99edf62`. S7: fetch-path polish (Ctx/region per-access ROM-RAM-DRAM-IRAM fast legs + single-borrow hook + per-op SCI cpu_now sync + dead-Snap removal + selective Internal dirty) → dense single 0.247→0.203 ms avg (RT 108.9%→89.5%), SH-2 10881→7029-7576 ns/smp vs same-box C++-interp 7213 = PARITY±5%; live idle CPU 64.2% (S6 78.4%, S4-era 159.8%), live wavs BYTE-EQ ×2 vs C++. JIT = NOT NEEDED for interpreter-parity goal; reopen only if blocktime >1.15× C++-interp recurs. Full 63-case suite still owed (S6+S7 both skipped by user directive; gates = ws 562 + boot_golden + boot 28M trace-swp/stdout/stderr byte-EQ + piano/dense 合 all in-session). **S8: SWP-master micro-polish (fetch `read_dword` pow2-leg load-fusion + `meg::run_program` delay-ring/bank `get_unchecked` on provably-in-range indices; state-sized reverb_ram left CHECKED) → dense SWP-m 14208→~13150 (−7%), block 0.218→0.207 ms (−5%), SH-2 unchanged parity, live idle CPU 63.0% (was 64.2%). INTERP_TABLE unchecked = noise, reverted. All bit-exact (ws 562 ×2 incl boot_golden + meg/meg_b/fetch vectors; dense 合 peak 14627/rms 2257.4; piano 合; live wav BYTE-EQ 532,524 B). S7 tree committed `85a4ccc`; S8 rust/ (fetch.rs + meg.rs) UNCOMMITTED. SWP residual ~1.2-1.3× vs C++-interp remains mature-interpret codegen (Op-table cache + awm2) — JIT-only territory; box thermally noisy so only same-window BUILD A/B trustworthy** |
 
 Deferred backlog (tracked, not gates): samptest, SmartMedia authoring, A/D input,
 Linux/macOS HALs, `rec` equivalent. (xgtest ✅ S4; `midisend` ✅ ported S4, RT re-gate pending.)
@@ -333,6 +348,85 @@ Deviation log (intentional):
 ---
 
 ## Session log (append-only, newest first)
+
+### 2026-10-03 — session S8 (M9 SWP-master micro-polish: read_dword load-fusion + MEG delay-ring/bank unchecked → dense SWP 14208→~13150 ns/smp (−7%), block 0.218→0.207 ms (−5%), live idle CPU 64.2→63.0%; ALL bit-exact; UNCOMMITTED rust/ delta = fetch.rs + meg.rs)
+
+- Cold protocol: ledger IN FULL; `git status --short src/ tests/` CLEAN. S7 tree
+  FOUND COMMITTED as `85a4ccc` (ledger's "UNCOMMITTED rust/" note was stale —
+  user committed the S7 delta at 22:18: lib.rs + sh7042.rs + ledger, 3 files).
+  So the S7 ASK-USER (commit) is CLOSED. Flat exes 21:56 (S7 target) == target.
+  No foreign `live_rust` process (checked). config nvram EMPTY. boot\ holds both
+  6097273-B caches. Baseline ws **562/562** ×1 in-session (summed all suite
+  `test result` lines — `-Last 45` truncation had hidden the true total). USER
+  DIRECTIVES this session: "Skip the full suite tests including samptest.
+  Complete optimization." → worked NEXT §3 levers, no full suite, no samptest.
+  0 embedded commands executed; cited lines re-read from disk.
+- SAME-BOX baselines FIRST (dense single, JIT-off recipe, `build-rust\blocktime
+  roms build\tests\dense.mid 10`): Rust 0.220 avg / SH-2 7637 / SWP-m 14315;
+  C++ interp 0.181 / SH-2 7107 / SWP-m 11049. Confirmed the gap is SWP-master
+  dominated (1.30×), SH-2 already ~1.07 (parity band) — lever (a) pump block
+  (NEXT §3a, SH-2-side, "may be noise") NOT pursued; lever (b) SWP is the fish.
+  ⚠ CROSS-BUILD ratios on this box are THERMALLY NOISY (box sped up
+  mid-session: C++ interp drifted 0.181→0.171, SWP 11049→10329 across runs;
+  Rust stable 0.207-0.209). Only SAME-WINDOW BUILD A/B ratios are trustworthy —
+  all "wins" below are measured that way (patched vs reverted, back-to-back).
+- BUILD FLAGS RULED OUT FIRST: C++ ground truth = `-O3 -mfpmath=sse -msse2`,
+  no `-march=native` (Makefile:89,139 — MARCH unset) ⇒ SSE2 baseline, ISA-
+  matched to Rust default x86-64. Rust profile already `lto=fat`,
+  `codegen-units=1`, `panic=abort` (rust/Cargo.toml:14-18). No flag lever
+  without breaking bit-exact FP (target-cpu=native forbidden — Invariant).
+  ⇒ remaining gap is codegen/structure, attacked only via provable-bounds
+  `get_unchecked` (same class as the ROM/RAM/DRAM fast legs S7 landed).
+- LEVERS LANDED (each: ws 562 green incl boot_golden byte-replay + MEG
+  vectors; block-time A/B in the same window; keep only wins):
+  **(A) fetch.rs `read_dword` pow2 leg → `as_ptr().add(off)` unchecked dword
+  read** (was 4 bounds-checked byte loads — LLVM cannot fuse a checked slice
+  read into one `mov`; unchecked = single 32-bit load, bit-identical value).
+  Proof: pow2 leg only runs for a non-empty power-of-two wave space ≥4 dwords
+  (empty→WAVE_ZERO takes the non-pow2 leg, `new` sets pow2=false there), so
+  `off = (addr<<2) & mask & !3` ⇒ off+3 ≤ len−1. read_16/read_12/read_8/8c
+  all route through read_dword ⇒ every AWM2 sample fetch inherits it.
+  A/B (revert→patch back-to-back): SWP 14208→13829 (−2.7%), block 0.218→0.214.
+  **(B) meg.rs `run_program` delay-ring + bank reads/writes → `get_unchecked`**:
+  ring indices `i3`∈{0,1,2} (`d3 = if d3==2{0}else{d3+1}` :4161, entry from
+  delay_3 reset/restore 0..2) into the `[_;3]` ring arrays, `i2`∈{0,1}
+  (`d2 ^= 1` :4162) into `t_value[_;2]`; bank reads `m[o.sm]`/`r[o.sr]`/`t[o.t]`
+  where `build_ops` masks `o.sm = bit(..,6)`<0x40, `o.sr = bit(..,7)`<0x80,
+  `o.t = bit(..,3)`<8 (:3540-3544 — HARD arithmetic bounds); `mw_reg/rw_reg`
+  latched only from those masked `dm/dr`; `offset[o.offset_index]` with
+  `offset_index = pc/3` < 0x80 (:3962). Same unchecked `[]` the C++ does
+  (swp30.cpp:3996-4155). Converted the ~10-unconditional-per-instruction ring
+  latches + drain + ALU-bank reads (NOT the rare branch-path resets). A/B:
+  SWP 13829→13126-13209 (−4.4%); combined (A+B) SWP 14208→~13150 (−7.4%),
+  block 0.218→0.207 (−5.0%). SH-2 unchanged (7542-7669, box noise).
+- LEVER TESTED + REVERTED: `read_16`/`step` INTERP_TABLE `[^]` unchecked reads
+  (index & 2047 and ^2047 < 0x800 = row len, provable). Measured SWP 13209→
+  13450 = WITHIN NOISE (no win) — LLVM already folds most; reverted to keep the
+  unsafe surface minimal (NEXT §3 "keep only wins"). No other unsafe added.
+- FINAL GATES (all in-session, all green): ws `cargo test --release` **562/562
+  ×2** (boot_golden byte-replay + all meg/meg_b/voice/fetch vector suites inside
+  = MEG+fetch changes bit-exact); `--only dense` **合** (peak 14627/rms 2257.4/
+  低域比 9.173 = exact C++ fingerprint — the MEG/AWM2-heavy case); `--only
+  piano` **合** 全部そろっている (statetest×3 戻し一致 + JIT入切 + 別糸); live
+  `--waveout --nomidi --seconds 3`: **CPU 63.0%** (S7 64.2%) no starvation,
+  idle wav **BYTE-EQ vs C++** `fc.exe /B` 532,524 B (factory-nvram both sides),
+  config nvram CLEARED at close (count 0). `git status --short src/ tests/`
+  CLEAN all session; golden untouched; flat exes refreshed after every build
+  (flat==target SHA-eq 0/9 mismatches at close).
+- NUMBERS: dense SWP-master term 14208→~13150 ns/smp (−7%); block 0.218→0.207
+  ms (−5%); live idle CPU 64.2→63.0%. Cross-build to same-box C++ interp is
+  thermally noisy at 1.15-1.22× total / ~1.2-1.3× SWP this session (S7 logged
+  SWP 1.17 on a cooler box). SH-2 stays parity band (~1.0-1.07×). RESIDUAL
+  dense blocktime gap to same-box C++-interp = mature -O3 C++ interpreter vs
+  faithful transliteration on the huge Op table + state-SIZED reverb_ram
+  (resizable at state load, state.rs:96 — CANNOT take `get_unchecked` without
+  risking bit-exact on a small loaded state) + awm2 codegen. Closing the last
+  ~15% is JIT territory (dynasmrt, NEXT §c) — ledger still scopes JIT as
+  native-speed, NOT needed for interpreter-parity, which the port now meets on
+  SH-2 and is sub-realtime on the total.
+- Repo: rust/ UNCOMMITTED (fetch.rs `7F81FF71` 1192 L + meg.rs `AF264C43`
+  1771 L); src/ tests/ git-clean; no commits; **USER ASK: `git add rust
+  PORTING_LEDGER.md && git commit`** — the S8 speedup lives only on disk.
 
 ### 2026-10-03 — session S7 (M9 fetch-path polish: SH-2 10881→~7029-7576 ns/smp = SAME-BOX C++ parity; dense RT 89.5% SUB-REALTIME; live CPU 64.2%; UNCOMMITTED rust/ delta = the gated state)
 
