@@ -7,8 +7,14 @@
 //! `waveout fallback`): `sys` (kernel32/avrt FFI: QPC, Ctrl+C, MMCSS, events),
 //! `midi` (ui/midi_in.cpp winmm MIDI-in as the g_midi global), `waveout`
 //! (winmm waveOut declarations; the live.cpp order lives in bins/live.rs).
-//! WASAPI (shared/exclusive, resampler) is the `audio out` row (M6b).
+//! Landed this row (`audio out`, M6b): `wasapi` (ui/audio_out.cpp +
+//! ui/resampler.h — event-driven shared/exclusive, own sinc resampler,
+//! GetCurrentPadding starvation stats, hand-rolled COM vtables).
+//! Landed this row (M6b `midisend`): `midi_out` (winmm MIDI-OUT +
+//! timeBeginPeriod/timeGetTime FFI for bins/midisend.rs, src/midisend.cpp).
 
 pub mod midi;
+pub mod midi_out;
 pub mod sys;
+pub mod wasapi;
 pub mod waveout;

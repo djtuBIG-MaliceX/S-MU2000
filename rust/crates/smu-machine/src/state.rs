@@ -134,52 +134,56 @@ impl Machine {
         // (:3572)
         if s.version() >= 7 {
             s.tag("usb"); // :3574
-            let mut n = self.midi.usb.rx.len() as u32; // :3575
+            // M7 row: `midi.usb` is the shared Rc<RefCell<UsbLine>> — one
+            // borrow_mut for the whole leg (the stream touches nothing else
+            // re-entrant here; field order/types EXACTLY as disk :3575-3604)
+            let mut usb = self.midi.usb.borrow_mut();
+            let mut n = usb.rx.len() as u32; // :3575
             s.v(&mut n); // :3576
             if s.writing() {
                 // :3577-3580
-                for b in self.midi.usb.rx.iter() {
+                for b in usb.rx.iter() {
                     let mut b = *b;
                     s.v(&mut b);
                 }
             } else {
                 // :3581-3586
-                self.midi.usb.rx.clear();
+                usb.rx.clear();
                 for _ in 0..n {
                     if !s.ok() {
                         break;
                     }
                     let mut b: u8 = 0;
                     s.v(&mut b);
-                    self.midi.usb.rx.push_back(b);
+                    usb.rx.push_back(b);
                 }
             }
-            s.v(&mut self.midi.usb.in_port); // :3588 int
-            s.v(&mut self.midi.usb.next); // :3588 u64
-            s.v(&mut self.midi.usb.have); // :3588 bool
-            s.v(&mut self.midi.usb.cur); // :3588 u8
-            s.v(&mut self.midi.usb.tx_next); // :3588 u64 (NOT in UsbIn — see below)
+            s.v(&mut usb.in_port); // :3588 int
+            s.v(&mut usb.next); // :3588 u64
+            s.v(&mut usb.have); // :3588 bool
+            s.v(&mut usb.cur); // :3588 u8
+            s.v(&mut usb.tx_next); // :3588 u64 (tx/out_port do NOT ride — disk)
             if s.version() >= 10 {
                 // :3589-3604: command queue + cur_cmd
-                let mut c = self.midi.usb.cmd.len() as u32; // :3590
+                let mut c = usb.cmd.len() as u32; // :3590
                 s.v(&mut c); // :3591
                 if s.writing() {
-                    for b in self.midi.usb.cmd.iter() {
+                    for b in usb.cmd.iter() {
                         let mut b = *b;
                         s.v(&mut b);
                     }
                 } else {
-                    self.midi.usb.cmd.clear();
+                    usb.cmd.clear();
                     for _ in 0..c {
                         if !s.ok() {
                             break;
                         }
                         let mut b: u8 = 0;
                         s.v(&mut b);
-                        self.midi.usb.cmd.push_back(b);
+                        usb.cmd.push_back(b);
                     }
                 }
-                s.v(&mut self.midi.usb.cur_cmd); // :3603 bool
+                s.v(&mut usb.cur_cmd); // :3603 bool
             }
         }
 

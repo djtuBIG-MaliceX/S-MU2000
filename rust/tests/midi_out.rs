@@ -112,18 +112,24 @@ fn empty_ring_returns_none() {
     assert_eq!(m.tx_w, 0);
 }
 
-// (7) USB divert inert (mu2000.h:237-240): usb_host=false — pinned until
-// M7 — so take reads the ring; the armed arm (unreachable on the machine;
-// set here only to prove inertness) must not corrupt the ring.
+// (7) USB divert LIVE (mu2000.h:237-240, M7 `USB host` row): with
+// usb_host=true take reads the USB tx ring instead of the DIN ring —
+// and the DIN ring bytes SURVIVE untouched (the disk tx_line wire path
+// is USB-oblivious; mu2000.cpp:1179 stays bound either way).
 #[test]
-fn usb_divert_arm_inert_ring_intact() {
+fn usb_divert_live_reads_tx_ring_ring_intact() {
     let mut m = Midi::new();
-    assert!(!m.usb_host); // mu2000.h:1022 ctor + M7 pin (lib.rs :1015 note)
-    send_byte(&mut m, 0xf7);
-    m.usb_host = true; // disk would divert to usb_out_take (M7, absent)
-    assert_eq!(m.midi_out_take(), None); // inert: no DIN byte served
-    m.usb_host = false;
-    assert_eq!(m.midi_out_take(), Some(0xf7)); // ring untouched by the arm
+    assert!(!m.usb_host.get()); // mu2000.h:1022 ctor default
+    send_byte(&mut m, 0xf7); // DIN ring: one byte waiting
+    m.usb_host.set(true); // disk diverts to usb_out_take (:237-240)
+    assert_eq!(m.midi_out_take(), None); // usb tx ring EMPTY -> None
+    m.usb.borrow_mut().w(0, 0xf5); // usb_w(:1371-1377): F5 framing kept
+    m.usb.borrow_mut().w(0, 0x04); // (usb_midi_in-side framing, mu2000.cpp)
+    m.usb.borrow_mut().w(0, 0xf0); // a SysEx start on port D (3)
+    assert_eq!(m.midi_out_take(), Some(0xf0)); // F5 pair consumed (:1386-1393)
+    assert_eq!(m.usb.borrow().out_port, 3); // 1-based 4 -> 0-based 3 (:1391)
+    m.usb_host.set(false);
+    assert_eq!(m.midi_out_take(), Some(0xf7)); // DIN ring untouched by the arm
 }
 
 // (8) boot-neutral: Machine::reset (:1177-1178 equivalent) + the

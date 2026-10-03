@@ -19,3 +19,14 @@ path = "../../tests/boot_golden.rs"
 [[test]]
 name = "midi_out"
 path = "../../tests/midi_out.rs"
+
+# Row gate "xgtest port" (S4/W-XG): offline param vectors, same mount pattern.
+[[test]]
+name = "xg_model"
+path = "../../tests/xg_model.rs"
+
+# Row gate "USB host (M37640)" (M7): bus-byte/IRQ/frame vectors offline,
+# same mount pattern.
+[[test]]
+name = "usb"
+path = "../../tests/usb.rs"

@@ -12,7 +12,9 @@
 //
 // Deviations (reported to ledger author, do NOT "fix" silently):
 // - Unimplemented flags are ACCEPTED and warn-ignored on stderr (one line each).
-//   Disk truth for --usb :356 (--bootcache is LIVE since M5-W5a —
+//   --usb is LIVE since the M7 `USB host (M37640)` row (render.cpp:266-267/
+//   378/572 — set_usb_host BEFORE boot-key/reset, mu_port fold with usb=true).
+//   (--bootcache is LIVE since M5-W5a —
 //   bootcache.rs; disk seams render.cpp:194/272-273/380/391-398/413-414;
 //   --state-at :252/534-540 is LIVE since M5-W4), --dump-dac/-meg
 //   :338-352/594-599, --trace-meg :346-352 (--lcd-at/--lcd-every LIVE since
@@ -21,10 +23,13 @@
 //   (A/D capture row), --card :302/642-649, --replay-swp :304-332/566-570,
 //   --midi-block :533-538, --native-* / engine options (render.cpp:243
 //   ui::consume_engine_option). None affect the firmware-path PCM.
-// - --single (:235) is a no-op: this build is single-threaded (the machine has
-//   no slave thread — mu2000.cpp:3413-3416 else-arm == Machine::run_sample_pair).
-// - --fast-midi (:243 -> set_fast_midi) is warn-ignored (M7); leaving
-//   Machine::midi.fast_midi=false keeps the DIN bit-pump path (M4 `midi lines`).
+// - --single (:235) is LIVE (M8 `threaded slave` row): default spins the
+//   slave SWP30 on its own thread (mu2000.cpp:3449-3457 threaded arm ==
+//   Machine::run_sample_pair); --single keeps the :3458-3461 else-arm.
+//   1 本でも別スレッドでも出る音は同じ (mu2000.cpp:297 harness 別糸).
+// - --fast-midi (:243 -> set_fast_midi) is LIVE (M7 fast_midi row): applied
+//   at the render.cpp:377 seam (apply_engine_options) BEFORE reset/boot.
+//   Flag OFF keeps the DIN bit-pump path byte-identical (M4 `midi lines`).
 // - --boot is HONORED (fixed boot), unlike the boot-wait default. The harness
 //   passes "8.000" POSITIONAL as <seconds> AND --boot 8.000; DISK CHECK: yes,
 //   argv[4]="5.000" -> seconds positional (:271), argv[5..6] -> --boot (:210).
@@ -277,9 +282,10 @@ fn atof(s: &str) -> f64 {
 }
 
 // origin: mu2000.cpp:3186-3189 (cycle-debt) + :3380-3388 (run_cpu->run_cycles)
-// + :3401-3453 (run_sample_pair). native engine OFF + not threaded, so the
-// native/scope/threading arms of mu2000::run_sample (:3172-3379, :3404-3412)
-// are inert on this path. Firmware is always run (m_cpu_enabled default true).
+// + :3401-3461 (run_sample_pair). native engine OFF, so the native arms of
+// mu2000::run_sample (:3172-3379) are inert; the slave-thread arm
+// (:3449-3457) is LIVE unless --single (Machine::run_sample_pair owns both).
+// Firmware is always run (m_cpu_enabled default true).
 fn run_sample(m: &mut Machine, sintab: &[u16], debt: &mut u64) -> (i32, i32) {
     *debt = debt.wrapping_add(28_000_000); // :3187 (28 MHz)
     let cycles = *debt / 44100; // :3188
@@ -324,7 +330,8 @@ fn main() {
     let mut seconds = 0.0f64; // :170
     let mut duration_given = false; // :171
     let mut trace_midi = false; // :172
-    let usb_host = false; // :174 (parsed, warn-ignored — M7; firmware path is DIN-only)
+    let mut fast_midi = false; // :192 engine_options.fast_midi (options.h:28)
+    let mut usb_host = false; // :174 --usb (LIVE since M7 `USB host` row)
     let mut forced_reset: Option<String> = None; // :177
     let mut swptrace: Option<String> = None; // :178
     let mut mu_dac_path: Option<String> = None; // :189-190
@@ -336,7 +343,7 @@ fn main() {
     let mut meg_tr_count: u32 = 0;
     let mut meg_tr_pc0: u32 = 0;
     let mut meg_tr_pc1: u32 = 0;
-    let _single = false; // :179 (parsed; no-op — single-threaded build)
+    let mut single = false; // :198 `bool single = false`（スレーブを別スレッドにしない）
     let mut boot = -1.0f64; // :180 (<0 -> boot-wait on midi_ready)
     let mut use_bootcache = false; // :194 --bootcache。起動後の写しから始める（確かめ用）
     // DEV pc-trace window (boot->RE timers hunt; mirrors boot.rs:123-140 /
@@ -406,7 +413,7 @@ fn main() {
             meg_tr_pc1 = parse_u32_base0(&nxt(i + 5));   // :233
             i += 6;
         } else if a == "--single" {
-            // :235-236 no-op (single-threaded build)
+            single = true; // :235-236 (set_threaded(!single) at the :376 seam)
             i += 1;
         } else if a == "--adc-in" && i + 1 < raw.len() {
             eprintln!("(rust render: --adc-in は未実装 — 無視)"); // :237-238 A/D row
@@ -423,13 +430,15 @@ fn main() {
                 | "--cal" | "--nocal" | "--voicecache" | "--no-voicecache"
         ) {
             // :243 ui::consume_engine_option (all no-value flags). --fast-midi
-            // -> set_fast_midi is M7; native engine not built (AGENTS). Ignore.
+            // -> set_fast_midi is LIVE (M7 row, applied at the :377 seam
+            // below); native engine not built (AGENTS) — those stay ignored.
             if a == "--fast-midi" {
-                eprintln!("(rust render: --fast-midi は未実装 — 無視)");
+                fast_midi = true; // options.h:37
             }
             i += 1;
         } else if a == "--usb" {
-            eprintln!("(rust render: --usb は未実装 — 無視)"); // :244-245 M7
+            usb_host = true; // :266-267 — LIVE (M7): HOST SELECT USB, all
+                             // four ports route through the usb_line
             i += 1;
         } else if a == "--native-off" && i + 1 < raw.len() {
             eprintln!("(rust render: --native-off は未実装 — 無視)"); // :246-247
@@ -467,7 +476,8 @@ fn main() {
             i += 1;
         }
     }
-    let _ = usb_host; // parsed but ignored (M7); firmware path uses DIN only
+    // :274 usb_host honored below (M7) — the mu_port fold at :572 and the
+    // set_usb_host seam at :378 consume it.
 
     // origin: render.cpp:276-278 smf::load
     let mut events: Vec<Event> = Vec::new();
@@ -514,6 +524,9 @@ fn main() {
             Vec::new()
         }
     };
+    // mu2000.cpp:413-419 set_sintab_rom (the deferred pin glue — disk pins
+    // m_swpm/m_swps at load; the slave thread needs the same stable pointer)
+    m.set_sintab_pin(&sintab);
 
     // origin: render.cpp:334-336 --trace-swp BEFORE reset. fopen failure here is
     // SILENT on disk (`if (tf) set...`), unlike boot.cpp's 書けない exit.
@@ -550,10 +563,19 @@ fn main() {
         }
     }
 
-    // render.cpp:376-377 set_threaded(!single) / apply_engine_options:
-    // single-threaded (no slave thread), firmware path (native off) — no-ops.
-    // :378 set_usb_host — M7: --usb warn-ignored above, so this stays false
-    // (behavior AND the key input below stay the consistent DIN-path pair).
+    // origin: render.cpp:376-377 set_threaded(!single) / apply_engine_options.
+    // set_threaded is LIVE (M8 `threaded slave` row): default runs the slave
+    // SWP30 on its own thread (mu2000.cpp:3449-3457); --single keeps the
+    // :3458-3461 sequential else-arm. 出る音は同じ — the handshake is a
+    // pure per-sample handoff. set_fast_midi is the LIVE part of :377
+    // (options.h:52 -> mu2000.h:120).
+    m.set_threaded(!single); // :376
+    m.set_fast_midi(fast_midi); // render.cpp:377 — BEFORE the key/reset below
+    // :378 set_usb_host — LIVE (M7): BEFORE the boot key (:380 mixes
+    // usb_host, bootcache.h:110) and BEFORE reset (:381 — the M37640
+    // host-online F4 03 01 01 01 push mu2000.cpp:1097-1099 and AN4
+    // mu2000.cpp:1151 need it pre-reset, mu2000.h:218-220).
+    m.set_usb_host(usb_host); // render.cpp:378
     // :379-380 鍵は起動に使うワーク RAM も混ぜるので reset() の前に作る
     let boot_key = if use_bootcache { bootcache::key(&m) } else { 0 }; // :380
     // :381 reset AFTER the trace sink is installed.
@@ -728,7 +750,7 @@ fn main() {
                 let to = if port >= 0 {
                     port
                 } else {
-                    smu_smf::mu_port(ev.port, true, false) // usb_host ignored -> false
+                    smu_smf::mu_port(ev.port, true, usb_host) // :572 (M7 LIVE)
                 };
                 if trace_midi {
                     trace_event(next, ev, to); // :546-547
@@ -836,6 +858,7 @@ fn main() {
 
     // :652-686 native-engine accounting: skipped (native off). :687 final line.
     println!("書き出した: {wav}（{:.1} 秒）", total as f64 / RATE as f64);
-    let _ = _single;
+    // Machine::drop == ~mu2000 (mu2000.cpp:286-290) joins the slave thread
+    // here, exactly where the disk dtor runs after main's locals unwind.
     // exit 0
 }

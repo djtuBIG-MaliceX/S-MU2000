@@ -49,8 +49,10 @@
 //! sh7042.cpp:397-401).
 //!
 //! # Deviations (see session report; none fire on the boot golden path)
-//! - SWP30 (M3), MIDI bit-machine/fast_midi (M4), USB host (M7), SmartMedia
-//!   (M4), NVRAM/state (M5) unwired; their windows return the disk "no
+//! - SWP30 (M3), MIDI bit-machine/fast_midi (M4), SmartMedia (M4) — the
+//!   USB host (M7) is LIVE since the `USB host (M37640)` row (usb.rs +
+//!   Hub::usb bus arms + run_cycles :1227 pump; guard :1323 keeps
+//!   host-OFF runs byte-identical); its windows return the disk "no
 //!   handler answered" 0 (card CONTROL keeps its literal 0xff inside
 //!   `Sh7042Bus`, mu2000.cpp:960).
 //! - ADC0/ADC1 (cancelled row): instantiated nowhere; `adc0/adc1_update`
@@ -74,11 +76,16 @@ pub mod card;
 pub mod midi;
 pub mod nvram;
 pub mod state;
+pub mod usb;
+pub mod xg;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell, UnsafeCell};
 use std::collections::VecDeque;
 use std::io::Write;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::thread::JoinHandle;
 
 use smu_compat::paths;
 use smu_compat::roms;
@@ -122,8 +129,11 @@ const CARD_DATA_END: u32 = 0x00c7_ffff;
 const CARD_CTRL_BASE: u32 = 0x00d0_0000; // mu2000.cpp:959 (reads 0xff in bus)
 const CARD_CTRL_END: u32 = 0x00d7_ffff;
 // SWP30 window bases live in smu_swp30::{MASTER_BASE,SLAVE_BASE} (mu2000.cpp:921-922).
-const USB_BASE: u32 = 0x00f8_0000; // mu2000.cpp:978
-const USB_END: u32 = 0x00f8_0001;
+// The USB window (mu2000.cpp:1009-1010, disk re-verified 2026-10-03) has NO
+// Ctx intercept since the M7 row: sh7042.rs Dev::Usb (find_dev :479-480)
+// decodes all widths with the membus.h r8-chain demotion and the handlers
+// live in Hub::usb_r8/usb_w8 -> smu_machine::usb (exactly the disk shape
+// mu2000.cpp:1011-1012 d.r8/d.w8 -> usb_r/usb_w).
 const INT_BASE: u32 = 0xffff_8000; // mu2000.cpp:987
 const INT_END: u32 = 0xffff_9fff;
 
@@ -141,6 +151,23 @@ pub enum Evt {
     /// exception ack (sh7042.cpp:400 `m_intc->interrupt_taken`; `irqline`
     /// unused on disk, intc.rs:188-197)
     Ack { vector: i32 },
+}
+
+/// Adapter: the `m_cpu->execute_set_input(line, state)` seam of
+/// `usb_step`/`usb_r` (mu2000.cpp:1341/:1349/:1355/:1367) onto the Evt
+/// FIFO. Disk chain: sh7042.cpp:141-143 -> `m_intc->set_input` (:223
+/// same-value early-out; intc.rs:228). Applied by `Machine::pump()` — the
+/// pump right after the pump call / the per-instruction pump inside the
+/// inner loop, both the same post-execute `m_test_irq` boundary as C++
+/// (module-doc deviation note).
+pub struct QIrq<'a> {
+    pub q: &'a RefCell<VecDeque<Evt>>,
+}
+impl usb::UsbIrq for QIrq<'_> {
+    #[inline]
+    fn set_input(&mut self, line: i32, state: i8) {
+        self.q.borrow_mut().push_back(Evt::SetInput { line, state });
+    }
 }
 
 /// Shared clock seam: instruction-start total cycles + event-window flag.
@@ -207,15 +234,18 @@ fn ad_level_adc(i: usize, ad_peak: &[i32; 2]) -> u16 {
     ((0xffu32 - v) as u16) << 2 // :874
 }
 
-/// origin: mu2000.cpp:1113-1122 read_adc<0..7> bindings. AN4 = usb_host ?
-/// 0x330 : 0 — m_usb_host is false on this machine (lib.rs reset comment).
-fn ad_pin(port: usize, ad_peak: &[i32; 2]) -> u16 {
+/// origin: mu2000.cpp:1113-1122/1149-1151 read_adc<0..7> bindings. AN4 =
+/// ホストスイッチ `m_usb_host ? 0x330 : 0` (:1151 — the disk binding is a
+/// lambda reading m_usb_host LIVE; the Hub mirror is the shared
+/// `Hub::usb_host` Cell, same value set_usb_host just wrote). firmware
+/// drops to 8 bits and splits at the border: <0x20 DIN, 0xBA-0xE0 USB (:1149-1150).
+fn ad_pin(port: usize, ad_peak: &[i32; 2], usb_host: bool) -> u16 {
     match port {
         0 => ad_level_adc(0, ad_peak), // :1113
         1 => 0,                        // :1114 constant 0
         2 => ad_level_adc(1, ad_peak), // :1115
         3 => 0,                        // :1116 constant 0
-        4 => 0,                        // :1119 (usb_host == false)
+        4 => if usb_host { 0x330 } else { 0 }, // :1151 (HOST SELECT pin)
         5 => 0,                        // :1120 constant 0
         6 => 0x3ff,                    // :1121 battery full
         _ => 0,                        // :1122 AN7 constant 0
@@ -620,6 +650,16 @@ pub struct Hub {
     /// charged by the `hold()` bus site (mu2000.cpp:848-857), consumed by
     /// run_cycles :1211-1217. Shared with `Machine::swp_wait`.
     pub swp_wait: Rc<RefCell<u64>>,
+    /// mu2000.h:1021 `usb_line m_usb` (M7 `USB host` row) — the FULL line
+    /// behind one Rc: the bus arms below (sh7042.rs Dev::Usb == the disk
+    /// lambdas mu2000.cpp:1011-1012) and `Machine::run_cycles`'s usb_step
+    /// pump (:1227) drive the SAME object; `Machine::midi.usb` is the
+    /// matching clone (receiver-half inject + state stream live there).
+    pub usb: Rc<RefCell<usb::UsbLine>>,
+    /// mu2000.h:1022 `m_usb_host` — the LIVE value behind the :1151 ADC4
+    /// lambda. Shared with `Machine::midi.usb_host`; ONLY
+    /// `Machine::set_usb_host` writes it (mu2000.h:221 — BEFORE reset).
+    pub usb_host: Rc<Cell<bool>>,
     /// reusable FIFO drain buffer (steady-state no-allocation)
     buf: Vec<i32>,
 }
@@ -827,7 +867,8 @@ impl Sh7042Peripherals for Hub {
         }
     }
     // execute_set_input / interrupt_taken are driven from Machine::pump only
-    // (mu2000.cpp:1040/1132 -> sh7042.cpp:141-143/:397-401) — the trait
+    // (mu2000.cpp:1040/1132 -> sh7042.cpp:141-143/:397-401; + M7 USB
+    // :1341/:1349/:1355/:1367 through QIrq -> Evt::SetInput) — the trait
     // defaults stay dead.
 
     // ---- CMT (decode inside ShCmt; cpu_now = current_cycles seam, cmt.rs) ----
@@ -921,18 +962,19 @@ impl Sh7042Peripherals for Hub {
     // the Evt queue -> pump -> route_irqs (disk synchronous internal_interrupt).
     fn adc0_r8(&mut self, a: u32) -> u8 {
         let peak = self.ad_peak.borrow();
+        let uh = self.usb_host.get(); // :1151 lambda reads m_usb_host live
         let mut d = self.adc0.borrow_mut();
         match a {
             0xffff_83e0 | 0xffff_8410 => d.adcsr_r(), // :200/:234
             0xffff_83e1 | 0xffff_8412 => d.adcr_r(),  // :201/:236
             0xffff_83f0..=0xffff_83ff => {
                 // :202-217
-                let v = d.addr_r(((a - 0xffff_83f0) >> 1) as usize, &|p| ad_pin(p, &peak));
+                let v = d.addr_r(((a - 0xffff_83f0) >> 1) as usize, &|p| ad_pin(p, &peak, uh));
                 if a & 1 == 0 { (v >> 8) as u8 } else { v as u8 }
             }
             0xffff_8400..=0xffff_8407 => {
                 // :218-225 (window 2 of the same AN0-3)
-                let v = d.addr_r(((a - 0xffff_8400) >> 1) as usize, &|p| ad_pin(p, &peak));
+                let v = d.addr_r(((a - 0xffff_8400) >> 1) as usize, &|p| ad_pin(p, &peak, uh));
                 if a & 1 == 0 { (v >> 8) as u8 } else { v as u8 }
             }
             _ => 0,
@@ -940,7 +982,8 @@ impl Sh7042Peripherals for Hub {
     }
     fn adc0_r16(&mut self, a: u32) -> u16 {
         let peak = self.ad_peak.borrow();
-        let pin = |p: usize| ad_pin(p, &peak);
+        let uh = self.usb_host.get(); // :1151 lambda reads m_usb_host live
+        let pin = |p: usize| ad_pin(p, &peak, uh);
         let mut d = self.adc0.borrow_mut();
         match a {
             0xffff_83e0 => ((d.adcsr_r() as u16) << 8) | d.adcr_r() as u16, // :420
@@ -964,7 +1007,8 @@ impl Sh7042Peripherals for Hub {
         // origin: sh7042_map.hxx:701-703
         let total = self.hn.borrow().now; // total_cycles() mid-instr (:188)
         let peak = self.ad_peak.borrow();
-        let pin = |p: usize| ad_pin(p, &peak);
+        let uh = self.usb_host.get(); // :1151 lambda reads m_usb_host live
+        let pin = |p: usize| ad_pin(p, &peak, uh);
         let mut aq = std::mem::take(&mut self.buf);
         match a {
             0xffff_83e0 | 0xffff_8410 => self.adc0.borrow_mut().adcsr_w(v, total, &pin),
@@ -981,7 +1025,8 @@ impl Sh7042Peripherals for Hub {
         let (hi, lo) = ((v >> 8) as u8, v as u8);
         let total = self.hn.borrow().now;
         let peak = self.ad_peak.borrow();
-        let pin = |p: usize| ad_pin(p, &peak);
+        let uh = self.usb_host.get(); // :1151 lambda reads m_usb_host live
+        let pin = |p: usize| ad_pin(p, &peak, uh);
         let mut aq = std::mem::take(&mut self.buf);
         match a {
             0xffff_83e0 => {
@@ -1007,12 +1052,13 @@ impl Sh7042Peripherals for Hub {
     fn adc1_r8(&mut self, a: u32) -> u8 {
         // origin: sh7042_map.hxx:226-237
         let peak = self.ad_peak.borrow();
+        let uh = self.usb_host.get(); // :1151 lambda reads m_usb_host live
         let mut d = self.adc1.borrow_mut();
         match a {
             0xffff_8411 => d.adcsr_r(), // :235
             0xffff_8413 => d.adcr_r(),  // :237
             0xffff_8408..=0xffff_840f => {
-                let v = d.addr_r(((a - 0xffff_8408) >> 1) as usize, &|p| ad_pin(p, &peak));
+                let v = d.addr_r(((a - 0xffff_8408) >> 1) as usize, &|p| ad_pin(p, &peak, uh));
                 if a & 1 == 0 { (v >> 8) as u8 } else { v as u8 }
             }
             _ => 0,
@@ -1021,7 +1067,8 @@ impl Sh7042Peripherals for Hub {
     fn adc1_r16(&mut self, a: u32) -> u16 {
         // origin: sh7042_map.hxx:433-436 (adc1 has no other r16)
         let peak = self.ad_peak.borrow();
-        let pin = |p: usize| ad_pin(p, &peak);
+        let uh = self.usb_host.get(); // :1151 lambda reads m_usb_host live
+        let pin = |p: usize| ad_pin(p, &peak, uh);
         let mut d = self.adc1.borrow_mut();
         match a {
             0xffff_8408..=0xffff_840e => d.addr_r(((a - 0xffff_8408) >> 1) as usize, &pin),
@@ -1032,7 +1079,8 @@ impl Sh7042Peripherals for Hub {
         // origin: sh7042_map.hxx:704/:706 (adc1 w8 ONLY 8411/8413)
         let total = self.hn.borrow().now;
         let peak = self.ad_peak.borrow();
-        let pin = |p: usize| ad_pin(p, &peak);
+        let uh = self.usb_host.get(); // :1151 lambda reads m_usb_host live
+        let pin = |p: usize| ad_pin(p, &peak, uh);
         let mut aq = std::mem::take(&mut self.buf);
         match a {
             0xffff_8411 => self.adc1.borrow_mut().adcsr_w(v, total, &pin),
@@ -1048,7 +1096,8 @@ impl Sh7042Peripherals for Hub {
         // origin: sh7042.cpp:282 -> sh_adc.cpp:174-181
         let total = self.hn.borrow().now;
         let peak = self.ad_peak.borrow();
-        let pin = |p: usize| ad_pin(p, &peak);
+        let uh = self.usb_host.get(); // :1151 lambda reads m_usb_host live
+        let pin = |p: usize| ad_pin(p, &peak, uh);
         let mut aq = std::mem::take(&mut self.buf);
         let e = self.adc0.borrow_mut().internal_update(current_time, total, &pin, &mut aq);
         if !aq.is_empty() {
@@ -1061,7 +1110,8 @@ impl Sh7042Peripherals for Hub {
         // origin: sh7042.cpp:283-284 (die-A — sh7042.rs gates on m_die_a)
         let total = self.hn.borrow().now;
         let peak = self.ad_peak.borrow();
-        let pin = |p: usize| ad_pin(p, &peak);
+        let uh = self.usb_host.get(); // :1151 lambda reads m_usb_host live
+        let pin = |p: usize| ad_pin(p, &peak, uh);
         let mut aq = std::mem::take(&mut self.buf);
         let e = self.adc1.borrow_mut().internal_update(current_time, total, &pin, &mut aq);
         if !aq.is_empty() {
@@ -1480,10 +1530,20 @@ impl Sh7042Peripherals for Hub {
         0 // unreachable: Ctx intercepts 0xf00000..=0xf0003f
     }
     fn sci4_w8(&mut self, _a: u32, _v: u8) {}
-    fn usb_r8(&mut self, _sel: u32) -> u8 {
-        0 // M7 (mu2000.cpp:979 usb_r)
+    fn usb_r8(&mut self, sel: u32) -> u8 {
+        // mu2000.cpp:1011 -> usb_r (mu2000.cpp:1359-1369) — M7 `USB host`
+        // row. Width demotion (word = r8 pair on the same window,
+        // membus.h:75/:81) is the bus arm (sh7042.rs Dev::Usb); `sel` may
+        // exceed 1 exactly like disk (only `sel & 1` is tested there).
+        // The disk's mid-instruction execute_set_input(3,0) (:1367) rides
+        // the Evt FIFO; the per-instruction pump applies it at the same
+        // post-execute m_test_irq boundary (module-doc note).
+        let mut irq = QIrq { q: &self.q };
+        self.usb.borrow_mut().r(sel, &mut irq)
     }
-    fn usb_w8(&mut self, _sel: u32, _v: u8) {}
+    fn usb_w8(&mut self, sel: u32, v: u8) {
+        self.usb.borrow_mut().w(sel, v) // mu2000.cpp:1012 -> :1371-1378
+    }
     fn ledsw_r8(&mut self) -> u8 {
         0 // unreachable: Ctx intercepts 0xc80000
     }
@@ -1566,7 +1626,8 @@ impl Sh2Bus for Ctx<'_> {
         match a {
             LED_ADDR => self.ledsw_r(), // mu2000.cpp:929 ledsw_r()
             D80_ADDR => *self.d80,       // mu2000.cpp:942 (m_d80)
-            USB_BASE..=USB_END => 0,     // M7 usb_r stand-in
+            // USB window: NO intercept since the M7 row — falls to the bus
+            // Dev::Usb arm -> Hub::usb_r8 (disk lambda mu2000.cpp:1011).
             _ => self.bus.read_byte(a),  // regions + internal (Hub wired)
         }
     }
@@ -1597,7 +1658,11 @@ impl Sh2Bus for Ctx<'_> {
                 let lo = *self.d80 as u16;
                 (hi << 8) | lo
             }
-            USB_BASE..=USB_END => 0, // M7 usb_r stand-in (usb_r(0)|usb_r(1) = 0)
+            // USB word: falls to the bus — Dev::Usb r8-pair demotion
+            // (membus.h:81, TWO real handler calls — hi=usb_r(0) CLEARS
+            // have and drops IRQ3 before lo=usb_r(1) reads the status;
+            // faithful to the disk lambda pair, sh7042.rs :1116-1124)
+            // M7 usb.rs row.
             // ROM/RAM/DRAM/IRAM regions + internal register space + card
             // windows (CONTROL keeps its literal 0xff inside the bus,
             // mu2000.cpp:960) + SWP stubs — all through the membus.h port.
@@ -1640,7 +1705,8 @@ impl Sh2Bus for Ctx<'_> {
             CARD_DATA_BASE..=CARD_DATA_END => {} // M4 smartmedia data stub
             CARD_CTRL_BASE..=CARD_CTRL_END => {} // M4 (read 0xff stays in bus)
             // SWP falls through to the bus (Dev::Swpm/Swps -> Hub::swp_w8) :921-922
-            USB_BASE..=USB_END => {}      // M7 usb_w (mu2000.cpp:980)
+            // USB window: NO intercept since the M7 row — bus Dev::Usb ->
+            // Hub::usb_w8 (disk lambda mu2000.cpp:1012 usb_w(a-0xf80000))
             _ => self.bus.write_byte(a, v),
         }
     }
@@ -1744,6 +1810,123 @@ impl InstructionHook for RunHook {
 // ---------------------------------------------------------------------------
 // Machine
 // ---------------------------------------------------------------------------
+
+/// origin: mu2000.cpp:336-338 `#define SLAVE_SPINS 20000` — spin this many
+/// empty polls before parking on `go.wait` (a block gap in a DAW would burn
+/// a core otherwise; between samples of one block the wait is sub-µs and
+/// stays spinning — 「まず回して待つ。眠っていては 44100 回/秒には間に
+/// 合わない」mu2000.cpp:350-355).
+const SLAVE_SPINS: u32 = 20_000;
+
+/// origin: mu2000.cpp:66 `static std::atomic<int> g_live_instances{0}` —
+/// ++ in the ctor (:70), -- in the dtor (:289); bounds the thread fan-out.
+static LIVE_INSTANCES: AtomicI32 = AtomicI32::new(0);
+
+/// origin: mu2000.cpp:299-307 `threaded_max()` — static-once; env
+/// `SMU2000_THREADED_MAX` (atoi, clamped ≥0) else
+/// `max(1, hardware_concurrency/4)`. DEVIATION: `available_parallelism()`
+/// instead of `std::thread::hardware_concurrency()` (honors the process
+/// affinity mask; same value when unrestricted — the disk rule is 「台数が
+/// 論理コア数の 1/4 以下のときだけ別スレッド」).
+fn threaded_max() -> i32 {
+    static N: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        if let Ok(e) = std::env::var("SMU2000_THREADED_MAX") {
+            c_atoi(&e).max(0) // :303 std::max(0, std::atoi(e))
+        } else {
+            let hc = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+            ((hc as i32) / 4).max(1) // :304
+        }
+    })
+}
+
+/// C `atoi` prefix parse (blocktime.rs:136 helper, local copy so the
+/// machine crate stays dependency-free like mu2000.cpp using ::atoi).
+fn c_atoi(s: &str) -> i32 {
+    let t = s.trim_start();
+    let (neg, digits) = match t.strip_prefix('-') {
+        Some(d) => (true, d),
+        None => (false, t.strip_prefix('+').unwrap_or(t)),
+    };
+    let mut v: i64 = 0;
+    for c in digits.bytes() {
+        if !c.is_ascii_digit() {
+            break;
+        }
+        v = v * 10 + (c - b'0') as i64;
+        if v > i32::MAX as i64 {
+            v = i32::MAX as i64;
+        }
+    }
+    if neg {
+        -(v as i32)
+    } else {
+        v as i32
+    }
+}
+
+/// The slave thread's captured pointers — the disk lambda capture `[this]`
+/// (mu2000.cpp:333) split into its members:
+/// - `swp`: `m_swps` (`Rc<RefCell<Swp30>>` interior — the RcBox never
+///   moves while a strong reference exists; mu2000.cpp:922/:370),
+/// - `wave`: `m_swps.set_wave_rom(m_wave->data(), size())` (mu2000.cpp:410
+///   — pinned at load; bins never reassign `Machine::wave` afterwards),
+/// - `sintab`: `m_swps.set_sintab(...)` (mu2000.cpp:419, via
+///   `Machine::set_sintab_pin`).
+/// SAFETY: the go/done release/acquire handshake (mu2000.cpp:3450-3455 /
+/// :357-371) makes thread ownership EXCLUSIVE per sample — see the field
+/// notes on `Machine::slave_*`. The RefCell borrow flag and all SWP state
+/// transfer through the publish/wait pair, so nothing ever races; the disk
+/// is the identical object graph with `m_swps` shared by both threads.
+struct SlaveRaws {
+    swp: *const RefCell<Swp30>,
+    wave: *const u8,
+    wave_len: usize,
+    sintab: *const u16,
+    sintab_len: usize,
+}
+unsafe impl Send for SlaveRaws {}
+
+/// `s32 m_slave_l, m_slave_r` (mu2000.h:943) behind the handshake.
+/// SAFETY: written by the slave immediately before the `done` release,
+/// read by the master immediately after the `done` acquire
+/// (mu2000.cpp:369-371 / :3454-3457) — the release/acquire pair orders
+/// every access; nothing is ever concurrent.
+pub struct SlaveOutCell(UnsafeCell<(i32, i32)>);
+unsafe impl Send for SlaveOutCell {}
+unsafe impl Sync for SlaveOutCell {}
+impl SlaveOutCell {
+    #[inline]
+    fn set(&self, v: (i32, i32)) {
+        unsafe { *self.0.get() = v }; // m_slave_l = ...; m_slave_r = ...
+    }
+    #[inline]
+    fn get(&self) -> (i32, i32) {
+        unsafe { *self.0.get() } // ls = m_slave_l; rs = m_slave_r
+    }
+}
+
+/// The sleeper's wake target for the `atomic::wait/notify` stand-in
+/// (disk mu2000.cpp:363 `m_slave_go.wait(seen)` / :325/:3452
+/// `notify_one` — `atomic_wait` is not stable on this rustc, so the park
+/// carries the sleeper and the master's `kick_slave` (unpark) carries the
+/// wake-up; µs-class latency, same "眠っていたら起こす" behavior).
+/// SAFETY: the Option is WRITTEN exactly once per thread — the slave's
+/// very first act, before `parked` is ever set true — and READ by the
+/// master only when `parked` is observed true (the slave's
+/// `parked.store(Release)` orders the write; the master's `Acquire` load
+/// gives the happens-before). Between threads the slot is reset by the
+/// master alone, AFTER join / BEFORE spawn. Nothing is ever concurrent.
+pub struct SlaveWakeCell(UnsafeCell<Option<std::thread::Thread>>);
+unsafe impl Send for SlaveWakeCell {}
+unsafe impl Sync for SlaveWakeCell {}
+
+/// origin: mu2000.h:935-943 — the slave-thread handoff. 「合図は atomic の
+/// 回し合いで、錠は使わない」: go/done rotate through atomics only, no
+/// lock; 44100 handoffs/second so the slave spins before it parks. The
+/// four counters are MACHINE members (mu2000.h:941-943) and survive
+/// stop/start cycles here exactly as on disk — `apply_threading` re-arms
+/// from the CURRENT go count (mu2000.cpp:330-332), never re-running a tag.
 pub struct Machine {
     /// compat clock/timer queue (mu2000.h `running_machine m_machine`)
     pub rm: RunningMachine,
@@ -1829,6 +2012,46 @@ pub struct Machine {
     /// `write_sci_tx<0>` devcb call, mu2000.cpp:1179). Preallocated to the
     /// sci.rs ring bound — no allocation in run_cycles (Invariant 6 shape)
     tx_pin_buf: Vec<(u8, bool)>, // sci.rs:1049-1055 poll_pin sink
+    /// reusable SCI irq-FIFO drain buffer for the fast_midi head sync
+    /// (run_cycles; same no-alloc shape as tx_pin_buf)
+    sci_irq_buf: Vec<i32>,
+    // ---- threaded slave (M8; mu2000.h:935-944) --------------------------
+    /// `std::thread m_slave_thread` (mu2000.h:937) — `slave.is_some()`
+    /// == `m_slave_thread.joinable()` (`threaded()`, mu2000.h:254)
+    pub slave: Option<JoinHandle<()>>,
+    /// `std::atomic<u64> m_slave_go{0}` (mu2000.h:941). Arc only so the
+    /// spawned closure can own a handle to the SAME counter the machine
+    /// publishes (the disk thread shares `this`; Rust closures need a
+    /// 'static handle — the object stays a Machine member, mu2000-
+    /// member-for-member otherwise).
+    pub slave_go: Arc<AtomicU64>,
+    /// `std::atomic<u64> m_slave_done{0}` (mu2000.h:941)
+    pub slave_done: Arc<AtomicU64>,
+    /// `std::atomic<bool> m_slave_quit{false}` (mu2000.h:942)
+    pub slave_quit: Arc<AtomicBool>,
+    /// `s32 m_slave_l, m_slave_r = 0` (mu2000.h:943) — slave writes, then
+    /// releases `done` (mu2000.cpp:369-371); master acquire-spins then
+    /// reads (:3454-3457). Never touched while the other side runs.
+    /// (Wrapper cell because `Arc<UnsafeCell>` alone is not Send; the
+    /// SAFETY argument is identical to `SlaveRaws`.)
+    pub slave_out: Arc<SlaveOutCell>,
+    /// DEVIATION support members for the park/unpark stand-in (see
+    /// `SlaveWakeCell`): the futex word's "someone sleeps here" bit and
+    /// the wake target. Not on disk (C++ futexes are invisible).
+    pub slave_parked: Arc<AtomicBool>,
+    pub slave_waker: Arc<SlaveWakeCell>,
+    /// `bool m_want_threaded = false` (mu2000.h:938)
+    want_threaded: bool,
+    /// `u32 m_thread_check = 0` (mu2000.h:939) — instance-count re-check
+    /// every 8192 samples (mu2000.cpp:3226-3227)
+    thread_check: u32,
+    /// sin table pinned for the SWP30 devices — the deferred
+    /// `set_sintab_rom` glue (mu2000.cpp:413-419). The bins call
+    /// `set_sintab_pin` right after `roms::load_sintab`, exactly where the
+    /// disk pins `m_swpm/m_swps.set_sintab` (:418-419). Only the slave
+    /// thread dereferences it (SlaveCtl::sintab), under the handshake.
+    sintab_pin: *const u16,
+    sintab_len: usize,
 }
 
 impl Machine {
@@ -1840,6 +2063,9 @@ impl Machine {
     // the Hub below, sci4 :78, set_clock_hz :81, RAM zero-fill inside
     // Sh7042Bus::new mu2000.cpp:85-87, build_bus :103/712-997)
     pub fn new(prog: Vec<u8>) -> Machine {
+        // mu2000.cpp:70 `g_live_instances++` (ctor) — bounds the slave
+        // thread fan-out via `threaded_max()` (mu2000.cpp:318).
+        LIVE_INSTANCES.fetch_add(1, Ordering::SeqCst); // :++ is seq_cst
         let mut rm = RunningMachine::new();
         rm.set_clock_hz(CPU_HZ); // mu2000.cpp:81 — before any timer exists
         let mut soc = Sh7042::new_a(CPU_HZ, prog); // mu2000.cpp:72 (SH7043A, die_a)
@@ -1871,6 +2097,10 @@ impl Machine {
         let swps = Rc::new(RefCell::new(Swp30::new())); // slave @0x802000
         let swp_sink = Rc::new(RefCell::new(SwpSink { f: None, reads: false }));
         let swp_wait = Rc::new(RefCell::new(0u64)); // mu2000.h:925 m_swp_wait = 0
+        // mu2000.h:1021-1022 m_usb + m_usb_host (M7 row) — born inside Midi
+        // (the paired receiver half + state stream live there), SHARED with
+        // the Hub bus arms below (the disk lambdas mu2000.cpp:1011-1012).
+        let midi = midi::Midi::new(); // mu2000.h:990-1015 (every field explicit)
 
         // build_bus internal wiring (mu2000.cpp:984-995): the internal
         // register window of the bus dispatches into the Hub.
@@ -1900,6 +2130,8 @@ impl Machine {
             swps: Rc::clone(&swps),
             swp_sink: Rc::clone(&swp_sink),
             swp_wait: Rc::clone(&swp_wait),
+            usb: Rc::clone(&midi.usb),         // mu2000.h:1021 (shared M7)
+            usb_host: Rc::clone(&midi.usb_host), // :1022 (AN4 lambda :1151)
             buf: Vec::new(),
         }));
 
@@ -1952,8 +2184,24 @@ impl Machine {
             trace_on: false,
             wave: Vec::new(),
             ad_in: [0, 0], // mu2000.h:868 = {}
-            midi: midi::Midi::new(), // mu2000.h:990-1010 (every field explicit)
+            midi, // mu2000.h:990-1015 (built above; the usb Rcs are shared)
             tx_pin_buf: Vec::with_capacity(smu_sh2::periph::sci::PIN_RING), // sci.rs:114
+            sci_irq_buf: Vec::with_capacity(8), // ctor prealloc; reused drained
+            // mu2000.h:937-943 threaded slave — every member explicit. The
+            // thread is default-constructed (NOT joinable); m_want_threaded
+            // = false; m_thread_check = 0; go/done = 0; quit = false;
+            // m_slave_l/m_slave_r = 0 (:369 re-zeroes them per run too).
+            slave: None,
+            slave_go: Arc::new(AtomicU64::new(0)), // mu2000.h:941
+            slave_done: Arc::new(AtomicU64::new(0)), // :941
+            slave_quit: Arc::new(AtomicBool::new(false)), // :942
+            slave_out: Arc::new(SlaveOutCell(UnsafeCell::new((0, 0)))), // :943
+            slave_parked: Arc::new(AtomicBool::new(false)), // stand-in state
+            slave_waker: Arc::new(SlaveWakeCell(UnsafeCell::new(None))), // stand-in state
+            want_threaded: false, // mu2000.h:938
+            thread_check: 0,      // mu2000.h:939
+            sintab_pin: std::ptr::null(), // set_sintab_rom NOT called yet (:416-417)
+            sintab_len: 0,
         }
     }
 
@@ -1986,10 +2234,27 @@ impl Machine {
         // :1053 m_cc_last memset — MIDI CC cache (M4 row, no boot effect).
         // :1061-1064 cable reset (midi row; disk order: BEFORE lcd.reset
         // :1126). Queues deliberately NOT cleared on disk — bytes survive.
+        // :1086-1091 (M37640 host-present comment) — cmd queue and cur_cmd
+        // reset BEFORE the cable loop (disk order; queues survive otherwise).
+        {
+            let mut u = self.midi.usb.borrow_mut();
+            u.cmd.clear(); // :1090 m_usb.cmd.clear()
+            u.cur_cmd = false; // :1091
+        }
+        // :1092-1096 cable reset (midi row; disk order: BEFORE lcd.reset
+        // :1158). Queues deliberately NOT cleared on disk — bytes survive.
         self.midi.reset_cables();
-        // :1058-1059 m_usb.cmd.clear()/cur_cmd=false + :1065-1067 F4
-        // host-online push — USB host (M7); m_usb_host=false here so the
-        // push does not fire; cmd is born empty (midi.rs UsbIn::new).
+        // :1097-1099 — 実機の M37640 は、PC に繋がっていると「ホストが居る」を
+        // 知らせてくる（状態の bit6 を立てて F4 03 01 01 01。0x43810 が受け、
+        // 0x43DAD1 を 1 にする）。これが来ないと HOST SELECT USB の firmware は
+        // 0x1167CE で「HOST Is Offline!」を出す (:1086-1089). set_usb_host(true)
+        // must have fired BEFORE this reset (mu2000.h:218-220).
+        if self.midi.usb_host.get() {
+            let mut u = self.midi.usb.borrow_mut();
+            for b in [0xf4u8, 0x03, 0x01, 0x01, 0x01] {
+                u.cmd.push_back(b); // :1098
+            }
+        }
         // :1083-1122 read_porta/read_adc bindings — static Hub closures.
         self.lcd.borrow_mut().reset(); // :1126 m_lcd.reset()
         // :1128-1132 sci4 write_irq<0/1/3> bindings — realized by
@@ -2244,19 +2509,208 @@ impl Machine {
         }
     }
 
+    /// origin: mu2000.cpp:413-419 `set_sintab_rom` (the deferred glue —
+    /// disk pins `m_swpm/m_swps.set_sintab(m_sintab->data(), size())` at
+    /// load; the master keeps getting the table through `run_sample_pair`'s
+    /// argument as before). Bins call this right after `roms::load_sintab`
+    /// (render.cpp:299-300 / live.cpp:496-497 seams). SAFETY: the caller
+    /// keeps the buffer alive as long as it may run threaded — every bin
+    /// holds it for the process lifetime (== disk's `m_sintab` member).
+    pub fn set_sintab_pin(&mut self, t: &[u16]) {
+        self.sintab_pin = t.as_ptr(); // empty pins a dangling-but-unused ptr;
+        self.sintab_len = t.len(); //   the slave rebuilds `&[]` when len==0
+    }
+
+    /// origin: mu2000.h:253 / mu2000.cpp:309-313 `set_threaded`
+    pub fn set_threaded(&mut self, on: bool) {
+        self.want_threaded = on; // :311
+        self.apply_threading(); // :312
+    }
+
+    /// origin: mu2000.h:254 `threaded()` — `m_slave_thread.joinable()`
+    #[inline]
+    pub fn threaded(&self) -> bool {
+        self.slave.is_some()
+    }
+
+    /// :325/:3452 `m_slave_go.notify_one()` stand-in — 「眠っていたら起こす。
+    /// 起きていれば素通り」: unpark iff parked (µs wake; while the slave
+    /// is spinning the call is a relaxed-load no-op, same "素通り").
+    fn kick_slave(&self) {
+        if self.slave_parked.load(Ordering::Acquire) {
+            // SAFETY: see SlaveWakeCell — a true `parked` is release-ordered
+            // AFTER the slave wrote its handle, so this read has a
+            // happens-before with the only write of the current thread.
+            if let Some(t) = unsafe { &*self.slave_waker.0.get() }.as_ref() {
+                t.unpark();
+            }
+        }
+    }
+
+    /// origin: mu2000.cpp:315-334 `apply_threading` — 「頼まれていて、台数が
+    /// 境を超えていなければ別スレッドにする。そうでなければ 1 本に戻す」
+    fn apply_threading(&mut self) {
+        // :318 (relaxed load like disk; instances counted by new/Drop)
+        let on = self.want_threaded && LIVE_INSTANCES.load(Ordering::Relaxed) <= threaded_max();
+        if on == self.threaded() {
+            return; // :319-320
+        }
+        if !on {
+            // :322-328 — raise quit, kick the sleeper, join, clear quit.
+            // operator= / operator++ on disk are seq_cst; mirrored.
+            self.slave_quit.store(true, Ordering::SeqCst); // :323
+            self.slave_go.fetch_add(1, Ordering::SeqCst); // :324
+            self.kick_slave(); // :325 (park/unpark stand-in)
+            if let Some(h) = self.slave.take() {
+                let _ = h.join(); // :326 (m_slave_thread.join())
+            }
+            self.slave_quit.store(false, Ordering::SeqCst); // :327
+            // stand-in housekeeping (master-only, thread joined):
+            self.slave_parked.store(false, Ordering::SeqCst);
+            unsafe { *self.slave_waker.0.get() = None };
+            return;
+        }
+        // :330-333 合図の数は前に回した分だけ進んでいるので、今の数から待ち始める
+        // (the counters SURVIVE stop/start — re-arm from the CURRENT go, so
+        // an already-consumed tag is never re-run: 「0 からだと着いた途端に
+        // 1 サンプル余計に回す」)
+        let seen = self.slave_go.load(Ordering::Acquire); // :331
+        self.slave_done.store(seen, Ordering::Release); // :332
+        // stand-in housekeeping before spawn (master-only):
+        self.slave_parked.store(false, Ordering::SeqCst);
+        unsafe { *self.slave_waker.0.get() = None };
+        // mu2000.cpp:333 `m_slave_thread = std::thread([this, seen]{ slave_loop(seen); })`
+        // — here the captured `this` splits into the member atomics + the
+        // stable Rc<RefCell<Swp30>> interior + the pinned ROM pointers.
+        let go = Arc::clone(&self.slave_go); // mu2000.h:941 (shared handle)
+        let done = Arc::clone(&self.slave_done); // :941
+        let quit = Arc::clone(&self.slave_quit); // :942
+        let out = Arc::clone(&self.slave_out); // :943 m_slave_l/m_slave_r
+        let parked = Arc::clone(&self.slave_parked); // wait-stand-in bit
+        let waker = Arc::clone(&self.slave_waker); // wait-stand-in target
+        let raw = SlaveRaws {
+            swp: Rc::as_ptr(&self.swps), // RcBox value — fixed heap address
+            wave: self.wave.as_ptr(),
+            wave_len: self.wave.len(),
+            sintab: self.sintab_pin,
+            sintab_len: self.sintab_len,
+        };
+        self.slave = Some(std::thread::spawn(move || {
+            Self::slave_loop(seen, go, done, quit, out, parked, waker, raw)
+        }));
+    }
+
+    /// origin: mu2000.cpp:341-373 `slave_loop` — wait (spin, then park),
+    /// run ONE slave sample per published tag, hand the DAC pair to the
+    /// master through `out` before the `done` release. The macOS
+    /// workgroup re-join (:346-349, realtime.h) has no Windows arm —
+    /// `realtime_join` is a no-op there (src/compat/realtime.h).
+    fn slave_loop(
+        mut seen: u64,
+        go: Arc<AtomicU64>,
+        done: Arc<AtomicU64>,
+        quit: Arc<AtomicBool>,
+        out: Arc<SlaveOutCell>,
+        parked: Arc<AtomicBool>,
+        waker: Arc<SlaveWakeCell>,
+        raw: SlaveRaws,
+    ) {
+        // park/unpark stand-in setup (see SlaveWakeCell): publish MY handle
+        // once, before `parked` can ever read true.
+        unsafe { *waker.0.get() = Some(std::thread::current()) };
+        // SAFETY: see the Machine-level SAFETY note — the handshake below
+        // is byte-for-byte the disk one (:357-371), so these pointers are
+        // only ever touched while this thread owns the SWP.
+        let swp: &RefCell<Swp30> = unsafe { &*raw.swp };
+        let wave: &[u8] = unsafe {
+            if raw.wave_len == 0 {
+                &[] // Wave::new maps empty to its own zero stand-in (fetch.rs:35)
+            } else {
+                std::slice::from_raw_parts(raw.wave, raw.wave_len)
+            }
+        };
+        let sintab: &[u16] = unsafe {
+            if raw.sintab_len == 0 {
+                &[] // disk :416-417 — null sintab never pinned, device reads 0
+            } else {
+                std::slice::from_raw_parts(raw.sintab, raw.sintab_len)
+            }
+        };
+        loop {
+            // :356-364 合図を待つ (まず回して待つ; SLAVE_SPINS 空振りで眠る)
+            let mut spins = 0u32;
+            while go.load(Ordering::Acquire) == seen {
+                if quit.load(Ordering::Relaxed) {
+                    return; // :358-359
+                }
+                spins += 1;
+                if spins < SLAVE_SPINS {
+                    std::hint::spin_loop(); // :361 smu2000::cpu_pause
+                } else {
+                    // :363 `m_slave_go.wait(seen, acquire)` — park/unpark
+                    // stand-in (atomic_wait is not stable here; see
+                    // SlaveWakeCell). Nothing feeds the emulation from the
+                    // clock — the machine's ONLY clock stays the sample
+                    // count; parking is scheduling, not state. Once asleep
+                    // the master's `kick_slave` (publish side) wakes it in
+                    // µs, so no sample ever stalls past a thread wake-up.
+                    parked.store(true, Ordering::Release);
+                    if go.load(Ordering::Acquire) == seen && !quit.load(Ordering::Relaxed) {
+                        std::thread::park();
+                    }
+                    parked.store(false, Ordering::SeqCst);
+                }
+            }
+            seen = go.load(Ordering::Acquire); // :365
+            if quit.load(Ordering::Relaxed) {
+                return; // :366-367
+            }
+            // :369-371 m_slave_l = m_slave_r = 0; run; publish done
+            out.set((0, 0));
+            let w = Wave::new(wave); // zero-alloc wrapper (fetch.rs:33)
+            let (l, r) = swp.borrow_mut().run_sample(sintab, &w); // :370
+            out.set((l, r));
+            done.store(seen, Ordering::Release); // :371
+        }
+    }
+
+
     /// origin: mu2000.cpp:3401-3453 — the per-sample SWP pair advance.
-    /// No slave-thread path (:3404-3412 is the threaded arm; M8 owns it —
-    /// the else-arm :3413-3416 is transliterated). CPU/cycle debt stays in
+    /// Threaded arm LIVE (M8): :3449-3457 publishes the tag, runs the
+    /// master, spins on `done`; the else-arm (:3458-3461) stays sequential.
+    /// CPU/cycle debt stays in
     /// the run-loop row (run.rs); this is the pure DSP half of
-    /// `mu2000::run_sample`. Returns the MASTER DAC pair (:3450-3453 —
+    /// `mu2000::run_sample`. Returns the MASTER DAC pair (:3495-3498 —
     /// the slave DAC is wired to nothing).
     pub fn run_sample_pair(&mut self, sintab: &[u16]) -> (i32, i32) {
-        // :3403 s32 lm = 0, rm = 0, ls = 0, rs = 0;
-        // (no joinable thread — :3414-3415 sequential order master-first)
+        // :3225-3227 台数が変わっていたら見直す (8192 サンプルごと;
+        // m_want_threaded short-circuits the counter like disk)
+        if self.want_threaded {
+            self.thread_check = self.thread_check.wrapping_add(1); // ++m_thread_check
+            if self.thread_check & 0x1fff == 0 {
+                self.apply_threading();
+            }
+        }
+        // :3448 s32 lm = 0, rm = 0, ls = 0, rs = 0;
         let wave = std::mem::take(&mut self.wave); // borrow seam, no alloc
         let w = Wave::new(&wave);
-        let (lm, rm) = self.swpm.borrow_mut().run_sample(sintab, &w); // :3414
-        let (_ls, _rs) = self.swps.borrow_mut().run_sample(sintab, &w); // :3415
+        let (lm, rm, _ls, _rs) = if let Some(_st) = self.slave.as_ref() {
+            // :3449-3457 threaded arm — publish, run master, spin, collect
+            let tag = self.slave_go.load(Ordering::Relaxed).wrapping_add(1); // :3450
+            self.slave_go.store(tag, Ordering::Release); // :3451
+            self.kick_slave(); // :3452 眠っていたら起こす。起きていれば素通り
+            let (lm, rm) = self.swpm.borrow_mut().run_sample(sintab, &w); // :3453
+            while self.slave_done.load(Ordering::Acquire) != tag {
+                std::hint::spin_loop(); // :3454-3455 cpu_pause spin (錠は使わない)
+            }
+            let (ls, rs) = self.slave_out.get(); // :3456-3457
+            (lm, rm, ls, rs)
+        } else {
+            // :3458-3461 else-arm — sequential, master-first (:3414-3415 note)
+            let (lm, rm) = self.swpm.borrow_mut().run_sample(sintab, &w); // :3459
+            let (ls, rs) = self.swps.borrow_mut().run_sample(sintab, &w); // :3460
+            (lm, rm, ls, rs)
+        };
         self.wave = wave;
         // :3433-3434 slave melo(i) -> master meli(i), i = 0..13 (same index;
         // the :3427 "outputs 4..17" comment is legacy MAME naming, NOT the
@@ -2328,6 +2782,32 @@ impl Machine {
     /// origin: mu2000.h:165 `midi_dropped`
     pub fn midi_dropped(&self) -> u64 {
         self.midi.dropped
+    }
+
+    /// origin: mu2000.h:120 `set_fast_midi` — applied by every tool before
+    /// reset via `ui::apply_engine_options` (options.h:52; render.cpp:377).
+    /// ON: the pump injects queued bytes straight into the SCI RDR
+    /// (mu2000.cpp:1408-1416) and the run_cycles MIDI chunk clamp (:1234)
+    /// opens; pending/idle count the SCI byte-in-flight instead of the wire
+    /// bit (mu2000.h:184-207).
+    pub fn set_fast_midi(&mut self, fast: bool) {
+        self.midi.set_fast_midi(fast) // mu2000.h:120 (midi.rs)
+    }
+
+    /// origin: mu2000.h:221 `set_usb_host` — **must be called BEFORE
+    /// `reset()`** (mu2000.h:218-220: HOST SELECT is a boot-time decision;
+    /// the F4 03 01 01 01 host-online push in reset (:1097-1099) and the
+    /// ADC4 AN4 pin (mu2000.cpp:1151, Hub::usb_host) read this value).
+    /// With it ON, ALL ports (even A/B) route through the usb_line and the
+    /// firmware answers on USB too (mu2000.h:234-236 — DIN MIDI OUT goes
+    /// silent). The same Cell backs the Hub's :1151 lambda — single truth.
+    pub fn set_usb_host(&mut self, on: bool) {
+        self.midi.usb_host.set(on) // mu2000.h:221 (midi.rs)
+    }
+    /// origin: mu2000.h:222 `usb_host()` (bootcache key + transfer,
+    /// bootcache.h:110/:202)
+    pub fn usb_host(&self) -> bool {
+        self.midi.usb_host.get()
     }
 
     /// origin: mu2000.h:168-172 `midi_queued(port)`
@@ -2416,7 +2896,8 @@ impl Machine {
             }
             idle = 0; // :1191
 
-            // :1194 midi_step(now) — the DIN bit pump (`midi lines` row).
+            // :1226 midi_step(now) — the DIN bit pump (`midi lines` row;
+            // disk re-cited 2026-10-03, +32 from the N2-era note below).
             // sh_sci.cpp:475/484 read m_cpu->current_cycles() inside the
             // RX path; no CPU ran since the loop top, but disk
             // current_cycles() OUTSIDE m_in_event is `total-1` (sh7042.h:92-98
@@ -2435,9 +2916,48 @@ impl Machine {
             }
             let mut sink = PairSci(&self.pair);
             self.midi.midi_step(now, &mut sink);
-            // :1195 usb_step(now) — M7 usb.rs row. USB-routed bytes park in
-            // midi.usb.rx (usb.rs doc: scope-safe, 0xF5-free fixtures;
-            // pending/idle accounting already matches disk :175/:216).
+            // Disk: the fast-arm `sci->receive_byte()` internal_interrupt
+            // (sh_sci.cpp:141-146) reaches the INTC SYNCHRONOUSLY inside
+            // the mu2000.cpp:1414 call at this same loop head, so the CPU
+            // sees m_test_irq at the first execute_one of the chunk below
+            // (sh2.cpp:284 post-execute check). The Rust SCI latches its
+            // vectors into an irq FIFO drained by bus-op anchors
+            // (Hub::drain) — the direct inject never touches the bus, so
+            // drain+route it here at the head, once per armed injection.
+            // Gated fast-only: the OFF wire path keeps its paired M4-era
+            // drain anchors untouched (do_rx_w vectors are reached by the
+            // firmware's own SCI bus reads on that path).
+            if self.midi.fast_midi {
+                let mut n = 0usize;
+                {
+                    let mut p = self.pair.borrow_mut();
+                    n += p.sci[0].drain_irqs(&mut self.sci_irq_buf); // sci.rs:1012
+                    n += p.sci[1].drain_irqs(&mut self.sci_irq_buf);
+                }
+                if n > 0 {
+                    self.q.borrow_mut().push_back(Evt::Irq(std::mem::take(&mut self.sci_irq_buf)));
+                    self.pump(); // route_irqs + set_internal_interrupt
+                }
+            }
+            // :1227 usb_step(now) — LIVE since the M7 `USB host` row
+            // (smu-machine/src/usb.rs). Disk guard :1323 (`!m_usb_host &&
+            // rx.empty() && !have` -> return) keeps OFF-mode runs bit-
+            // identical: with no USB traffic NEITHER IRQ line is touched.
+            // Disk has NO chunk clamp for usb (:1234-1240 is DIN-only), so
+            // a byte crossing its 2800-cycle grid mid-chunk is handed over
+            // at the NEXT loop head — the Rust inner loop returns to this
+            // head on the same chunk boundaries (P3 cpu_now sync row), so
+            // the hand-over instruction is the same one disk sees. The
+            // Evt::SetInput pushes realize the disk's synchronous
+            // execute_set_input(2/3,..) (:1341/:1349/:1355) at the same
+            // pre-chunk boundary via the pump right below.
+            {
+                let host = self.midi.usb_host.get(); // mu2000.h:1022
+                let fast = self.midi.fast_midi; // :1338 (grid collapses to 0)
+                let mut irq = QIrq { q: &self.q };
+                self.midi.usb.borrow_mut().step(now, host, fast, &mut irq);
+            }
+            self.pump();
             // :1211-1217 m_swp_wait skip — ported in place below (this loop
             // is run_cycles itself; the old "lives in run_sample_pair" note
             // was wrong and the skip was dead — piano-render root cause
@@ -2451,7 +2971,8 @@ impl Machine {
                 chunk = tmr - now; // :1200-1201
             }
             if !self.midi.fast_midi {
-                // :1202-1208 — never chunk across the next MIDI bit edge
+                // :1234-1240 — never chunk across the next MIDI bit edge;
+                // fast ON opens this clamp exactly as disk (:1234 gate)
                 for m in self.midi.lines.iter() {
                     if m.bit >= 0 || !m.queue.is_empty() {
                         let left = if m.next > now { m.next - now } else { 1 }; // :1205
@@ -2565,7 +3086,7 @@ impl Machine {
     }
 }
 
-/// The `m_cpu->sci(port)` seam for the MIDI bit pump (mu2000.cpp:1375).
+/// The `m_cpu->sci(port)` seam for the MIDI bit pump (mu2000.cpp:1407).
 /// RefCell-based so the immutable accounting forwarders (`midi_pending` /
 /// `midi_idle`) and the edge-driving pump (which takes a FRESH
 /// `borrow_mut` per edge — the pump holds no borrow across the call)
@@ -2575,7 +3096,7 @@ struct PairSci<'a>(&'a RefCell<Sh2SciPair>);
 
 impl midi::MidiSci for PairSci<'_> {
     fn rx_can_accept(&self, port: usize) -> bool {
-        // mu2000.cpp:1377 (fast arm only — M7)
+        // mu2000.cpp:1409 (fast arm — LIVE since the M7 fast_midi row)
         self.0.borrow().sci.get(port).is_some_and(|s| s.rx_can_accept()) // sci.rs:329
     }
     fn rx_byte_pending(&self, port: usize) -> bool {
@@ -2583,13 +3104,23 @@ impl midi::MidiSci for PairSci<'_> {
     }
     fn receive_byte(&mut self, port: usize, data: u8) {
         if let Some(s) = self.0.borrow_mut().sci.get_mut(port) {
-            s.receive_byte(data); // mu2000.cpp:1382 (fast inject — M7)
+            s.receive_byte(data); // mu2000.cpp:1414 (fast inject — LIVE M7)
         }
     }
     fn do_rx_w(&mut self, port: usize, state: i32) {
         if let Some(s) = self.0.borrow_mut().sci.get_mut(port) {
-            s.do_rx_w(state); // mu2000.cpp:1397/1407/1409 (sh_sci.cpp:375)
+            s.do_rx_w(state); // mu2000.cpp:1429/1439/1441 (sh_sci.cpp:375)
         }
+    }
+}
+
+/// origin: mu2000.cpp:286-290 `~mu2000` — 「set_threaded(false)」joins the
+/// slave BEFORE anything else dies (the thread holds raw pointers into the
+/// Rc'd device), then the instance count goes down (mu2000.cpp:289).
+impl Drop for Machine {
+    fn drop(&mut self) {
+        self.set_threaded(false); // :288
+        LIVE_INSTANCES.fetch_sub(1, Ordering::SeqCst); // :289 (g_live_instances--)
     }
 }
 
@@ -2684,6 +3215,123 @@ mod glue_tests {
         let sd = m.swps.borrow();
         assert_eq!(sd.mixer.meli[0], smu_swp30::mix::SERIAL_FULL_SCALE);
         assert_eq!(sd.mixer.meli[9], smu_swp30::mix::SERIAL_FULL_SCALE);
+    }
+
+    /// M8 `threaded slave` row gate: the go/done handshake must be a PURE
+    /// per-sample handoff — running the slave SWP30 on a second thread has
+    /// to leave every serialized byte identical (disk claim
+    /// 「1 本でも別スレッドでも出る音は同じ」, mu2000.cpp:297; harness
+    /// 別糸 is the same gate against the C++ binary).
+    #[test]
+    fn threaded_pair_state_eq_single() {
+        // threaded_max env clamps ≥0 (mu2000.cpp:302-303); only THIS test
+        // calls apply_threading-on in this binary, and the env is set
+        // before the OnceLock fills — so the arm must engage here
+        // regardless of core count (LIVE_INSTANCES is pinned low below:
+        // other parallel tests may hold machines).
+        std::env::set_var("SMU2000_THREADED_MAX", "4096");
+        let st: &'static mut [u16] = Box::leak(sintab0().into_boxed_slice());
+        let st: &[u16] = st;
+        let seed = |m: &mut Machine| {
+            // slave MELI 0 raw to every output (pair_interconnect pattern),
+            // master MELI 1 over-scale -> the wires carry live numbers both
+            // ways every sample; AD inputs move the slave's 6/7 lines
+            {
+                let mut d = m.swps.borrow_mut();
+                d.write16((0x10 << 6) | 0x3b, 0xffff);
+                d.write16((0x10 << 6) | 0x3c, 0);
+                d.write16((0x10 << 6) | 0x3d, 0);
+                d.set_meli(0, 0x1234_567);
+            }
+            {
+                let mut d = m.swpm.borrow_mut();
+                d.write16((0x11 << 6) | 0x3b, 0xffff);
+                d.write16((0x11 << 6) | 0x3c, 0);
+                d.write16((0x11 << 6) | 0x3d, 0);
+                d.set_meli(1, 0x7fff_ffff);
+            }
+            m.set_audio_input(0x100, -3);
+            m.set_sintab_pin(st);
+        };
+        const N: usize = 3000;
+        let mut a = Machine::new(Vec::new()); // single-threaded reference
+        seed(&mut a);
+        for _ in 0..N + 500 {
+            let _ = a.run_sample_pair(st);
+        }
+        let sa = state::save_state(&mut a);
+        let mut b = Machine::new(Vec::new());
+        seed(&mut b);
+        LIVE_INSTANCES.store(1, Ordering::Relaxed);
+        b.set_threaded(true);
+        assert!(b.threaded(), "SMU2000_THREADED_MAX must arm the slave thread");
+        for _ in 0..N {
+            let _ = b.run_sample_pair(st);
+        }
+        // tag arithmetic: exactly one published tag per sample, exactly one
+        // done per tag (:3450-3455 publish/spin == :357-371 wait/store)
+        assert_eq!(b.slave_go.load(Ordering::Relaxed), N as u64);
+        assert_eq!(b.slave_done.load(Ordering::Acquire), N as u64);
+        // stop/start leg (mu2000.cpp:319-333): stop JOINS and the counters
+        // SURVIVE; restart re-arms from the CURRENT go — an already-consumed
+        // tag is never re-run (「0 からだと着いた途端に 1 サンプル余計に」)
+        b.set_threaded(false);
+        assert!(!b.threaded());
+        // the STOP kick bumps go once (mu2000.cpp:324) — and the woken
+        // slave QUITS at :366-367 without running that tag: done stays at
+        // N, the hard proof that stop never runs an extra sample
+        assert_eq!(b.slave_go.load(Ordering::Relaxed), N as u64 + 1);
+        assert_eq!(b.slave_done.load(Ordering::Acquire), N as u64);
+        LIVE_INSTANCES.store(1, Ordering::Relaxed);
+        b.set_threaded(true); // re-arms from seen = N+1 (:331)
+        assert!(b.threaded());
+        for _ in 0..500 {
+            let _ = b.run_sample_pair(st);
+        }
+        assert_eq!(b.slave_go.load(Ordering::Relaxed), (N + 501) as u64);
+        assert_eq!(b.slave_done.load(Ordering::Acquire), (N + 501) as u64);
+        b.set_threaded(false); // Drop would do it too (mu2000.cpp:288)
+        assert_eq!(b.slave_done.load(Ordering::Acquire), (N + 501) as u64); // no extra run again
+        let sb = state::save_state(&mut b);
+        // full serialized universe (swpm+swps+midi+timers+latches): the
+        // CPU never ran (run_sample_pair only), so any byte diff here is
+        // SWP state / interconnect / an off-by-one handshake.
+        assert_eq!(sa.len(), sb.len());
+        let diff = sa.iter().zip(sb.iter()).position(|(x, y)| x != y);
+        assert_eq!(diff, None, "threaded state != single state after {}+500 samples", N);
+    }
+
+    /// field-level twin of the state-digest test (cheap to read when it
+    /// fails): master DAC + wires must track sample-for-sample.
+    #[test]
+    fn threaded_pair_dac_eq_sample_by_sample() {
+        std::env::set_var("SMU2000_THREADED_MAX", "4096");
+        let st: &'static mut [u16] = Box::leak(sintab0().into_boxed_slice());
+        let st: &[u16] = st;
+        let mut a = Machine::new(Vec::new());
+        let mut b = Machine::new(Vec::new());
+        for m in [&mut a, &mut b].iter_mut() {
+            m.swpm.borrow_mut().set_meli(1, 0x1234_567);
+            m.swps.borrow_mut().set_meli(0, -0x7654_321);
+            m.set_sintab_pin(st);
+        }
+        LIVE_INSTANCES.store(1, Ordering::Relaxed);
+        b.set_threaded(true);
+        assert!(b.threaded());
+        for _ in 0..1500 {
+            let (la, ra) = a.run_sample_pair(st);
+            let (lb, rb) = b.run_sample_pair(st);
+            assert_eq!((la, ra), (lb, rb));
+        }
+        b.set_threaded(false);
+        for i in 0..14 {
+            assert_eq!(
+                a.swpm.borrow().mixer.meli[i],
+                b.swpm.borrow().mixer.meli[i],
+                "master meli {i}"
+            );
+        }
+        assert_eq!(a.swps.borrow().meg.sample_counter, b.swps.borrow().meg.sample_counter);
     }
 
     /// M5-W2: `Adc::state` (sh_adc.cpp:380-391) — save→load→save byte

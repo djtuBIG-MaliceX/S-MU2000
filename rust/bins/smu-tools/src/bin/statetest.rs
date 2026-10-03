@@ -25,8 +25,9 @@
 // every printf string byte-verbatim, CJK included.
 //
 // Deviations (disclosed; the two-machine STATE comparison itself is exact):
-// - set_threaded(false) (:57) — cited no-op: the Rust machine is
-//   single-threaded (run_sample_pair == the :3413-3416 else-arm).
+// - set_threaded(false) (:57) — REAL call (threaded slave is LIVE since
+//   M8); this machine never threads, so disk's early-return :319-320 makes
+//   it a no-op exactly like disk.
 // - set_native_fx (:60-61) — cited no-op: the native FX engine is not
 //   built (AGENTS). The env var IS still READ (:227) exactly like disk:
 //   it only gates the mismatch-escape printf + `return 0` at :227-229;
@@ -80,13 +81,17 @@ fn boot(mu: &mut Machine, dir: &str, g: &Globals, sintab: &[u16]) -> bool {
     // and identical standin on BOTH machines either way.
     // :55-56 load_lcd_font(hd44780u_b04.bin) / standin fallback — OMITTED
     // exactly like render.rs (both machines never get a CGROM; equal).
-    // :57 set_threaded(false) — cited no-op (single-threaded build)
+    // :57 set_threaded(false) — 「突き合わせなので 1 本で回す」. REAL call
+    // (set_threaded is LIVE since M8); on this never-threaded machine it
+    // takes the :319-320 early-return, exactly like disk's no-op.
+    mu.set_threaded(false); // :57
     // :58-61 SMU2000_NATIVE_FX getenv + set_native_fx(atoi(e)) — the env
     // READ happens in main (:227 path is the only OBSERVABLE use);
     // set_native_fx itself is a cited no-op (engine not built).
     // :62 set_usb_host(g_usb_host) — **reset() の前に**. Rust seam:
-    // Machine::midi.usb_host (M7 flag row pins false; --usb sets it).
-    mu.midi.usb_host = g.usb_host; // :62 BEFORE reset()
+    // Machine::set_usb_host (M7 `USB host` row — LIVE: reset pushes the
+    // F4 03 01 01 01 host-online cmd and AN4 says USB; mu2000.h:218-220).
+    mu.set_usb_host(g.usb_host); // :62 BEFORE reset()
     mu.reset(); // :63
 
     // :65-69 const size_t limit = 30.0 * RATE; run_sample until midi_ready

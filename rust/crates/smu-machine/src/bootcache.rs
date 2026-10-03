@@ -18,7 +18,8 @@
 //   same seam as render.rs's run_sample helper.
 // - key()/load()/save() read the machine's fields directly (soc.bus.rom =
 //   m_prog mu2000.h:49, soc.bus.ram = m_ram mu2000.h:81/870, wave = m_wave
-//   :50, midi.usb_host = m_usb_host :1022 — pinned false until M7).
+//   :50, midi.usb_host = m_usb_host :1022 — LIVE Cell since M7; the key
+//   still mixes it exactly like bootcache.h:110).
 // - save()/refresh() take &mut where disk is `const` (state.rs's disclosed
 //   save_state const_cast deviation propagates).
 // - The read-error line uses the ja text table (texts_ja.h:35) and emits CRLF
@@ -101,7 +102,7 @@ pub fn key(mu: &Machine) -> u64 {
         h = mix(h, (ver >> (k * 8)) as u8);
     }
     // :110 HOST SELECT（USB か MIDI か）でも起動後の姿が変わる
-    h = mix(h, if mu.midi.usb_host { 1 } else { 0 });
+    h = mix(h, if mu.usb_host() { 1 } else { 0 }); // bootcache.h:110 (mu.usb_host())
     h
 }
 
@@ -185,7 +186,7 @@ pub fn refresh(live: &Machine, sintab: &[u16]) -> bool {
     // set_usb_host / set_nvram (size mismatch -> false; sizes match by type).
     let mut fresh = Machine::new(live.soc.bus.rom.clone()); // :199
     fresh.wave = live.wave.clone(); // :200
-    fresh.midi.usb_host = live.midi.usb_host; // :202 (sintab :201 = `sintab` param)
+    fresh.set_usb_host(live.usb_host()); // :202 (sintab :201 = `sintab` param)
     fresh.soc.bus.ram.copy_from_slice(&live.soc.bus.ram[..]); // :203 set_nvram
 
     let k = key(&fresh); // :206

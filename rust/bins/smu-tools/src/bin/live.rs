@@ -11,14 +11,29 @@
 // (:132-190), Ctrl+C clean exit + NVRAM save (:65-73, :573-591).
 //
 // Deviations (disclosed):
-// - WASAPI (run_wasapi :200-248, the default path) is the `audio out` row
-//   (M6b). Without --waveout this build runs a device-less stand-in: the SAME
-//   generator blocks, but nothing paces them — "keep no clock of your own"
-//   still holds (the machine only advances per fill block), there is just no
-//   real-time claim and no late/starved stats. --latency/--audio/--exclusive/
-//   --dump-dev/--raw/--fast-midi/--native-* are warn-ignored at parse.
-// - --single :472 / set_threaded :499: this build is single-threaded (M8);
-//   one stderr note covers both.
+// - WASAPI (run_wasapi :200-248, the default path) is the real `audio out`
+//   row now (smu-hal-win wasapi.rs, ui/audio_out.cpp): event-driven
+//   shared/exclusive, own sinc resampler, GetCurrentPadding stats.
+//   --latency/--audio/--exclusive/--dump-dev/--raw are HONORED (:462-466 +
+//   options.h:68-73). The fill bundle (Generator + Machine + sintab + debt)
+//   MOVES into the audio thread (wasapi.rs header deviation) and is
+//   reclaimed after stop() via take_fill; main reads produced/busy/worst/
+//   cushion through the GenShared atomics at the SAME points disk races
+//   gen's plain fields (:223 write, :226/:234 reads, :236-237 report).
+//   Machine holds Rc<RefCell> (lib.rs:588-607) so it is not Send:
+//   MachineBox carries one manual `unsafe impl Send` for the single-owner
+//   move/join handoff — exactly one thread touches the machine at any
+//   instant (audio thread between start and stop/join, main before/after);
+//   MIDI still crosses only via the SPSC ring (midi.rs G_MIDI, global Sync).
+// - --fast-midi/--native-* stay warn-ignored at parse (native engine not
+//   built, AGENTS).
+// - --single :472 / set_threaded :499 are LIVE (M8 `threaded slave` row):
+//   default spins the slave SWP30 on its own thread (mu2000.cpp:3449-3457,
+//   Machine::run_sample_pair threaded arm); the audio-out worker thread
+//   (audio_out.h:210 m_thread) stays as the `audio out` row built it.
+//   The slave thread is spawned BEFORE the machine moves into the audio
+//   thread — its captured pointers live in the Rc'd device / ROM buffers,
+//   not in the Machine struct, so the MachineBox move cannot disturb it.
 // - --midi-file <mid> is a RUST-ONLY seam (ledger S3: gate live with file-fed
 //   MIDI, no midisend/loopMIDI): smu_smf::load -> events fed at EXACT
 //   event-sample time through the same F5/mu_port routing as render.rs:721-748
@@ -33,13 +48,15 @@
 use smu_compat::{paths, roms};
 use smu_hal_win::midi;
 use smu_hal_win::sys;
+use smu_hal_win::wasapi::{AudioOut, Fill};
 use smu_hal_win::waveout as wo;
 use smu_machine::{nvram, Machine};
 use smu_smf::{self, Event};
 
 use std::ffi::c_void;
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
 
 // live.cpp:52 constexpr u32 RATE = 44100
 const RATE: u32 = 44100;
@@ -300,21 +317,42 @@ impl Generator {
     /// origin: live.cpp:180-189 report (period_frames param is disk-dead code;
     /// the line uses cushion_frames :188 — same here with one fewer arg)
     fn report(&self) {
-        let audio = self.produced as f64 / RATE as f64; // :182
-        let busy = self.busy_ticks as f64 / self.freq as f64; // :183
-        println!(
-            "  {:.0} 秒経過  MIDI {} バイト  CPU 使用率 {:.1}%", // :184-185
-            audio,
-            midi::bytes(), // g_midi.bytes()
-            100.0 * busy / audio
-        );
-        println!(
-            "     間に合わなかった {} 回、生成の最悪 {:.1} ms（余裕は {:.1} ms）", // :186-188
+        report_line(
+            self.freq,
+            self.produced,
+            self.busy_ticks,
+            self.worst_ticks,
+            self.cushion_frames,
             self.starved,
-            1000.0 * self.worst_ticks as f64 / self.freq as f64,
-            1000.0 * self.cushion_frames as f64 / RATE as f64
         );
     }
+}
+
+/// live.cpp:182-188 — the two report lines, split out so the WASAPI main
+/// loop (live.cpp:236-237, where the generator lives on the audio thread)
+/// prints byte-identically off the GenShared atomics
+fn report_line(
+    freq: i64,
+    produced: u64,
+    busy_ticks: u64,
+    worst_ticks: u64,
+    cushion_frames: u32,
+    starved: u64,
+) {
+    let audio = produced as f64 / RATE as f64; // :182
+    let busy = busy_ticks as f64 / freq as f64; // :183
+    println!(
+        "  {:.0} 秒経過  MIDI {} バイト  CPU 使用率 {:.1}%", // :184-185
+        audio,
+        midi::bytes(), // g_midi.bytes()
+        100.0 * busy / audio
+    );
+    println!(
+        "     間に合わなかった {} 回、生成の最悪 {:.1} ms（余裕は {:.1} ms）", // :186-188
+        starved,
+        1000.0 * worst_ticks as f64 / freq as f64,
+        1000.0 * cushion_frames as f64 / RATE as f64
+    );
 }
 
 /// origin: mu2000.cpp:3186-3189 + :3388 + :3414-3415 (render.rs:283-289 —
@@ -468,30 +506,176 @@ fn run_waveout(
     0 // :319
 }
 
-/// stand-in for run_wasapi (live.cpp:200-248) until the `audio out` row (M6b):
-/// same generator + same quit/seconds loop (:226-240), no device, no pacing.
-fn run_standin(gen: &mut Generator, m: &mut Machine, sintab: &[u16], debt: &mut u64, seconds: f64, frames: i32) -> i32 {
-    eprintln!("(rust live: WASAPI 共有モードは M6b 未実装 — デバイス無しで生成します。実際に鳴らすには --waveout)");
-    if seconds > 0.0 {
-        println!("{seconds:.1} 秒で終了"); // :217-218
+// ---- run_wasapi (live.cpp:200-248) over smu-hal-win wasapi.rs ----
+
+/// live.cpp:223/:226/:234-237 — disk races the generator's PLAIN counters
+/// between main and the audio thread; Rust mirrors the shape with atomics
+/// (Relaxed everywhere == no ordering guarantee beyond eventual visibility,
+/// exactly what the C++ plain-field races provide. every field explicit).
+struct GenShared {
+    freq: i64,               // :143 — immutable after ctor, read by both threads
+    produced: AtomicU64,     // :136
+    busy_ticks: AtomicU64,   // :136
+    worst_ticks: AtomicU64,  // :136
+    cushion_frames: AtomicU32, // :138 — main writes once (:223), fill reads
+}
+
+/// Machine holds Rc<RefCell> (smu-machine/src/lib.rs:588-607) so it is not
+/// Send on its own. SAFETY (disclosed deviation): single-owner handoff —
+/// the Machine MOVES into the audio thread at start() and comes back
+/// through the join at stop()/take_fill; exactly one thread touches it at
+/// any instant. While running, main only reads the GenShared atomics; MIDI
+/// crosses only via the SPSC ring (midi.rs G_MIDI global, winmm callback ->
+/// audio thread, the same direction as disk's g_midi).
+struct MachineBox(Machine);
+unsafe impl Send for MachineBox {}
+
+/// the fill bundle that MOVES into the audio thread — disk's lambda
+/// `[&gen](s16 *o, u32 n) { gen.fill(o, n); }` (live.cpp:207) stayed on
+/// main's stack; Rust returns it back via take_fill after stop()
+/// (wasapi.rs header deviation).
+struct WasapiFill {
+    gen: Generator,
+    m: MachineBox,
+    sintab: Vec<u16>,
+    debt: u64,
+    sh: Arc<GenShared>,
+}
+
+impl Fill for WasapiFill {
+    /// origin: live.cpp:207 the fill lambda -> generator::fill (:147-178)
+    fn fill(&mut self, out: &mut [i16]) {
+        self.gen.cushion_frames = self.sh.cushion_frames.load(Ordering::Relaxed); // :223
+        self.gen.fill(&mut self.m.0, &self.sintab, &mut self.debt, out); // :147
+        self.sh.produced.store(self.gen.produced, Ordering::Relaxed); // :177
+        self.sh.busy_ticks.store(self.gen.busy_ticks, Ordering::Relaxed); // :168
+        self.sh.worst_ticks.store(self.gen.worst_ticks, Ordering::Relaxed); // :169
+    }
+}
+
+/// dummy Fill, only to reach the static AudioOut::list() (audio_out.cpp:96-121)
+struct NoFill;
+impl Fill for NoFill {
+    fn fill(&mut self, _out: &mut [i16]) {} // never called
+}
+
+/// what comes back out of the audio thread (main reads gen.produced/
+/// busy_ticks/rec at live.cpp:558-559/:573 after run_wasapi returns).
+/// sintab+debt are NOT returned: disk main never touches them again
+/// (:573 rec, :578 nvram, :581 counters — disk's debt lives inside mu and
+/// dies with main too); they drop with the bundle.
+struct WasapiOut {
+    rc: i32,
+    gen: Generator,
+    m: Machine,
+}
+
+/// origin: live.cpp:200-248 run_wasapi — WASAPI 共有モード。ui::audio_out に
+/// 任せる (:194-198). Device pacing/cushion/latency all come from the HAL.
+#[allow(clippy::too_many_arguments)]
+fn run_wasapi(
+    gen: Generator,
+    m: Machine,
+    sintab: Vec<u16>,
+    debt: u64,
+    seconds: f64,
+    latency_ms: i32,
+    exclusive: bool,
+    dump_dev: Option<&str>,
+    audio_dev: &str,
+    raw: bool,
+) -> WasapiOut {
+    let sh = Arc::new(GenShared {
+        freq: gen.freq, // the generator's own QPF (:143) shared for report_line
+        produced: AtomicU64::new(0),
+        busy_ticks: AtomicU64::new(0),
+        worst_ticks: AtomicU64::new(0),
+        cushion_frames: AtomicU32::new(0),
+    });
+    let mut out = AudioOut::new(); // :203 ui::audio_out out;
+    if let Some(p) = dump_dev {
+        out.set_capture(p); // :205-206 デバイスへ渡したものをそのまま書き出す
+    }
+    let mut err = String::new(); // :204
+    let started = out.start(
+        latency_ms,
+        WasapiFill { gen, m: MachineBox(m), sintab, debt, sh: Arc::clone(&sh) },
+        &mut err,
+        exclusive,
+        audio_dev, // :208 audio_dev ? audio_dev : ""
+        raw,
+    ); // :207-208
+    let (rc, bundle);
+    if !started {
+        eprintln!("{err}"); // :209 fprintf(stderr, "%s\n", err.c_str())
+        rc = 1; // :210
+        bundle = out.take_fill().expect("start()==false must still return the bundle");
     } else {
-        println!("Ctrl+C で終了"); // :219-220
-    }
-    let block = frames.max(1) as usize;
-    gen.cushion_frames = block as u32; // :222 counterpart (disk: device target_ms)
-    let mut out = vec![0i16; block * 2];
-    let mut shown: u64 = 0; // :225
-    while !QUIT.load(Ordering::Acquire)
-        && (seconds <= 0.0 || gen.produced < (seconds * RATE as f64) as u64)
-    {
-        gen.fill(m, sintab, debt, &mut out);
-        if gen.produced - shown >= RATE as u64 * 5 {
-            // :234-239 report every 5 s (out.late()/latency_line: no device)
-            shown = gen.produced;
-            gen.report();
+        println!("音声の出口: {}", out.device_name()); // :213
+        println!("{}", out.format_line()); // :214
+        println!(
+            "MMCSS: {}", // :215-216
+            if out.mmcss() {
+                "Pro Audio で登録した"
+            } else {
+                "登録できず（途切れやすい）"
+            }
+        );
+        if seconds > 0.0 {
+            println!("{seconds:.1} 秒で終了"); // :217-218
+        } else {
+            println!("Ctrl+C で終了"); // :219-220
         }
+        // :222-223 取りこぼしの判定に使う「一杯ぶん」。デバイス側の長さを
+        // 44100 側に直す
+        sh.cushion_frames
+            .store((out.target_ms() * RATE as f64 / 1000.0) as u32, Ordering::Relaxed);
+        let mut shown: u64 = 0; // :225
+        // :226 while (!g_quit && (seconds <= 0 || gen.produced < u64(seconds*RATE)))
+        while !QUIT.load(Ordering::Acquire)
+            && (seconds <= 0.0
+                || sh.produced.load(Ordering::Relaxed) < (seconds * RATE as f64) as u64)
+        {
+            sys::sleep_ms(20); // :227
+            if !out.running() {
+                // :228-233
+                let e = out.error(); // :229
+                if !e.is_empty() {
+                    eprintln!("{e}"); // :230-231
+                }
+                break; // :232
+            }
+            if sh.produced.load(Ordering::Relaxed) - shown >= (RATE as u64) * 5 {
+                // :234-239 5 秒ごと: gen.starved = out.late(); gen.report(...)
+                shown = sh.produced.load(Ordering::Relaxed); // :235
+                report_line(
+                    sh.freq,
+                    sh.produced.load(Ordering::Relaxed),
+                    sh.busy_ticks.load(Ordering::Relaxed),
+                    sh.worst_ticks.load(Ordering::Relaxed),
+                    sh.cushion_frames.load(Ordering::Relaxed),
+                    out.late(), // :236
+                );
+                println!("     {}", out.latency_line()); // :238
+            }
+        }
+        // :242 gen.starved = out.late() — disk keeps it only for report; the
+        // two lines below read out.late()/slack_min_ms() directly
+        println!("待ち時間: {}", out.latency_line()); // :243
+        println!(
+            "余裕の最小: {:.1} ms、間に合わなかった {} 回", // :244-245
+            out.slack_min_ms(),
+            out.late()
+        );
+        out.stop(); // :246
+        rc = 0; // :247
+        bundle = out.take_fill().expect("thread ended without handing the bundle back");
     }
-    0
+    WasapiOut {
+        rc,
+        gen: bundle.gen,
+        m: bundle.m.0,
+    }
 }
 
 // ---- main (live.cpp:429-592) ----
@@ -503,27 +687,32 @@ fn main() {
     let mut midi_dev: i32 = -1; // :433
     let mut frames: i32 = 1024; // :434
     let mut buffers: i32 = 3; // :435
-    // :439 latency_ms — WASAPI-only, warn-ignored below
+    // :439 latency_ms 20 — 溜める目標 (disk note: Windows 最小周期 23.5ms だと
+    // 音源の山で 25 秒に 1 回枯渇、30ms なら 0 回)
+    let mut latency_ms: i32 = 20; // :439
+    let mut exclusive = false; // :440 out_opts.exclusive (options.h:61/71)
+    let mut audio_dev = String::new(); // :440 out_opts.audio_dev, "" = default
+    let mut dump_dev: Option<String> = None; // :441
+    let mut raw = false; // :442
     let mut seconds: f64 = 0.0; // :443 0 なら Ctrl+C まで
     let mut nomidi = false; // :444
     let mut use_waveout = false; // :444
-    #[allow(dead_code)]
-    let mut single = false; // :444 (set_threaded is M8; note covers it)
+    let mut single = false; // :444 (set_threaded(!single) LIVE — M8)
     let mut factory = false; // :445 out_opts.factory via consume_output_option
     let mut wav: Option<String> = None; // :446
     let mut dir = String::new(); // :447
     let mut midi_file: Option<String> = None; // RUST-ONLY seam (ledger S3)
 
-    // origin: live.cpp:449-476 arg loop. Unimplemented WASAPI/engine flags are
-    // ACCEPT-and-ignore with one stderr note each (render.rs:14 precedent).
-    let raw: Vec<String> = std::env::args().skip(1).collect();
+    // origin: live.cpp:449-476 arg loop (argv mirror; the --native-*/fast-midi
+    // engine flags stay ACCEPT-and-ignore, render.rs:14 precedent).
+    let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0usize;
-    while i < raw.len() {
-        let a = raw[i].as_str();
-        let has1 = i + 1 < raw.len();
+    while i < argv.len() {
+        let a = argv[i].as_str();
+        let has1 = i + 1 < argv.len();
         if a == "--list" {
             // :450-458 — MIDI ports via midiInGetNumDevs/CapsW (midi_in::list);
-            // the audio list is ui::audio_out::list (:453-455) = WASAPI, M6b
+            // the audio list is ui::audio_out::list (:453-455) = wasapi.rs
             let names = midi::list();
             if names.is_empty() {
                 println!("MIDI 入力が見つからない"); // :77-78
@@ -533,34 +722,38 @@ fn main() {
                     println!("  {k}: {nm}"); // :85
                 }
             }
-            println!();
-            println!("音声の出口:"); // :452
-            println!("  (rust live: WASAPI の一覧は M6b 未実装)"); // :453-455 dev
+            println!(); // :452 "\n音声の出口:"
+            println!("音声の出口:");
+            let outs = AudioOut::<NoFill>::list(); // :453
+            for (k, nm) in outs.iter().enumerate() {
+                println!("  {k}: {nm}"); // :454-455
+            }
+            println!("  --audio に名前の一部を渡すと、そこへ出す"); // :456
             std::process::exit(0); // :457
         } else if a == "--midi" && has1 {
-            midi_dev = atoi(&raw[i + 1]); // :459
+            midi_dev = atoi(&argv[i + 1]); // :459
             i += 2;
             continue;
         } else if a == "--frames" && has1 {
-            frames = atoi(&raw[i + 1]); // :460
+            frames = atoi(&argv[i + 1]); // :460
             i += 2;
             continue;
         } else if a == "--buffers" && has1 {
-            buffers = atoi(&raw[i + 1]); // :461
+            buffers = atoi(&argv[i + 1]); // :461
             i += 2;
             continue;
         } else if a == "--latency" && has1 {
-            eprintln!("(rust live: --latency は未実装 — WASAPI は M6b、無視)"); // :462
+            latency_ms = atoi(&argv[i + 1]); // :462 std::atoi
             i += 2;
             continue;
         } else if a == "--audio" && has1 {
-            eprintln!("(rust live: --audio は未実装 — WASAPI は M6b、無視)"); // :463
+            // :463 consume_output_option -> options.h:73 (--audio 名前の一部)
+            audio_dev = argv[i + 1].clone();
             i += 2;
             continue;
         } else if a == "--exclusive" {
-            eprintln!("(rust live: --exclusive は未実装 — WASAPI は M6b、無視)"); // :463
+            exclusive = true; // :463 options.h:71
             i += 1;
-            continue;
         } else if a == "--factory" {
             factory = true; // :463 HONORED (skip nvram load, print :504)
             i += 1;
@@ -568,18 +761,18 @@ fn main() {
             nomidi = true; // :464 (disk dup at :470 — same effect)
             i += 1;
         } else if a == "--dump-dev" && has1 {
-            eprintln!("(rust live: --dump-dev は未実装 — WASAPI は M6b、無視)"); // :465
+            dump_dev = Some(argv[i + 1].clone()); // :465 デバイスへ渡したものをそのまま書き出す
             i += 2;
             continue;
         } else if a == "--raw" {
-            eprintln!("(rust live: --raw は未実装 — WASAPI は M6b、無視)"); // :466
+            raw = true; // :466 エンジンの信号処理を飛ばす
             i += 1;
         } else if a == "--seconds" && has1 {
-            seconds = atof(&raw[i + 1]); // :467
+            seconds = atof(&argv[i + 1]); // :467
             i += 2;
             continue;
         } else if a == "--wav" && has1 {
-            wav = Some(raw[i + 1].clone()); // :468
+            wav = Some(argv[i + 1].clone()); // :468
             i += 2;
             continue;
         } else if a == "--waveout" {
@@ -616,20 +809,20 @@ fn main() {
             i += 1;
         } else if a == "--midi-file" && has1 {
             // RUST-ONLY seam (ledger S3 — file-fed MIDI replaces midisend/loopMIDI)
-            midi_file = Some(raw[i + 1].clone());
+            midi_file = Some(argv[i + 1].clone());
             i += 2;
             continue;
         } else if dir.is_empty() {
-            dir = raw[i].clone(); // :475 first positional = ROM dir (disk
+            dir = argv[i].clone(); // :475 first positional = ROM dir (disk
             // takes ANY unmatched token, dash or not — mirrored exactly)
             i += 1;
         } else {
             i += 1; // disk: unmatched with dir set = silently skipped
         }
     }
-    let _ = single;
-    // :499 set_threaded(!single) — this build never spawns the slave (M8)
-    eprintln!("(rust live: set_threaded/--single は未実装 — 常時単一スレッドで動作)");
+    // :499 set_threaded(!single) happens at the disk seam — AFTER the ROM
+    // loads (:490-497 mirror below), BEFORE nvram/reset/boot (mu2000.cpp:376
+    // render / live.cpp:499 order). M8: the slave thread is real now.
 
     // :477-487 usage (disk strings byte-for-byte; the --waveout line is the
     // #if _WIN32 arm and we are Windows-only)
@@ -686,6 +879,13 @@ fn main() {
             Vec::new()
         }
     };
+    // mu2000.cpp:413-419 set_sintab_rom pin (deferred glue) + :499
+    // set_threaded(!single) — LIVE (M8 `threaded slave` row). Spawned while
+    // the machine is still on this thread; the thread captures only the
+    // heap-stable Rc<RefCell<Swp30>> interior + ROM pointers (see
+    // SlaveRaws), so the MachineBox move into the audio thread is safe.
+    m.set_sintab_pin(&sintab);
+    m.set_threaded(!single); // :499
 
     // :500-502 SMU2000_VOICECACHE env + apply_engine_options: engine options
     // are warn-ignored above (native engine is M7, AGENTS ignores it) — no-op.
@@ -744,12 +944,28 @@ fn main() {
 
     unsafe { sys::SetConsoleCtrlHandler(Some(on_console_ctrl), 1) }; // :553
 
-    // :555-557 waveout vs WASAPI(default). WASAPI is the M6b `audio out` row;
-    // run_standin produces the same blocks without a device.
+    // :555-557 waveout vs WASAPI(default). The WASAPI arm MOVES the bundle
+    // into the audio thread and hands it back after stop() (disk passes gen
+    // by reference and races it; Rust moves and joins — same numbers at
+    // :558-559 because take_fill happens after the join).
     let rc = if use_waveout {
         run_waveout(&mut gen, &mut m, &sintab, &mut debt, seconds, frames, buffers)
     } else {
-        run_standin(&mut gen, &mut m, &sintab, &mut debt, seconds, frames)
+        let w = run_wasapi(
+            gen,
+            m,
+            sintab,
+            debt,
+            seconds,
+            latency_ms,
+            exclusive,
+            dump_dev.as_deref(),
+            &audio_dev,
+            raw,
+        );
+        gen = w.gen;
+        m = w.m;
+        w.rc
     };
     let produced = gen.produced; // :558
     let busy_sec = gen.busy_ticks as f64 / gen.freq as f64; // :559

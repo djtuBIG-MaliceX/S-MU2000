@@ -23,6 +23,12 @@ path = "src/bin/boot.rs"
 [[bin]]
 name = "blocktime"
 path = "src/bin/blocktime.rs"
+[[bin]]
+name = "midisend"
+path = "src/bin/midisend.rs"
+[[bin]]
+name = "xgtest"
+path = "src/bin/xgtest.rs"
 
 [dependencies]
 smu-compat = { path = "../../crates/smu-compat" }

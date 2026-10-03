@@ -1,15 +1,21 @@
 //! DIN MIDI wire: the 31250 bps bit machine + queue caps + F5 cable routing.
 //!
 //! origins (disk re-verified 2026-10-01, session N2):
-//! - `src/mu2000.h:102-202` — port counts, `midi_in`, drop counter,
-//!   `midi_queued` / `midi_pending` / `midi_idle`
+//! - `src/mu2000.h:109-209` — port counts, `midi_in`, drop counter,
+//!   `midi_queued` / `midi_pending` / `midi_idle` (+7 over N2-era cites,
+//!   re-verified from disk 2026-10-03)
 //! - `src/mu2000.h:981-1010` — `struct midi_line`, cable state arrays
 //! - `src/mu2000.cpp:36-37` — `MIDI_BIT_CYCLES = 28000000 / 31250` (= 896)
-//! - `src/mu2000.cpp:1370-1413` — `midi_step` (the per-loop bit pump; called
-//!   from `run_cycles` mu2000.cpp:1194 — NOT from `run_sample`; there is no
-//!   MIDI pump in the run_sample region)
+//! - `src/mu2000.cpp:1402-1445` — `midi_step` (the per-loop bit pump;
+//!   called from `run_cycles` mu2000.cpp:1226 — NOT from `run_sample`;
+//!   there is no MIDI pump in the run_sample region). Re-cited 2026-10-03
+//!   from disk: the region sits +32 over the N2-era numbers (the
+//!   2026-10-02 merge shifted mu2000.cpp; tx_line at :1271-1294 is
+//!   unchanged and re-confirms it)
 //! - `src/mu2000.cpp:1061-1064` — cable reset inside `mu2000::reset`
-//! - `src/mu2000.cpp:1270-1283` — `usb_midi_in` receiver half (F5 framing)
+//! - `src/mu2000.cpp:1302-1315` — `usb_midi_in` receiver half (F5 framing;
+//!   disk re-verified 2026-10-03 — the N2-era cite :1270-1283 pre-dates the
+//!   2026-10-02 merge +32 shift, same correction as the fast_midi row)
 //! - `src/mu2000.h:227-246` + `src/mu2000.h:1024-1031` +
 //!   `src/mu2000.cpp:1271-1294` — MIDI OUT: `midi_out_take`, the TX pin
 //!   frame builder `tx_line` and the 4096-byte ring (`W-TX row`)
@@ -25,18 +31,22 @@
 //! Arms deliberately NOT ported here (documented skips):
 //! - native engine `native_midi` (mu2000.h:139-140) — native engine is not
 //!   built at all (AGENTS.md; lib.rs doc "strip native-engine").
-//! - `usb_step` pump + registers + TX (mu2000.cpp:1285+) — M7 `usb.rs` row.
-//!   We port only the `usb_midi_in` receiver half (rx + in_port) so the F5
-//!   routing legs and the SHARED drop counter (mu2000.cpp:1274 uses the same
-//!   `m_midi_dropped` as :161) stay faithful. Disk `usb_step` :1291 pumps a
-//!   non-empty rx even with `usb_host == false`; until M7 lands, USB-routed
-//!   bytes park in `usb.rx` (they still count in `midi_pending`, matching
-//!   disk :175, and keep `usb_idle()` false, matching disk :216). Scope-safe
-//!   for the current gates: all 56 fixture MIDIs contain zero 0xF5 bytes
-//!   (scanned 2026-10-01) and the smf feed only emits channel messages.
-//! - fast_midi `set_fast_midi` (mu2000.h:113) stays stub-false (M7 flag row);
-//!   the fast arms below are transliterated but unreachable.
-//! - `logerror` byte traces (:1380/:1395) — the Rust machine strips
+//! - `usb_step` pump + registers + TX (mu2000.cpp:1317+) — ported in the
+//!   M7 `USB host (M37640)` row as `smu_machine::usb` (UsbLine, the full
+//!   mu2000.h:1002-1013 struct). This module keeps the paired N2 receiver
+//!   half `usb_midi_in` (:1302-1315), the SHARED drop counter
+//!   (mu2000.cpp:1306 uses the same `m_midi_dropped` as :161) and the
+//!   `midi_pending`/`midi_idle` accounting; `usb` now lives behind one
+//!   `Rc<RefCell<UsbLine>>` shared with the Hub bus arms and the
+//!   run_cycles :1227 pump (single `m_usb`, disk mu2000.h:1021).
+//! - fast_midi `set_fast_midi` (mu2000.h:120) is LIVE since the M7 row:
+//!   render --fast-midi applies it at the render.cpp:377 seam and the fast
+//!   arms below are REACHED (direct RDR inject mu2000.cpp:1408-1416 +
+//!   the byte-in-flight accounting mu2000.h:184-207, disk re-verified
+//!   2026-10-03 — the N2-era cites :1376-1384/:173-202 pre-date the
+//!   2026-10-02 merge shift). Flag default OFF keeps every path below
+//!   byte-identical to the paired M4 `midi lines` behavior.
+//! - `logerror` byte traces (:1412-1413/:1427-1428) — the Rust machine strips
 //!   logerror (wiring-row convention).
 //!
 //! Deviation (ledger-sanctioned pattern): `m_midi_dropped` is `std::atomic`
@@ -45,7 +55,9 @@
 //! (Invariant 6); `midi_in` runs on the audio thread alone, so a plain
 //! `u64` is equivalent.
 
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
+use std::rc::Rc;
 
 /// origin: src/mu2000.h:107 (DIN = ports A/B on SCI ch0/ch1, parts 1-16/17-32)
 pub const MIDI_DIN_PORTS: usize = 2;
@@ -83,65 +95,28 @@ impl MidiLine {
     }
 }
 
-/// origin: src/mu2000.h:995-1006 `struct usb_line`, RECEIVER HALF ONLY
-/// (`rx`/`in_port` + the two fields `usb_idle()` reads, mu2000.h:216).
-/// The pump (`usb_step` :1285), registers (`usb_r/usb_w`), cmd TX and the
-/// firmware-visible 0xF80000/1 window are the M7 `usb.rs` row; `cmd`/`have`
-/// are born empty/false here and only M7 will ever fill them
-/// (`m_usb_host == false` keeps disk's reset push :1065-1067 inert).
-/// `next`/`cur`/`cur_cmd` joined at M5-W4 — state-only legs
-/// (mu2000.cpp:3588/:3603); they ride the stream pinned at their init
-/// values until the M7 pump exists. `tx`/`out_port` (disk :1011-1012) are
-/// NOT in the state stream (mu2000::state :3575-3604 omits them) — M7 row.
-pub struct UsbIn {
-    pub rx: VecDeque<u8>, // disk :1003 F5-framed MIDI byte stream
-    pub in_port: i32,     // disk :1004 = -1
-    pub have: bool,       // disk :1006 = false
-    pub cmd: VecDeque<u8>, // disk :1008 empty (M7 host-online F4 03 01 01 01)
-    /// disk :1005 `u64 next` — next byte may be handed over at this time.
-    /// Added M5-W4: it RIDES THE STATE STREAM (mu2000.cpp:3588) even though
-    /// only M7's `usb_step` advances it — pinned 0 until then.
-    pub next: u64,   // :1005 = 0
-    /// disk :1007 `u8 cur` — last handed-over byte (state leg :3588).
-    pub cur: u8,     // :1007 = 0
-    /// disk :1009 `bool cur_cmd` — byte in flight is a command (v10 leg :3603).
-    pub cur_cmd: bool, // :1009 = false
-    /// disk :1010 `u64 tx_next` — TX-side time gate (state leg :3588).
-    /// `tx`/`out_port` (disk :1011-1012) do NOT ride the stream (M7).
-    pub tx_next: u64, // :1010 = 0
-}
+/// The full `usb_line` (mu2000.h:1002-1013) lives in `crate::usb` since
+/// the M7 `USB host (M37640)` row — re-exported so the paired N2 receiver
+/// half, the M5-W4 state stream (mu2000.cpp:3573-3605) and the bins keep
+/// one type. N2-era note kept for provenance: `rx`/`in_port` + the two
+/// fields `usb_idle()` reads (mu2000.h:223) were the RECEIVER HALF ONLY
+/// until M7; `next`/`cur`/`cur_cmd`/`tx_next` joined at M5-W4 as
+/// state-only legs (:3588/:3603); `tx`/`out_port` (disk :1011-1012) do NOT
+/// ride the state stream (disk :3575-3604 omits them — like the MIDI OUT
+/// ring, mu2000.h:231).
+pub use crate::usb::UsbLine;
 
-impl UsbIn {
-    pub fn new() -> UsbIn {
-        UsbIn {
-            rx: VecDeque::new(), // :1003
-            in_port: -1,         // :1004
-            have: false,         // :1006
-            cmd: VecDeque::new(), // :1008
-            next: 0,             // :1005 (M5-W4, state-leg only)
-            cur: 0,              // :1007 (M5-W4, state-leg only)
-            cur_cmd: false,      // :1009 (M5-W4, state-leg only)
-            tx_next: 0,          // :1010 (M5-W4, state-leg only)
-        }
-    }
-
-    /// origin: src/mu2000.h:216 `usb_idle()`
-    pub fn idle(&self) -> bool {
-        self.rx.is_empty() && self.cmd.is_empty() && !self.have
-    }
-}
-
-/// The SCI seam for the bit pump — mu2000.cpp:1375 `m_cpu->sci(port)`.
+/// The SCI seam for the bit pump — mu2000.cpp:1407 `m_cpu->sci(port)`.
 /// lib.rs implements it over `Sh2SciPair` (`sci.rs:329/338/353/592`);
 /// tests record the edges instead. Host MUST sync `Sh2Sci::cpu_now` to the
 /// loop-top `now` before `do_rx_w` (sci.rs:1080-1083 host note; disk reads
 /// `current_cycles()` at sh_sci.cpp:475/484, and no CPU has run between
 /// run_cycles :1170 and :1194 so that value IS `now`).
 pub trait MidiSci {
-    fn rx_can_accept(&self, port: usize) -> bool; // mu2000.cpp:1377
-    fn rx_byte_pending(&self, port: usize) -> bool; // mu2000.h:180/188/199
-    fn receive_byte(&mut self, port: usize, data: u8); // mu2000.cpp:1382
-    fn do_rx_w(&mut self, port: usize, state: i32); // mu2000.cpp:1397/1407/1409
+    fn rx_can_accept(&self, port: usize) -> bool; // mu2000.cpp:1409 (fast arm)
+    fn rx_byte_pending(&self, port: usize) -> bool; // mu2000.h:187/195/206 (fast arms)
+    fn receive_byte(&mut self, port: usize, data: u8); // mu2000.cpp:1414 (fast inject)
+    fn do_rx_w(&mut self, port: usize, state: i32); // mu2000.cpp:1429/1439/1441
 }
 
 /// The mu2000-side MIDI glue: 2 DIN lines + 4-port cable routing + USB in
@@ -152,10 +127,16 @@ pub struct Midi {
     pub lines: [MidiLine; MIDI_DIN_PORTS], // mu2000.h:990 m_midi
     pub dropped: u64, // :991 m_midi_dropped (plain u64 — see module doc)
     pub fast_midi: bool, // :992 m_fast_midi = false (M7 flag row stubs false)
-    /// mu2000.h:1015 m_usb_host = false — pinned false until M7 (lib.rs
-    /// USB bus arms read 0; reset comment :1844).
-    pub usb_host: bool,
-    pub usb: UsbIn, // :1014 m_usb (receiver half)
+    /// mu2000.h:1022 `m_usb_host`. LIVE since the M7 row: set through
+    /// `Machine::set_usb_host` (mu2000.h:221) BEFORE reset; the Cell is
+    /// SHARED with `Hub::usb_host` (the :1151 ADC4 lambda) — single truth.
+    /// Default false == the paired DIN path (disk mu2000.cpp:1151 0).
+    pub usb_host: Rc<Cell<bool>>,
+    /// mu2000.h:1021 `m_usb` — the FULL usb_line behind one Rc (M7):
+    /// receiver-half inject + pending/idle + state stream here; the Hub
+    /// bus arms (mu2000.cpp:1011-1012) and the run_cycles :1227 pump share
+    /// the same object.
+    pub usb: Rc<RefCell<UsbLine>>, // :1021 m_usb
     /// mu2000.h:1009 `std::array<int, MIDI_PORTS> m_cable = { 0, 1, 2, 3 }`
     pub cable: [i32; MIDI_PORTS],
     /// mu2000.h:1010 `std::array<bool, MIDI_PORTS> m_cable_wait = {}`
@@ -182,8 +163,8 @@ impl Midi {
             lines: [MidiLine::new(), MidiLine::new()], // mu2000.h:990
             dropped: 0,                                // :991 {0}
             fast_midi: false,                          // :992
-            usb_host: false,                           // :1015
-            usb: UsbIn::new(),                         // :1014
+            usb_host: Rc::new(Cell::new(false)),       // :1022 (shared Cell)
+            usb: Rc::new(RefCell::new(UsbLine::new())), // :1021 (shared Rc)
             cable: [0, 1, 2, 3],                       // :1009
             cable_wait: [false; MIDI_PORTS],           // :1010 {}
             tx_buf: [0u8; MIDI_TX_SIZE],               // :1028 {}
@@ -194,9 +175,11 @@ impl Midi {
         }
     }
 
-    /// origin: src/mu2000.cpp:1376 `set_fast_midi` (mu2000.h:113). M7 row
-    /// owns the idle/pending semantics incl. the SCI byte-in-flight; the
-    /// bins must not call it until that row pairs.
+    /// origin: src/mu2000.h:120 `set_fast_midi` (inline setter; M7 row).
+    /// Bins call it through `Machine::set_fast_midi` (lib.rs) at the
+    /// apply_engine_options seam (options.h:52; render.cpp:377 — BEFORE
+    /// reset, so the flag is stable across boot). M4-era cite
+    /// `mu2000.cpp:1376` was pre-merge drift (disk: mu2000.h:120).
     pub fn set_fast_midi(&mut self, fast: bool) {
         self.fast_midi = fast;
     }
@@ -256,12 +239,16 @@ impl Midi {
     /// contract as `run_sample` (mu2000.h:230). Ring is NOT saved in state
     /// (mu2000.h:231 — a restore starts empty).
     pub fn midi_out_take(&mut self) -> Option<u8> {
-        // :237-240 — disk diverts to `usb_out_take(v, port)` when USB is
-        // active ("firmware は返事も USB 側へ出す"). UNREACHABLE here:
-        // usb_host is pinned false until the M7 usb.rs row, and M7 owns
-        // usb_out_take — inert arm, no assert, no ring side effects.
-        if self.usb_host {
-            return None; // M7 replaces this arm with its own ring read
+        // :237-240 — LIVE since the M7 row: with USB active the firmware
+        // answers on USB too ("firmware は返事も USB 側へ出す", mu2000.h:234-236
+        // — DIN MIDI OUT goes silent), so the divert reads the usb tx ring.
+        // Disk `usb_out_take(v, port)` (mu2000.cpp:1380-1400) discards the
+        // port here (local `int port`), so the take side sees the bare
+        // byte; the F5-framed port tag is consumed inside `out_take`
+        // (`out_port` tracks the last `F5 nn`).
+        if self.usb_host.get() {
+            let (v, _port) = self.usb.borrow_mut().out_take()?;
+            return Some(v);
         }
         if self.tx_r == self.tx_w {
             return None; // :241-242
@@ -310,8 +297,9 @@ impl Midi {
             }
         }
         let to = self.cable[port]; // :155
-        if to >= MIDI_DIN_PORTS as i32 || self.usb_host {
-            self.usb_midi_in(byte, to); // :157 (usb_host==false here; M7)
+        if to >= MIDI_DIN_PORTS as i32 || self.usb_host.get() {
+            self.usb_midi_in(byte, to); // :156-157 (host ON: A/B ride USB too,
+                                        // mu2000.h:219-220 — DIN 実機で黙る)
         } else if self.lines[to as usize].queue.len() < MIDI_QUEUE_LIMIT {
             self.lines[to as usize].queue.push_back(byte); // :158-159
         } else {
@@ -320,126 +308,140 @@ impl Midi {
         to // :162
     }
 
-    /// origin: src/mu2000.cpp:1270-1283 `usb_midi_in` (receiver half).
-    /// Cap overflow shares the DIN drop counter (:1274 == :161 counter).
+    /// origin: src/mu2000.cpp:1302-1315 `usb_midi_in` (receiver half;
+    /// disk re-cited 2026-10-03 — N2-era :1270-1283 pre-merge). Cap
+    /// overflow shares the DIN drop counter (:1306 == :168 counter).
     /// Port change inserts the `F5 <口>` frame the firmware receiver
-    /// 0x042932 expects (:1266-1268; ports are 1-based on the wire).
+    /// 0x042932 expects (:1298-1300; ports are 1-based on the wire).
     pub fn usb_midi_in(&mut self, byte: u8, port: i32) {
-        if self.usb.rx.len() >= MIDI_QUEUE_LIMIT {
-            self.dropped += 1; // :1273-1275
+        let mut u = self.usb.borrow_mut();
+        if u.rx.len() >= MIDI_QUEUE_LIMIT {
+            self.dropped += 1; // :1306-1307
             return;
         }
-        if port != self.usb.in_port {
-            self.usb.rx.push_back(0xf5); // :1278
-            self.usb.rx.push_back((port + 1) as u8); // :1279
-            self.usb.in_port = port; // :1280
+        if port != u.in_port {
+            u.rx.push_back(0xf5); // :1310
+            u.rx.push_back((port + 1) as u8); // :1311 (ports are 1-based on the wire)
+            u.in_port = port; // :1312
         }
-        self.usb.rx.push_back(byte); // :1282
+        u.rx.push_back(byte); // :1314
     }
 
-    /// origin: src/mu2000.cpp:1370-1413 `midi_step`. Called once per
-    /// run_cycles loop iteration (mu2000.cpp:1194) — the Rust run_cycles
-    /// pumps after every instruction, which reproduces the disk
-    /// :1202-1208 chunk clamp for free (the chunk ending at the next bit
-    /// boundary ends on the same instruction that crosses it).
+    /// origin: src/mu2000.cpp:1402-1445 `midi_step`. Called once per
+    /// run_cycles loop iteration (mu2000.cpp:1226) — the Rust run_cycles
+    /// reproduces the disk :1234-1240 chunk clamp verbatim (the same
+    /// `if (!m_fast_midi)` gate at lib.rs), so OFF mode stops the CPU on
+    /// the same instruction that crosses a bit edge, and fast mode opens
+    /// the clamp exactly as disk does.
     pub fn midi_step(&mut self, now: u64, sci: &mut dyn MidiSci) {
         // A と B は別々の SCI に繋がっている。互いに待たせない (:1372)
         for port in 0..MIDI_DIN_PORTS {
             let m = &mut self.lines[port];
             if self.fast_midi {
-                // :1376-1385 fast arm — M7 (flag stub-false => unreachable).
-                // :1382 is the fast-midi DIRECT inject (no wire time, no
-                // start/stop bits) — out of scope for this row.
+                // :1408-1416 fast arm (disk re-verified 2026-10-03) — LIVE
+                // since the M7 row: one byte per pump call straight into the
+                // SCI, gated ONLY by rx_can_accept (RE on, RDRF clear, no
+                // recv error — sh_sci.cpp:127-130). :1414 receive_byte is the
+                // DIRECT inject: no wire time, no start/stop bits, no bit
+                // machine (m.bit stays -1; the `next` grid never runs).
                 if !m.queue.is_empty() && sci.rx_can_accept(port) {
-                    let byte = m.queue.pop_front().unwrap(); // :1378-1379
-                    sci.receive_byte(port, byte); // :1382
+                    let byte = m.queue.pop_front().unwrap(); // :1410-1411
+                    sci.receive_byte(port, byte); // :1414
                 }
-                continue; // :1384
+                continue; // :1416 — the wire path is skipped entirely
             }
 
             if m.bit < 0 {
-                // 直前のバイトのストップビットぶんは空けてから次を出す (:1388)
+                // 直前のバイトのストップビットぶんは空けてから次を出す (:1420)
                 if m.queue.is_empty() || now < m.next {
-                    continue; // :1389-1390
+                    continue; // :1421-1422
                 }
-                m.cur = m.queue.pop_front().unwrap(); // :1391-1392
-                m.bit = 0; // :1393
-                m.next = now.wrapping_add(MIDI_BIT_CYCLES); // :1394
-                // :1395 logerror stripped (module doc)
-                sci.do_rx_w(port, 0); // :1397 スタートビット
-                continue; // :1398
+                m.cur = m.queue.pop_front().unwrap(); // :1423-1424
+                m.bit = 0; // :1425
+                m.next = now.wrapping_add(MIDI_BIT_CYCLES); // :1426
+                // :1427-1428 logerror stripped (module doc)
+                sci.do_rx_w(port, 0); // :1429 スタートビット
+                continue; // :1430
             }
 
             if now < m.next {
-                continue; // :1401-1402
+                continue; // :1433-1434
             }
 
-            m.bit += 1; // :1404
-            m.next = now.wrapping_add(MIDI_BIT_CYCLES); // :1405
+            m.bit += 1; // :1436
+            m.next = now.wrapping_add(MIDI_BIT_CYCLES); // :1437
             if m.bit <= 8 {
-                sci.do_rx_w(port, ((m.cur >> (m.bit - 1)) & 1) as i32); // :1407 下位ビットから
+                sci.do_rx_w(port, ((m.cur >> (m.bit - 1)) & 1) as i32); // :1439 下位ビットから
             } else {
-                sci.do_rx_w(port, 1); // :1409 ストップビット
-                m.bit = -1; // :1410
+                sci.do_rx_w(port, 1); // :1441 ストップビット
+                m.bit = -1; // :1442
             }
         }
     }
 
-    /// origin: src/mu2000.h:168-172 `midi_queued` — bytes on the wire incl.
-    /// the in-flight one; the 31250bps throttle asks this. NOTE the disk
-    /// index `port == 1 ? 1 : 0` — every port except 1 sees line 0 (:170).
+    /// origin: src/mu2000.h:175-179 `midi_queued` — bytes on the wire incl.
+    /// the in-flight one; the 31250bps throttle asks this. FAST-OBLIVIOUS on
+    /// disk too (:177 counts `m.bit >= 0` unconditionally — with fast ON no
+    /// bit is ever in flight, the byte-in-flight lives in the SCI RDR and is
+    /// counted by `midi_pending` instead). NOTE the disk index
+    /// `port == 1 ? 1 : 0` — every port except 1 sees line 0 (:177).
     pub fn midi_queued(&self, port: i32) -> usize {
-        let m = &self.lines[if port == 1 { 1 } else { 0 }]; // :170
-        m.queue.len() + if m.bit >= 0 { 1 } else { 0 } // :171
+        let m = &self.lines[if port == 1 { 1 } else { 0 }]; // :177
+        m.queue.len() + if m.bit >= 0 { 1 } else { 0 } // :178
     }
 
-    /// origin: src/mu2000.h:173-182 `midi_pending` (all lines + usb).
+    /// origin: src/mu2000.h:180-189 `midi_pending` (all lines + usb).
+    /// SCI byte-in-flight rule: fast ON drops the wire-bit count (:184
+    /// `!m_fast_midi` gate) and counts each DIN SCI's RDRF byte instead
+    /// (:185-187) — the byte the firmware has not read yet.
     pub fn midi_pending(&self, sci: &dyn MidiSci) -> usize {
-        let mut pending = self.usb.rx.len() + if self.usb.have { 1 } else { 0 }; // :175
+        let u = self.usb.borrow();
+        let mut pending = u.rx.len() + if u.have { 1 } else { 0 }; // :182
         for m in self.lines.iter() {
-            pending += m.queue.len() + ((!self.fast_midi && m.bit >= 0) as usize); // :176-177
+            pending += m.queue.len() + ((!self.fast_midi && m.bit >= 0) as usize); // :183-184
         }
         if self.fast_midi {
-            // :178-181 — M7 arm, unreachable while fast_midi == false
+            // :185-187 — LIVE since the M7 fast_midi row
             for port in 0..MIDI_DIN_PORTS {
-                pending += sci.rx_byte_pending(port) as usize; // :180
+                pending += sci.rx_byte_pending(port) as usize; // :187
             }
         }
-        pending // :181
+        pending // :188
     }
 
-    /// origin: src/mu2000.h:183-189 `midi_idle(port)`
+    /// origin: src/mu2000.h:190-196 `midi_idle(port)`
     pub fn midi_idle(&self, port: i32, sci: &dyn MidiSci) -> bool {
-        if port >= MIDI_DIN_PORTS as i32 || self.usb_host {
-            return self.usb.idle(); // :185-186 (usb_idle mu2000.h:216)
+        if port >= MIDI_DIN_PORTS as i32 || self.usb_host.get() {
+            return self.usb.borrow().idle(); // :192-193 (usb_idle mu2000.h:223)
         }
         let m = &self.lines[port as usize];
         m.queue.is_empty()
             && if self.fast_midi {
-                !sci.rx_byte_pending(port as usize) // :188 (M7 arm)
+                !sci.rx_byte_pending(port as usize) // :195 fast byte-in-flight (LIVE M7)
             } else {
-                m.bit < 0 // :188
+                m.bit < 0 // :195 wire idle
             }
     }
 
-    /// origin: src/mu2000.h:190-202 `midi_idle()` (all lines + usb)
+    /// origin: src/mu2000.h:197-209 `midi_idle()` (all lines + usb)
     pub fn midi_idle_all(&self, sci: &dyn MidiSci) -> bool {
-        if !self.usb.idle() {
-            return false; // :192-193
+        if !self.usb.borrow().idle() {
+            return false; // :199-200
         }
         for m in self.lines.iter() {
             if !m.queue.is_empty() || (!self.fast_midi && m.bit >= 0) {
-                return false; // :194-196
+                return false; // :201-203
             }
         }
         if self.fast_midi {
+            // :204-207 — LIVE since the M7 fast_midi row
             for port in 0..MIDI_DIN_PORTS {
                 if sci.rx_byte_pending(port) {
-                    return false; // :197-200 (M7 arm)
+                    return false; // :206
                 }
             }
         }
-        true // :201
+        true // :208
     }
 }
 
@@ -546,7 +548,7 @@ mod tests {
         assert_eq!(m.lines[1].queue.make_contiguous(), &[0xfa, 0xfe]); // both bytes kept order
         // port 3 target = USB (to >= MIDI_DIN_PORTS): next byte gets F5-framed
         assert_eq!(m.midi_in(0x90, 1), 3);
-        assert_eq!(m.usb.rx.make_contiguous(), &[0xf5, 0x04, 0x90]); // :1277-1282
+        assert_eq!(m.usb.borrow().rx.iter().copied().collect::<Vec<_>>().as_slice(), &[0xf5, 0x04, 0x90]); // :1277-1282
     }
 
     #[test]
@@ -555,16 +557,16 @@ mod tests {
         assert_eq!(m.midi_in(0xf5, 0), -1);
         assert_eq!(m.midi_in(0x03, 0), -1); // -> port 2 (USB C)
         assert_eq!(m.midi_in(0x90, 0), 2); // :156 to>=MIDI_DIN_PORTS
-        assert_eq!(m.usb.rx.make_contiguous(), &[0xf5, 0x03, 0x90]); // :1278-1279 (:1279 = port+1)
+        assert_eq!(m.usb.borrow().rx.iter().copied().collect::<Vec<_>>().as_slice(), &[0xf5, 0x03, 0x90]); // :1278-1279 (:1279 = port+1)
         assert_eq!(m.midi_in(0x40, 0), 2); // same port -> NO extra F5 (:1277)
-        assert_eq!(m.usb.rx.make_contiguous(), &[0xf5, 0x03, 0x90, 0x40]);
+        assert_eq!(m.usb.borrow().rx.iter().copied().collect::<Vec<_>>().as_slice(), &[0xf5, 0x03, 0x90, 0x40]);
         // line queues untouched; DIN path still works on its own cable
         assert!(m.lines[0].queue.is_empty());
         // usb cap shares m_midi_dropped (:1274): fill to the limit, +1 drops
-        m.usb.rx.resize(MIDI_QUEUE_LIMIT, 0);
+        m.usb.borrow_mut().rx.resize(MIDI_QUEUE_LIMIT, 0);
         assert_eq!(m.midi_in(0x41, 0), 2);
         assert_eq!(m.dropped, 1);
-        assert_eq!(m.usb.rx.len(), MIDI_QUEUE_LIMIT); // rejected (:1275)
+        assert_eq!(m.usb.borrow().rx.len(), MIDI_QUEUE_LIMIT); // rejected (:1275)
     }
 
     #[test]
@@ -756,8 +758,10 @@ mod tests {
 
     #[test]
     fn fast_arm_inert_while_flag_false() {
-        // the M7 stub: with fast_midi == false the pump ALWAYS wires bits
-        // through do_rx_w, never receive_byte (mu2000.cpp:1382 out of scope)
+        // OFF regression (default path byte-identical, M4 `midi lines`):
+        // with fast_midi == false the pump ALWAYS wires bits through
+        // do_rx_w, never touches receive_byte (mu2000.cpp:1414 stays
+        // behind the :1408 gate) and never reads rx_byte_pending
         let mut m = midi();
         assert!(!m.fast_midi);
         m.midi_in(0x5a, 0);
@@ -767,5 +771,73 @@ mod tests {
         }
         assert_eq!(s.inj.len(), 0);
         assert_eq!(s.log.len(), 10); // start + 8 data + stop
+        // OFF ignores the SCI byte-in-flight arm entirely (mu2000.h:184/195)
+        s.pending = [true, true];
+        assert!(m.midi_idle(0, &s) && m.midi_idle_all(&s));
+        assert_eq!(m.midi_pending(&s), 0);
+    }
+
+    #[test]
+    fn fast_arms_active_when_flag_on() {
+        // M7 behavior pair of the inertness test above: with fast_midi ON
+        // the pump injects queued bytes STRAIGHT into the SCI RDR
+        // (mu2000.cpp:1408-1416, no wire bits) and pending/idle switch to
+        // the SCI byte-in-flight rule (mu2000.h:184-207)
+        let mut m = midi();
+        m.set_fast_midi(true); // mu2000.h:120 (render --fast-midi path)
+        assert!(m.fast_midi);
+        m.midi_in(0x90, 0);
+        m.midi_in(0x40, 0);
+        let mut s = RecSci::new(); // accept=true, RDR clear both ports
+
+        // one pump call injects at most ONE byte per port (disk pops once
+        // per run_cycles iteration, mu2000.cpp:1410-1411) — no wire edges
+        m.midi_step(0, &mut s);
+        assert_eq!(s.inj, vec![(0, 0x90)]); // :1414 direct inject
+        assert!(s.log.is_empty()); // no start/stop bits, no wire time
+        assert_eq!(m.lines[0].bit, -1); // the bit machine never runs
+        assert_eq!(m.lines[0].queue.make_contiguous(), &[0x40]);
+        // rx_can_accept=false (RE off / RDRF busy / recv error,
+        // sh_sci.cpp:127-130) holds the byte in the queue, no loss
+        s.accept = false;
+        m.midi_step(1, &mut s);
+        assert_eq!(s.inj.len(), 1);
+        assert_eq!(m.lines[0].queue.make_contiguous(), &[0x40]);
+        s.accept = true;
+        m.midi_step(2, &mut s);
+        assert_eq!(s.inj, vec![(0, 0x90), (0, 0x40)]);
+        assert!(m.lines[0].queue.is_empty());
+
+        // ON semantics: a wire bit is INVISIBLE (:184 !fast gate) — idle
+        // consults RDRF instead of bit<0 (:195/:206). A stuck bit cannot
+        // exist in real fast mode (pump skips the wire path at :1416);
+        // set it to prove the gate ignores it
+        m.lines[0].bit = 4;
+        m.lines[0].next = 12345;
+        assert_eq!(m.midi_pending(&s), 0); // :183-184: bit not counted
+        assert!(m.midi_idle(0, &s)); // :195: RDR clear -> idle
+        assert!(m.midi_idle_all(&s)); // :204-207: both ports quiet
+        // a byte in flight (firmware has not read RDR yet): +1 pending,
+        // line busy — while the OTHER port stays idle
+        s.pending = [true, false];
+        assert_eq!(m.midi_pending(&s), 1); // :187
+        assert!(!m.midi_idle(0, &s));
+        assert!(m.midi_idle(1, &s));
+        assert!(!m.midi_idle_all(&s));
+
+        // the SAME state with the flag OFF flips the semantics: the wire
+        // bit counts, the RDRF byte is invisible (:184/:195 else-arms)
+        m.set_fast_midi(false);
+        assert_eq!(m.midi_pending(&s), 1); // bit>=0 counted, rx arm dead
+        assert!(!m.midi_idle(0, &s)); // bit 4 != -1
+        assert!(!m.midi_idle_all(&s));
+        m.lines[0].bit = -1;
+        assert_eq!(m.midi_pending(&s), 0); // OFF never reads RDRF (:184)
+        assert!(m.midi_idle_all(&s));
+        // midi_queued is fast-OBtivIOUS on disk (:177-178 counts wire only)
+        m.midi_in(0x41, 0);
+        m.set_fast_midi(true);
+        assert_eq!(m.midi_queued(0), 1);
+        assert_eq!(m.midi_queued(7), 1); // :177 alias unchanged
     }
 }
