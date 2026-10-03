@@ -57,7 +57,8 @@ impl Machine {
         // 版 5 から: SmartMedia の命令の途中の状態（カードの中身は入れない）
         // (:3531-3533)
         if s.version() >= 5 {
-            self.card.state(s); // :3533 (smartmedia.cpp:362-375, no tag)
+            // shared Rc — bus arms hold no borrow across a save/load
+            self.card.borrow_mut().state(s); // :3533 (smartmedia.cpp:362-375, no tag)
         }
 
         self.soc.state(s); // :3535 (sh7042_device::state, sh7042.cpp:403-431

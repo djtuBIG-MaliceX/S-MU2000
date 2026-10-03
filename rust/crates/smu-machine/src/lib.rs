@@ -22,7 +22,8 @@
 //! - The bus seen by the core is a per-instruction `Ctx<'_>` borrowing the
 //!   disjoint fields (`bus`, `rm`, sci4 core, latches). `Ctx` intercepts the
 //!   machine-owned windows (SCI4 — its handlers need `&mut RunningMachine`,
-//!   mu2000.cpp:965-972; led/d80/card/usb stubs) and delegates regions plus
+//!   mu2000.cpp:965-972; led/d80 stubs; card/usb via the bus Dev arms) and
+//!   delegates regions plus
 //!   the internal register space to `Sh7042Bus` (its `fast_read`/`find_*`
 //!   port the membus.h hot path and the `mu2000::build_bus` decode
 //!   mu2000.cpp:712-997).
@@ -49,12 +50,13 @@
 //! sh7042.cpp:397-401).
 //!
 //! # Deviations (see session report; none fire on the boot golden path)
-//! - SWP30 (M3), MIDI bit-machine/fast_midi (M4), SmartMedia (M4) — the
-//!   USB host (M7) is LIVE since the `USB host (M37640)` row (usb.rs +
-//!   Hub::usb bus arms + run_cycles :1227 pump; guard :1323 keeps
-//!   host-OFF runs byte-identical); its windows return the disk "no
-//!   handler answered" 0 (card CONTROL keeps its literal 0xff inside
-//!   `Sh7042Bus`, mu2000.cpp:960).
+//! - SWP30 (M3), MIDI bit-machine/fast_midi (M4) — the USB host (M7) is
+//!   LIVE since the `USB host (M37640)` row (usb.rs + Hub::usb bus arms +
+//!   run_cycles :1227 pump; guard :1323 keeps host-OFF runs byte-identical);
+//!   its windows return the disk "no handler answered" 0. SmartMedia is
+//!   LIVE since the W-CARD row (card.rs full port + Hub::card* bus arms +
+//!   PA19/PA20 off the real card; CONTROL keeps its literal 0xff inside
+//!   `Sh7042Bus`, mu2000.cpp:992).
 //! - ADC0/ADC1 (cancelled row): instantiated nowhere; `adc0/adc1_update`
 //!   trait defaults return 0 == disk `add_event` skip (sh7042.cpp:256-257).
 //! - `--hash-pc`/`--trace-pc` fold through the `smu_compat::paths` global
@@ -124,10 +126,12 @@ const SCI4_END: u32 = 0x00f0_003f;
 const LED_ADDR: u32 = 0x00c8_0000; // mu2000.cpp:928 (start==end)
 const PANEL_ADDR: u32 = 0x00e0_0000; // mu2000.cpp:935
 const D80_ADDR: u32 = 0x00d8_0000; // mu2000.cpp:941
-const CARD_DATA_BASE: u32 = 0x00c0_0000; // mu2000.cpp:952
-const CARD_DATA_END: u32 = 0x00c7_ffff;
-const CARD_CTRL_BASE: u32 = 0x00d0_0000; // mu2000.cpp:959 (reads 0xff in bus)
-const CARD_CTRL_END: u32 = 0x00d7_ffff;
+// The SmartMedia windows (c00000-c7ffff data, d00000-d7ffff control,
+// mu2000.cpp:981-995) have NO Ctx intercept since this row: sh7042.rs
+// Dev::CardData/CardCtrl (find_dev) decode all widths with the membus.h
+// r8-chain demotion and the handlers live in Hub::card_data_r8/
+// card_data_w8/card_ctrl_w8 -> smu_machine::card (disk lambdas :985-986/:993;
+// CONTROL read keeps its literal 0xff, :992).
 // SWP30 window bases live in smu_swp30::{MASTER_BASE,SLAVE_BASE} (mu2000.cpp:921-922).
 // The USB window (mu2000.cpp:1009-1010, disk re-verified 2026-10-03) has NO
 // Ctx intercept since the M7 row: sh7042.rs Dev::Usb (find_dev :479-480)
@@ -631,8 +635,11 @@ pub struct Hub {
     pub lcd: Rc<RefCell<Hd44780>>,
     pub sws: Rc<RefCell<[u8; 6]>>, // mu2000.h:885 {0xff x6}, active-low rows
     pub enc: Rc<RefCell<EncState>>,
-    /// mu2000.cpp:1089 `m_card.inserted()` — empty slot (M4 stub)
-    pub card_inserted: Rc<RefCell<bool>>,
+    /// mu2000.h `smartmedia m_card` — the live card behind the bus arms
+    /// (mu2000.cpp:985-986/993) and the PA19/PA20 pins (:1121-1125).
+    /// Shared with `Machine::card` (this row; was the M4 `card_inserted`
+    /// bool mirror).
+    pub card: Rc<RefCell<card::Card>>,
     /// sh7042.cpp:167-168 (die-A: both SH_ADC_MS) — see the `Adc` port above
     pub adc0: Rc<RefCell<Adc>>, // port_base 0, vector 136
     pub adc1: Rc<RefCell<Adc>>, // port_base 4, vector 137
@@ -720,12 +727,19 @@ impl Hub {
         self.lcd.borrow_mut().lcd_port_w(n, v);
     }
 
-    /// origin: mu2000.cpp:1083-1105 read_porta closure (card lines + dial).
+    /// origin: mu2000.cpp:1115-1136 read_porta closure (card lines + dial).
     fn porta_pins(&self) -> u32 {
-        let mut v: u32 = 0xffff; // :1084
-        if *self.card_inserted.borrow() {
-            v |= 1 << 19; // :1090 inserted (PA19); write_protected stays set-aside
-            v |= 1 << 20; // :1091-1092 !write_protected — empty-slot stub never writes
+        let mut v: u32 = 0xffff; // :1116
+        {
+            // :1117-1125 SmartMedia の線: PA19 差し込み / PA20 書き込みを
+            // 禁じていない（busy PA18 never asserted — reads finish inline）
+            let c = self.card.borrow();
+            if c.inserted() {
+                v |= 1 << 19; // :1122
+                if !c.write_protected {
+                    v |= 1 << 20; // :1123-1124
+                }
+            }
         }
         {
             let mut e = self.enc.borrow_mut();
@@ -754,6 +768,125 @@ impl Hub {
             }
         }
         res
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ---- フロントパネル（mu2000.cpp:500-570）—— ボタン表と enum
+// firmware は c80000 に「行」を書いてから同じ番地を読む。押されている桁が 0。
+// ---------------------------------------------------------------------------
+
+/// origin: mu2000.cpp:507 `struct button_slot { u8 row, bit; const char *name; }`
+struct ButtonSlot {
+    row: u8,
+    bit: u8,
+    name: &'static str,
+}
+
+/// origin: mu2000.cpp:510-524 `const button_slot BUTTONS[]` — 1-to-1 with
+/// [`Button`] (the disk `static_assert` :526-527 becomes the COUNT check in
+/// [`button_slot`]).
+const BUTTONS: [ButtonSlot; 35] = [
+    ButtonSlot { row: 0, bit: 2, name: "Strings" },
+    ButtonSlot { row: 0, bit: 3, name: "Bass" },
+    ButtonSlot { row: 0, bit: 4, name: "Guitar" },
+    ButtonSlot { row: 0, bit: 5, name: "Organ" },
+    ButtonSlot { row: 0, bit: 6, name: "Chrom. Perc." },
+    ButtonSlot { row: 0, bit: 7, name: "Piano" },
+    ButtonSlot { row: 1, bit: 2, name: "Synth pad" },
+    ButtonSlot { row: 1, bit: 3, name: "Synth lead" },
+    ButtonSlot { row: 1, bit: 4, name: "Pipe" },
+    ButtonSlot { row: 1, bit: 5, name: "Reed" },
+    ButtonSlot { row: 1, bit: 6, name: "Brass" },
+    ButtonSlot { row: 1, bit: 7, name: "Ensemble" },
+    ButtonSlot { row: 2, bit: 2, name: "Drum" },
+    ButtonSlot { row: 2, bit: 3, name: "Model excl." },
+    ButtonSlot { row: 2, bit: 4, name: "SFX" },
+    ButtonSlot { row: 2, bit: 5, name: "Percussive" },
+    ButtonSlot { row: 2, bit: 6, name: "Ethnic" },
+    ButtonSlot { row: 2, bit: 7, name: "Synth effects" },
+    ButtonSlot { row: 3, bit: 1, name: "Part +" },
+    ButtonSlot { row: 3, bit: 2, name: "Part -" },
+    ButtonSlot { row: 3, bit: 3, name: "Mute/Solo" },
+    ButtonSlot { row: 3, bit: 4, name: "Effect" },
+    ButtonSlot { row: 3, bit: 5, name: "Util" },
+    ButtonSlot { row: 3, bit: 6, name: "Edit" },
+    ButtonSlot { row: 3, bit: 7, name: "Play" },
+    ButtonSlot { row: 4, bit: 1, name: "Value +" },
+    ButtonSlot { row: 4, bit: 2, name: "Value -" },
+    ButtonSlot { row: 4, bit: 3, name: "Exit" },
+    ButtonSlot { row: 4, bit: 4, name: "Select >" },
+    ButtonSlot { row: 4, bit: 5, name: "Select <" },
+    ButtonSlot { row: 4, bit: 6, name: "Enter" },
+    ButtonSlot { row: 4, bit: 7, name: "Seq" },
+    ButtonSlot { row: 5, bit: 5, name: "Audition" },
+    ButtonSlot { row: 5, bit: 6, name: "Select" },
+    ButtonSlot { row: 5, bit: 7, name: "Sampling/Mode" },
+];
+
+/// origin: mu2000.h:321-329 `enum class button { ... count }`
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(i32)]
+pub enum Button {
+    Strings = 0,
+    Bass,
+    Guitar,
+    Organ,
+    ChromPerc,
+    Piano,
+    SynthPad,
+    SynthLead,
+    Pipe,
+    Reed,
+    Brass,
+    Ensemble,
+    Drum,
+    ModelExcl,
+    Sfx,
+    Percussive,
+    Ethnic,
+    SynthEffects,
+    PartPlus,
+    PartMinus,
+    MuteSolo,
+    Effect,
+    Util,
+    Edit,
+    Play,
+    ValuePlus,
+    ValueMinus,
+    Exit,
+    SelectRight,
+    SelectLeft,
+    Enter,
+    Seq,
+    Audition,
+    Select,
+    SamplingMode,
+    /// mu2000.h:328 `count` — 35
+    Count = 35,
+}
+
+impl Button {
+    /// Disk-side callers pass the enum; tools pass raw ints (C++ `int(b)`).
+    /// Out of range -> None (disk clamps by returning "" / no-op).
+    pub fn from_i32(i: i32) -> Option<Button> {
+        if (0..(Button::Count as i32)).contains(&i) {
+            // SAFETY: repr(i32) + full dense range 0..=Count checked above
+            Some(unsafe { std::mem::transmute::<i32, Button>(i) })
+        } else {
+            None
+        }
+    }
+}
+
+/// origin: mu2000.cpp:531-535 `button_name` (out of range -> "")
+pub fn button_name(b: Button) -> &'static str {
+    let i = b as i32;
+    if i >= 0 && i < Button::Count as i32 {
+        BUTTONS[i as usize].name
+    } else {
+        ""
     }
 }
 
@@ -787,6 +920,12 @@ fn swp_hold(master: bool, reg: u32, wait: &RefCell<u64>) {
 }
 
 impl Sh7042Peripherals for Hub {
+    /// W-SAMP1: the machine-side card swap reaches the Hub's `card` clone
+    /// through this (`Machine::share_card_from`).
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
+    }
+
     // ---- SCI0/1 (sh7042.cpp:237-238; address decode inside Sh2SciPair) ----
     fn sci_r8(&mut self, sci: usize, a: u32) -> u8 {
         let r = self.pair.borrow_mut().sci_r8(sci, a);
@@ -1554,10 +1693,16 @@ impl Sh7042Peripherals for Hub {
     }
     fn d80_w8(&mut self, _v: u8) {}
     fn card_data_r8(&mut self) -> u8 {
-        0 // M4 smartmedia stub (empty slot reads 0)
+        // mu2000.cpp:985 m_card.data_r() — no-card/CE-low/idle read is 0xFF
+        // (smartmedia.cpp:247-248), NOT the old M4 stub's 0
+        self.card.borrow_mut().data_r()
     }
-    fn card_data_w8(&mut self, _v: u8) {}
-    fn card_ctrl_w8(&mut self, _v: u8) {}
+    fn card_data_w8(&mut self, v: u8) {
+        self.card.borrow_mut().data_w(v) // mu2000.cpp:986
+    }
+    fn card_ctrl_w8(&mut self, v: u8) {
+        self.card.borrow_mut().control_w(v) // mu2000.cpp:993
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1702,8 +1847,9 @@ impl Sh2Bus for Ctx<'_> {
             LED_ADDR => *self.ledsw1 = v, // mu2000.cpp:930 (m_ledsw1 = v)
             PANEL_ADDR => *self.ledsw2 = v, // mu2000.cpp:936 (m_ledsw2 = v)
             D80_ADDR => *self.d80 = v,    // mu2000.cpp:945 (m_d80)
-            CARD_DATA_BASE..=CARD_DATA_END => {} // M4 smartmedia data stub
-            CARD_CTRL_BASE..=CARD_CTRL_END => {} // M4 (read 0xff stays in bus)
+            // CARD windows fall through to the bus since this row
+            // (Dev::CardData/CardCtrl -> Hub::card_data_w8/card_ctrl_w8;
+            // CONTROL read keeps its literal 0xff in the bus, :992)
             // SWP falls through to the bus (Dev::Swpm/Swps -> Hub::swp_w8) :921-922
             // USB window: NO intercept since the M7 row — bus Dev::Usb ->
             // Hub::usb_w8 (disk lambda mu2000.cpp:1012 usb_w(a-0xf80000))
@@ -1873,6 +2019,11 @@ fn c_atoi(s: &str) -> i32 {
 ///   — pinned at load; bins never reassign `Machine::wave` afterwards),
 /// - `sintab`: `m_swps.set_sintab(...)` (mu2000.cpp:419, via
 ///   `Machine::set_sintab_pin`).
+/// - `sampram`: `m_swps.set_sample_ram(m_sampram.data(), size())` →
+///   `m_wave_cache.set_overlay` (mu2000.cpp:90 + mamecompat.h:170-175).
+///   Disk carries the overlay INSIDE the device cache; the Rust `Wave` is
+///   rebuilt per sample, so the W-SAMP2 overlay rides along here too
+///   (else the threaded slave's fetch could never see sampling RAM).
 /// SAFETY: the go/done release/acquire handshake (mu2000.cpp:3450-3455 /
 /// :357-371) makes thread ownership EXCLUSIVE per sample — see the field
 /// notes on `Machine::slave_*`. The RefCell borrow flag and all SWP state
@@ -1884,6 +2035,8 @@ struct SlaveRaws {
     wave_len: usize,
     sintab: *const u16,
     sintab_len: usize,
+    sampram: *const u8,
+    sampram_words: u32,
 }
 unsafe impl Send for SlaveRaws {}
 
@@ -1950,10 +2103,11 @@ pub struct Machine {
     pub lcd: Rc<RefCell<Hd44780>>,
     pub sws: Rc<RefCell<[u8; 6]>>,
     pub enc: Rc<RefCell<EncState>>,
-    pub card_inserted: Rc<RefCell<bool>>,
-    /// origin: mu2000.h `smartmedia m_card` (state leg mu2000.cpp:3531-3533
-    /// v>=5 — M5-W3a; bus behavior stays with the `smartmedia stub` row)
-    pub card: card::Card,
+    /// origin: mu2000.h `smartmedia m_card` — state leg (mu2000.cpp:3531-3533
+    /// v>=5, M5-W3a) AND the live bus object (mu2000.cpp:985-986/993 +
+    /// PA19/PA20 :1121-1125) behind one Rc: the Hub arms and `Hub::porta_pins`
+    /// drive the SAME card (this row).
+    pub card: Rc<RefCell<card::Card>>,
     pub adc0: Rc<RefCell<Adc>>, // sh7042.cpp:167 (MS, base 0, vec 136)
     pub adc1: Rc<RefCell<Adc>>, // :168 (MS, base 4, vec 137)
     pub ad_peak: Rc<RefCell<[i32; 2]>>, // mu2000.h:869 {0,0}
@@ -1980,12 +2134,13 @@ pub struct Machine {
     pub enc_pending: i32,   // :896 `int m_enc_pending = 0` — panel state leg :3543 (runtime
                             // PORTA seam lives in EncState — W5 re-tap note)
     /// SWP30 sampling RAM (mu2000.h:874 `m_sampram`; ctor mu2000.cpp:88
-    /// assign(0x400000, 0)). Rides the state stream (mu2000.cpp:3530).
-    /// DEVIATION (ledger-disclosed, M5-W4): the wave-path overlay
-    /// (`set_sample_ram` -> wave_cache overlay, swp30.h:53) is NOT wired —
-    /// fetch.rs:15-16 overlay-free row — so nothing writes here yet; the
-    /// field exists so the state BYTES match C++ and the sampling row can
-    /// wire the overlay without touching the layout.
+    /// assign(0x400000, 0)). Rides the state stream (mu2000.cpp:3530,
+    /// IN-PLACE `StateIo::mem` — the buffer never reallocs, so the
+    /// `set_sample_ram` device pins taken at ctor stay valid).
+    /// W-SAMP1: the overlay wiring landed — both SWP30 instances carry a
+    /// raw pin on THIS buffer (`Swp30::set_sample_ram` ← swp30.h:53),
+    /// the fetch path overlays reads (fetch.rs `Wave`), and the rec/
+    /// download windows (0x5000/0x7000/0x8000/0x9000) write through it.
     pub sampram: Vec<u8>,
     // ---- run-loop counters (mu2000.h members) ----
     pub overrun: u64, // m_overrun
@@ -2087,7 +2242,9 @@ impl Machine {
         let lcd = Rc::new(RefCell::new(Hd44780::new(CPU_HZ, LCD_HZ))); // mu2000.h m_lcd
         let sws = Rc::new(RefCell::new([0xffu8; 6])); // mu2000.h:885
         let enc = Rc::new(RefCell::new(EncState { pending: 0, high: true })); // :889-890
-        let card_inserted = Rc::new(RefCell::new(false)); // empty slot
+        // mu2000.h `smartmedia m_card` — empty slot (smartmedia.h:75-90
+        // member initializers == Card::new; this row shares it with the Hub)
+        let card = Rc::new(RefCell::new(card::Card::new()));
         let adc0 = Rc::new(RefCell::new(Adc::new_ms(0, 136))); // sh7042.cpp:167
         let adc1 = Rc::new(RefCell::new(Adc::new_ms(4, 137))); // :168
         let ad_peak = Rc::new(RefCell::new([0i32; 2])); // mu2000.h:869
@@ -2121,7 +2278,7 @@ impl Machine {
             lcd: Rc::clone(&lcd),
             sws: Rc::clone(&sws),
             enc: Rc::clone(&enc),
-            card_inserted: Rc::clone(&card_inserted),
+            card: Rc::clone(&card), // mu2000.cpp:985-986/993 + :1121-1125
             adc0: Rc::clone(&adc0),
             adc1: Rc::clone(&adc1),
             ad_peak: Rc::clone(&ad_peak),
@@ -2134,6 +2291,21 @@ impl Machine {
             usb_host: Rc::clone(&midi.usb_host), // :1022 (AN4 lambda :1151)
             buf: Vec::new(),
         }));
+
+        // mu2000.cpp:88 — the sampling RAM (4 MB, zero-filled)
+        let sampram: Vec<u8> = vec![0u8; 0x400000];
+        // mu2000.cpp:89-90 — install the overlay on BOTH devices.
+        // SAFETY: raw-pin discipline, same as `sintab_pin` — the buffer is
+        // owned by this Machine (`sampram` field, moved below; moves keep
+        // the heap address), never reallocs (state restore is in-place
+        // `StateIo::mem`), and outlives every pin user (both Rc<RefCell<
+        // Swp30>> + their clones inside this Machine). Both devices share
+        // the ONE window exactly like the single C++ `m_sampram.data()`.
+        {
+            let (base, len) = (sampram.as_ptr() as *mut u8, sampram.len());
+            swpm.borrow_mut().set_sample_ram(base, len); // swp30.h:53
+            swps.borrow_mut().set_sample_ram(base, len);
+        }
 
         Machine {
             rm,
@@ -2154,8 +2326,7 @@ impl Machine {
             lcd,
             sws,
             enc,
-            card_inserted,
-            card: card::Card::new(), // mu2000.h m_card (smartmedia.h:82-90 inits)
+            card, // mu2000.h m_card (shared with the Hub — smartmedia.h:75-90 inits)
             adc0,
             adc1,
             ad_peak,
@@ -2173,7 +2344,7 @@ impl Machine {
             m_sci_irq3: 0,
             pe: 0,                          // mu2000.h:898 = 0 (M5-W4 state leg :3543)
             enc_pending: 0,                 // mu2000.h:896 = 0 (M5-W4 state leg :3543)
-            sampram: vec![0u8; 0x400000],   // mu2000.cpp:88 assign(0x400000, 0)
+            sampram,                         // mu2000.cpp:88 (pinned above, :89-90)
             overrun: 0,
             cycle_debt: 0,                  // mu2000.h:925 = 0 (M5-W4 state leg :3545)
             loops: 0,
@@ -2213,9 +2384,51 @@ impl Machine {
         let prog = roms::load_program(&format!("{dir}/mu2000_flash.bin"))?;
         let wave = roms::load_wave(&format!("{dir}/dump"))?;
         let mut m = Machine::new(prog);
-        m.wave = wave; // parked for the M3 row (mu2000.cpp:395-402)
+        m.set_wave_rom(wave); // mu2000.cpp:395-402 + :404-411 (device pins)
         m.reset();
         Ok(m)
+    }
+
+    /// origin: mu2000.cpp:404-411 `set_wave_rom` — stash the ROM, then pin
+    /// BOTH SWP devices (the register-path `wave_read_dword` base,
+    /// swp30.cpp:1919-1922). The heap buffer never moves after this point:
+    /// `run_sample_pair`'s take/restore round-trip keeps the same address.
+    pub fn set_wave_rom(&mut self, wave: Vec<u8>) {
+        self.wave = wave; // :406 (an empty ROM rides through, pinning skipped)
+        if self.wave.is_empty() {
+            return; // :407-408
+        }
+        let (base, len) = (self.wave.as_ptr(), self.wave.len());
+        self.swpm.borrow_mut().set_wave_rom(base, len); // :409
+        self.swps.borrow_mut().set_wave_rom(base, len); // :410
+    }
+
+    /// origin: mu2000.h:271 `sample_ram()` — the shared 4 MB sampling RAM
+    /// (read view for samptest / the recorder; the state stream and the
+    /// device overlay pins address the SAME buffer).
+    pub fn sample_ram(&self) -> &Vec<u8> {
+        &self.sampram
+    }
+
+    /// W-SAMP1 card-sharing seam — the samptest harness runs two machines
+    /// behind ONE card (`h.mu.card() = g.mu.card()`). Point this machine's
+    /// handle AND the Hub's (the bus arms mu2000.cpp:985-993 and the
+    /// PA19/PA20 pins closure :1115-1136 read the Hub clone) at `other`'s
+    /// card; afterwards a mutation through either machine is visible in
+    /// both, and PA19/PA20 follow on both consoles.
+    pub fn share_card_from(&mut self, other: &Machine) {
+        let card = Rc::clone(&other.card);
+        self.card = Rc::clone(&card);
+        if let Some(hub) = self
+            .soc
+            .bus
+            .periph
+            .as_mut()
+            .and_then(|p| p.as_any_mut())
+            .and_then(|a| a.downcast_mut::<Hub>())
+        {
+            hub.card = card;
+        }
     }
 
     /// origin: mu2000.cpp:1043-1048 `start_devices` — "MAME calls in
@@ -2331,6 +2544,46 @@ impl Machine {
         let mut sink = self.swp_sink.borrow_mut();
         sink.f = Some(f);
         sink.reads = with_reads;
+    }
+
+    /// origin: mu2000.cpp:537-551 `set_button` — drives the shared `m_sws`
+    /// rows (active-low), state leg mu2000.cpp:3542. DEVIATION
+    /// (ledger-disclosed): disk's `panel_touched()` (:550) sets
+    /// `m_panel_hold`, consumed ONLY by the native-engine run path
+    /// (:1063, :3294-3297) — that path is not ported (AGENTS ignore list),
+    /// so the hold has no Rust meaning and the firmware-path machine runs
+    /// full speed anyway. The sws effect is identical.
+    pub fn set_button(&mut self, b: Button, pressed: bool) {
+        let i = b as i32;
+        if !(0..(Button::Count as i32)).contains(&i) {
+            return; // :540-541
+        }
+        let s = &BUTTONS[i as usize]; // :542
+        let mut rows = self.sws.borrow_mut();
+        let was = (rows[s.row as usize] >> s.bit) & 1 == 0; // :543 !BIT
+        if pressed {
+            rows[s.row as usize] &= !(1 << s.bit); // :544-545
+        } else {
+            rows[s.row as usize] |= 1 << s.bit; // :546-547
+        }
+        // :548-550 `if (was != pressed) panel_touched()` — no-op here (doc)
+        let _ = was;
+    }
+
+    /// origin: mu2000.cpp:553-560 `button_pressed`
+    pub fn button_pressed(&self, b: Button) -> bool {
+        let i = b as i32;
+        if !(0..(Button::Count as i32)).contains(&i) {
+            return false; // :556-557
+        }
+        let s = &BUTTONS[i as usize]; // :558
+        (self.sws.borrow()[s.row as usize] >> s.bit) & 1 == 0 // :559 !BIT
+    }
+
+    /// origin: mu2000.h `m_lcd` DD RAM view — the harness seam disk exposes
+    /// as `mu.lcd().ddram()` (render.cpp:495/521 consumers).
+    pub fn lcd_ddram(&self) -> [u8; 0x80] {
+        self.lcd.borrow().m_ddram // hd44780.h:121 (hd44780.rs:74-75)
     }
 
     /// Total deferred-slot hits across both SWP30 devices since reset. The
@@ -2594,6 +2847,8 @@ impl Machine {
             wave_len: self.wave.len(),
             sintab: self.sintab_pin,
             sintab_len: self.sintab_len,
+            sampram: self.sampram.as_ptr(), // mu2000.cpp:90 pin (ctor :2298)
+            sampram_words: (self.sampram.len() >> 2) as u32, // mamecompat.h:174
         };
         self.slave = Some(std::thread::spawn(move || {
             Self::slave_loop(seen, go, done, quit, out, parked, waker, raw)
@@ -2667,7 +2922,12 @@ impl Machine {
             }
             // :369-371 m_slave_l = m_slave_r = 0; run; publish done
             out.set((0, 0));
-            let w = Wave::new(wave); // zero-alloc wrapper (fetch.rs:33)
+            // zero-alloc wrapper (fetch.rs:33) + W-SAMP2 sampling-RAM
+            // overlay — disk-faithful: m_swps' m_wave_cache carries
+            // set_overlay(m_sampram, 0x1000000, bytes>>2) from the ctor
+            // (mu2000.cpp:90/mamecompat.h:170-175). SAFETY: `sampram`
+            // never reallocs (fixed 4 MB, ctor-sized; :2132-2136 note).
+            let w = unsafe { Wave::with_overlay(wave, raw.sampram, raw.sampram_words) };
             let (l, r) = swp.borrow_mut().run_sample(sintab, &w); // :370
             out.set((l, r));
             done.store(seen, Ordering::Release); // :371
@@ -2693,7 +2953,20 @@ impl Machine {
         }
         // :3448 s32 lm = 0, rm = 0, ls = 0, rs = 0;
         let wave = std::mem::take(&mut self.wave); // borrow seam, no alloc
-        let w = Wave::new(&wave);
+        // W-SAMP2: the per-sample `Wave` must carry the sampling-RAM
+        // overlay — disk's m_swpm.m_wave_cache gets set_overlay from the
+        // ctor (mu2000.cpp:89 + mamecompat.h:170-175) and every fetch
+        // (AUDITION, sample playback) reads through it. Without this the
+        // fetch wraps ROM (samptest audition read garbage; samptest.cpp:7
+        // 「サンプリング RAM と波形アクセス 0x7000」). SAFETY: sampram
+        // never reallocs (fixed 4 MB; :2132-2136 note).
+        let w = unsafe {
+            Wave::with_overlay(
+                &wave,
+                self.sampram.as_ptr(),
+                (self.sampram.len() >> 2) as u32,
+            )
+        };
         let (lm, rm, _ls, _rs) = if let Some(_st) = self.slave.as_ref() {
             // :3449-3457 threaded arm — publish, run master, spin, collect
             let tag = self.slave_go.load(Ordering::Relaxed).wrapping_add(1); // :3450
@@ -2754,8 +3027,23 @@ impl Machine {
             s.set_meli(6, ad0.wrapping_mul(256)); // :3442
             s.set_meli(7, ad1.wrapping_mul(256)); // :3443
         }
-        // :3444-3448 AN0/AN2 meter detection — display-only, deferred to the
-        // meter/live row (no audio state; m_ad_peak mirrors remain [0,0]).
+        // :3444-3448 AN0/AN2 meter detection (mu2000.cpp:3490-3493, W-SAMP1)
+        // — peak latch / decay ladder into the SHARED `ad_peak` Rc that the
+        // ADC AN0/AN2 seam (ad_pin / ad_level_adc) converts for the
+        // firmware's REC TriggerLvl poll. `a = min(abs(in), 32767)`:
+        // abs is safe here — ad_in is the 16-bit domain (mu2000.h:258).
+        {
+            let mut peak = self.ad_peak.borrow_mut();
+            for (i, v) in [ad0, ad1].iter().enumerate() {
+                let a = v.abs().min(32767); // :3491
+                peak[i] = if a >= peak[i] {
+                    a // :3492 latch
+                } else {
+                    peak[i] - ((peak[i] >> 12) + 1) // :3492 decay (peak >= 1
+                    // whenever a < peak, so the subtraction stays >= 0)
+                };
+            }
+        }
         // :3450-3453 speaker = master DAC only
         (lm, rm)
     }

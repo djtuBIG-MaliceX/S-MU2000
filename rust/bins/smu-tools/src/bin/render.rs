@@ -344,6 +344,7 @@ fn main() {
     let mut meg_tr_pc0: u32 = 0;
     let mut meg_tr_pc1: u32 = 0;
     let mut single = false; // :198 `bool single = false`（スレーブを別スレッドにしない）
+    let mut card_path: Option<String> = None; // :215 `const char *card_path` — LIVE (W-CARD)
     let mut boot = -1.0f64; // :180 (<0 -> boot-wait on midi_ready)
     let mut use_bootcache = false; // :194 --bootcache。起動後の写しから始める（確かめ用）
     // DEV pc-trace window (boot->RE timers hunt; mirrors boot.rs:123-140 /
@@ -419,7 +420,7 @@ fn main() {
             eprintln!("(rust render: --adc-in は未実装 — 無視)"); // :237-238 A/D row
             i += 2;
         } else if a == "--card" && i + 1 < raw.len() {
-            eprintln!("(rust render: --card は未実装 — 無視)"); // :239-240 SmartMedia
+            card_path = Some(nxt(i + 1)); // :239-240/261-262 — LIVE (W-CARD)
             i += 2;
         } else if a == "--trace-midi" {
             trace_midi = true; // :241-242
@@ -514,7 +515,7 @@ fn main() {
         }
     };
     let mut m = Machine::new(prog);
-    m.wave = wave; // render-side wave bus glue (mu2000.cpp:395-402, M4 deferral)
+    m.set_wave_rom(wave); // render-side wave bus glue (W-SAMP1: + device pins, mu2000.cpp:395-411)
     // :299-300 sintab: WARNING only, does not change exit code. The SWP30 sin
     // stand-in is fed to run_sample_pair (the deferred set_sintab_rom glue).
     let sintab: Vec<u16> = match roms::load_sintab(&format!("{dir}/standin/sin-table.bin")) {
@@ -527,6 +528,17 @@ fn main() {
     // mu2000.cpp:413-419 set_sintab_rom (the deferred pin glue — disk pins
     // m_swpm/m_swps at load; the slave thread needs the same stable pointer)
     m.set_sintab_pin(&sintab);
+
+    // origin: render.cpp:324 — insert the card BEFORE boot/reset (fatal on
+    // failure: stderr + exit 1). mu2000::reset never touches m_card
+    // (mu2000.cpp:1051-1153), so disk's position right after the sintab
+    // warning is exactly here.
+    if let Some(p) = &card_path {
+        if !m.card.borrow_mut().load(p, &mut err) {
+            eprintln!("{err}"); // :324 fprintf(stderr, "%s\n", err) + return 1
+            std::process::exit(1);
+        }
+    }
 
     // origin: render.cpp:334-336 --trace-swp BEFORE reset. fopen failure here is
     // SILENT on disk (`if (tf) set...`), unlike boot.cpp's 書けない exit.
@@ -853,7 +865,19 @@ fn main() {
         m.event_fires
     );
 
-    // :642-649 --card writeback (ignored). :651 write_wav
+    // origin: render.cpp:642-649（disk 現行 :673-680）--card writeback —
+    // LIVE (W-CARD row). take_dirty_blocks stopped-copy, then write_blocks.
+    // printf text mode on Windows emits CRLF (ledger CRLF pitfall).
+    if let Some(p) = &card_path {
+        let mut blocks: Vec<smu_machine::card::Block> = Vec::new();
+        m.card.borrow_mut().take_dirty_blocks(&mut blocks); // :675
+        if !smu_machine::card::Card::write_blocks(p, &blocks, &mut err) {
+            eprintln!("{err}"); // :676-677
+        } else if !blocks.is_empty() {
+            print!("カードに書き戻した: {p}（{} ブロック）\r\n", blocks.len()); // :678-679
+        }
+    }
+    // :651 write_wav
     write_wav(&wav, &pcm, RATE);
 
     // :652-686 native-engine accounting: skipped (native off). :687 final line.

@@ -7,8 +7,10 @@
 //! grid is ROUTED COMPLETE (both switches, every case). Since the
 //! `voice engine` row the voice-owned slots (filter/lfo/EG/peg/pitch/
 //! start/loop/address/iir1 + keyon_w + keyon_mask) and since the
-//! `mixer/MELO phase B` row the vol/route/internal slots are ported FOR REAL;
-//! every remaining slot is MEG/wave territory — a `deferred`
+//! `mixer/MELO phase B` row the vol/route/internal slots are ported FOR REAL
+//! and since `W-SAMP1` the wave-access window slots (0x08e/0x08f/0x0ce/
+//! 0x0cf/0x10e/0x10f/0x14e/0x14f/0x30f reads, 0x08e..0x14f writes);
+//! every remaining slot is MEG territory — a `deferred`
 //! fall-through that bumps `deferred_hits` and records `last_deferred_*` so
 //! a stray boot access becomes that row's problem instead of silently
 //! corrupting audio. The `--trace-swp` boot gate requires
@@ -61,10 +63,11 @@ pub struct Swp30 {
     /// stay honest; boot never writes them (verified against golden).
     pub revram_data: u32, // :1991 m_revram_data
     pub rec_ctrl: u16,    // write16 case 0x30e `m_rec_ctrl = data` (:2187)
-    /// origin: swp30.h:619 `m_rec_pos` (v4 state leg :4762). No writer in
-    /// this port yet — the rec block (`m_rec_pos++` :4686) is deferred to
-    /// the sampling-RAM row (mix.rs module doc). NOT cleared by device
-    /// reset (no :1958-2000 write on disk).
+    /// origin: swp30.h:619 `m_rec_pos` (v4 state leg :4762). Written by the
+    /// rec block (`m_rec_pos++` :4686, wired W-SAMP1 — mix.rs
+    /// `sample_step`); read back through bus 0x30f (:2083). NOT cleared by
+    /// device reset (no :1958-2000 write on disk; only wave_access_w 0x7000
+    /// re-arms it to 0, :2397-2398).
     pub rec_pos: u32,
     /// origin: swp30.h:624 `m_sample_counter`. DEAD since the merge: no
     /// write anywhere post-construction (device reset :1965-2009 omits it;
@@ -74,13 +77,30 @@ pub struct Swp30 {
     /// carries this slot (:4747) — keeps bytes cross-loadable with C++.
     pub sample_counter: u32,
     /// origin: swp30.h:625-626 `m_wave_adr/m_wave_size/m_wave_val/
-    /// m_wave_access`. The wave-access arms are still deferred (wave-access
-    /// row) so these latches stay 0 (boot golden writes none); reset zeroes
-    /// them :1986-1989; state legs :4748-4750.
+    /// m_wave_access`. W-SAMP1: the wave-access window arms are LIVE
+    /// (write16 0x08e/0x08f/0x0ce/0x0cf/0x10e/0x14e/0x14f, read16 same +
+    /// 0x10f busy — handlers in mix.rs); boot golden writes none, so
+    /// deferred_hits stays 0. Reset zeroes them :1986-1989;
+    /// state legs :4748-4750.
     pub wave_adr: u32,
     pub wave_size: u32,
     pub wave_val: u32,
     pub wave_access: u16,
+    /// W-SAMP1 flat-space pins (device-side mirrors of the C++
+    /// `m_wave_cache` raw pointers — NOT state, like sintab/wave; the hot
+    /// fetch path keeps the per-call `Wave` borrow, see mix.rs).
+    /// m_ov (mamecompat.h:230) — shared sampling RAM (Machine-owned
+    /// `sampram: Vec<u8>`, pinned once at ctor mu2000.cpp:89-90; the buffer
+    /// never reallocs — only in-place `StateIo::mem` restore).
+    pub sampram: *mut u8,
+    /// m_ov_units (mamecompat.h:232) — window words; 0 = overlay off.
+    pub sampram_words: u32,
+    /// m_base (mamecompat.h:225) — wave ROM pin for the register-path reads
+    /// (`set_wave_rom`, swp30.cpp:1919-1922 ← mu2000.cpp:404-411). Null
+    /// before the ROM lands; reads then return 0 (the s_zero stand-in).
+    pub wave_base: *const u8,
+    /// m_bytes (mamecompat.h:227) — wave ROM size; 0 = empty.
+    pub wave_bytes: usize,
     pub keyon_mask: u64,  // keyon_mask_w r/w64 (:2221-2229), reset 0 (:1968)
     /// origin: swp30.h:629-631 `m_awm_idle` (6.239 idle-voice skip): voices
     /// that are envelope-inactive AND peg-arrived; `awm2_step` (:1838) does
@@ -222,6 +242,12 @@ impl Swp30 {
             wave_size: 0,     // swp30.h:625
             wave_val: 0,      // swp30.h:625
             wave_access: 0,   // swp30.h:626
+            sampram: std::ptr::null_mut(), // W-SAMP1: m_ov null until the
+            // Machine ctor calls set_sample_ram (mu2000.cpp:89-90)
+            sampram_words: 0, // mamecompat.h:232 default 0 (overlay off)
+            wave_base: std::ptr::null(), // m_base null (s_zero) until
+            // set_wave_rom (swp30.cpp:1919 ← mu2000.cpp:404-411)
+            wave_bytes: 0,    // mamecompat.h:227 default
             keyon_mask: 0,    // :1968
             awm_idle: 0,      // swp30.h:631 in-class 0 + reset :1969
             meg: MegState::new(), // :1889-1892 (in-class zeros; reset() below)
@@ -436,7 +462,11 @@ impl Swp30 {
     }
 
     /// A not-yet-ported slot was touched: count it and record the address.
+    /// W-SAMP1 wired the last deferred slots (the wave-access window), so
+    /// nothing calls this on any current path — kept, discipline first:
+    /// a future unported arm routes through here, not silently.
     #[inline]
+    #[allow(dead_code)]
     fn defer(&mut self, addr: u32, is_write: bool) {
         self.deferred_hits = self.deferred_hits.wrapping_add(1);
         self.last_deferred_addr = addr;
@@ -546,14 +576,16 @@ impl Swp30 {
             // revram_data_r<Sel> :2100-01/:2521-27 (Sel=1 RELOADS from RAM):
             0x98e => self.revram_data_r(1),
             0x98f => self.revram_data_r(0),
-            // DEFERRED control reads (not touched by the 28M-cycle boot):
-            0x08e | 0x08f | 0x0ce | 0x0cf | 0x10e | 0x10f
-            | 0x30f | 0x14e | 0x14f => {
-                // deferred: swp30.cpp:2069-2077 (wave addr/size/access/val
-                // + rec_pos) -> wave/internal rows.
-                self.defer(addr, false);
-                0
-            }
+            // wave-access window reads (W-SAMP1; handlers in mix.rs):
+            0x08e => (self.wave_adr >> 16) as u16,  // wave_adr_r<1> :2077/:2373
+            0x08f => self.wave_adr as u16,          // wave_adr_r<0> :2078
+            0x0ce => (self.wave_size >> 16) as u16, // wave_size_r<1> :2079/:2387
+            0x0cf => self.wave_size as u16,         // wave_size_r<0> :2080
+            0x10e => self.wave_access,              // wave_access_r :2081/:2406
+            0x10f => self.wave_busy_r(),            // wave_busy_r :2082/:2411
+            0x30f => self.rec_pos as u16,           // u16(m_rec_pos) :2083
+            0x14e => self.wave_val_r(1),            // wave_val_r<1> :2084/:2420
+            0x14f => self.wave_val_r(0),            // wave_val_r<0> :2085
             // snd_r basin — "書き込み専用の受け皿しかない" :2104 -> 0 (real).
             _ => 0, // :2105
         }
@@ -732,13 +764,16 @@ impl Swp30 {
             0x94f => { self.revram_adr_w(0, data); return; } // :2212
             0x98e => { self.revram_data_w(1, data); return; } // :2213/:2508-2519 (Sel=1 hi half only)
             0x98f => { self.revram_data_w(0, data); return; } // :2214 (Sel=0 latches AND stores to RAM)
-            // DEFERRED control writes (not touched by the 28M-cycle boot):
-            0x08e | 0x08f | 0x0ce | 0x0cf | 0x10e | 0x14e | 0x14f => {
-                // deferred: swp30.cpp:2182-2189 (wave addr+size+access+val)
-                // -> wave/internal rows.
-                self.defer(addr, true);
-                return;
-            }
+            // wave-access window writes (W-SAMP1; handlers in mix.rs). NO
+            // 0x10f arm on disk (busy is read-only) — writes there fall
+            // through to the snd_w basin like C++.
+            0x08e => { self.wave_adr_w(1, data); return; }   // :2192/:2364
+            0x08f => { self.wave_adr_w(0, data); return; }   // :2193
+            0x0ce => { self.wave_size_w(1, data); return; }  // :2194/:2378
+            0x0cf => { self.wave_size_w(0, data); return; }  // :2195
+            0x10e => { self.wave_access_w(data); return; }   // :2196/:2392
+            0x14e => { self.wave_val_w(1, data); return; }   // :2198/:2432
+            0x14f => { self.wave_val_w(0, data); return; }   // :2199
             _ => {}
         }
 

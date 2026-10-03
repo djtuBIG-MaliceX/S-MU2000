@@ -14,31 +14,38 @@ on this repo MUST read this file in full before touching anything, then work the
 > ASK USER CLOSED (S3): S2 tree COMMITTED as `dbd2f72` "Rust my anus" (verified contains
 > the full M5 delta: state_io/nvram/bootcache/card/statetest/state + AGENTS + ledger).
 >
-> **NEXT (S4 close): S4 landed: `audio out` WASAPI ✅, `xgtest`+xg model ✅, USB host ✅,
-> threaded slave ✅, fast_midi ✅ (harness × now {sampling,パネル} ONLY; 63/63 --fast-midi
-> EQ), `midisend`+blocktime ported, ws 514→**552**, x87 GT landmine fixed (build.rs/gtmath).
-> **
-> Row order from here (S4 fully closed — M7 ✅, audio-out/xgtest/USB/threaded all PAIRED,
-> 63/63 fast-midi EQ, ws 552):
-> 1. **M9 DECISION — USER (ledger rule fired: M8 perf gate MISSED 2.19×, gap = SH-2
->    interp 3.69×; M9 = dynasmrt SH-2 JIT, gate JIT-on/off byte-identical 63/63 + win;
->    scaffolding survey first: sh2 core hot-loop shape in core.rs).**
-> 2. RT-loopback re-gate (`midi in` row to paired): ⚠ winmm loopback went DEAD mid-S4
->    (C++↔C++ = MIDI 0 too; both Basic-App-Loopback and loopMIDI; no stuck procs) —
->    REBOOT (USER) then re-gate; receiver rebuilt from midi_in.cpp decode with PREPARED
->    long buffers (orch ad-hoc probe = 9×00 junk on BOTH builds — not a code signal).
-> 3. Samptest/panel ports (last two harness ×-skips) — optional, same bin-port pattern.
-> ASK USER (S4 close, standing): **commit the S4 tree** — ~30 files UNCOMMITTED on
-> `93fd3c0`: hal-win (wasapi/build.rs/midi_out/live+bin midisend/xgtest), smu-machine
-> (xg/, usb.rs, threaded slave, fast midi), bins (blocktime/render/statetest), Cargo
-> shims, tests (xg_model/usb/midi_out additions), ledger. Also: (a) REBOOT needed to
-> restore winmm loopback for the `midi in` deep re-gate; (b) M9 SH-2 JIT go/no-go.
-> Cold-start (all S2 §0-3 traps live): ws now **552**; flat exes stamp 10-03 07:1x,
-> ALL flat==target hash-verified at S4 close (stale-trap re-bit: W-XG copied only its own
-> xgtest.exe — ALWAYS full-refresh + hash-compare after any worker build); exes at
-> session end verified config-nvram EMPTY; suite = detached + PYTHONIOENCODING=utf-8
-> (verdict at 7256 ch — don't panic-poll on size). Ctrl+C testing recipe = S3 log.
-> Full-suite wall clock ≈ 8-10 min (threaded), not 25.
+> **NEXT (S5 pass 1): S4 tree COMMITTED (`8834891`). Build ergonomics LANDED (S5/W-BUILD):
+> root `.cargo/config.toml` twin + Makefile:216 `make rust` = ONE canonical command from
+> ROOT (PATH-prefix MSYS2) that builds live.exe/render.exe/& co into build-rust/target AND
+> stages flat exes — AGENTS.md `cargo build --release --manifest-path rust\Cargo.toml`
+> from root now lands canonical too; stray `rust\target` trap DEAD (dir deleted; root
+> cargo re-gate exit 0 + `rust\target` absent afterwards; flat==target 8/8 SHA256;
+> piano 合; ws 552 re-run).**
+> Row order from here (S5):
+> 1. **W-CARD — SmartMedia authoring in smu-machine/src/card.rs (currently state-fields
+>    only, bus unwired; smartmedia.h + mu2000.cpp card glue). PREREQ for samptest
+>    (format→SAVE→LOAD leg). Gate: card read/write vectors vs g++ GT + boot_golden +
+>    ws green.**
+> 2. **W-SAMP — port samptest.cpp (348 L, console, mu2000.h only: set_audio_input 440Hz
+>    sine, panel REC flow, Goertzel 440Hz check, SmartMedia SAVE/LOAD, AD1/AD2 legs)
+>    → bins/samptest. Makefile:309 builds C++ samptest.exe (NEVER built — `make
+>    build/samptest.exe` first, zero src edits). Gate: harness `--only` sampling ×→合
+>    on SMU_BUILD=build-rust + C++↔Rust samptest.log compare.**
+> 3. **W-PANEL — port panel.cpp (15.7 KB console, mu2000.h+smf.h; --keys/--turn-at/
+>    --trace/--mid/--wav; harness step_panel + step_dial consumers). `--native` leg =
+>    ACCEPT-IGNORE degenerate (native engine not built — S3/W-LCD precedent; both legs
+>    firmware path). Gate: harness パネル ×→合 (+ダイヤル if dialloop.mid exists) + ws.**
+> 4. **M9 (USER GO + USER ADDENDUM 2026-10-03: aim for REAL-TIME MARGIN — misses may be
+>    logic, not raw CPU: diagnose FIRST — profile live/blocktime: alloc/lock in cb?
+>    starvation? per-sample overhead? then dynasmrt SH-2 JIT (gap = SH-2 interp 3.69×);
+>    gate JIT on/off byte-identical 63/63 + blocktime ≤ C++-interp SINGLE bar
+>    8.887/11.75 + live no-starvation).**
+> 5. RT-loopback re-gate (`midi in` row): ENV-BLOCKED — winmm loopback dead since S4;
+>    REBOOT (USER) then re-gate w/ PREPARED long buffers (see S4 pass-2 entry).
+> Cold-start (traps live unless struck): ws **552**; flat exes stamp 10-03 **12:46**
+> (post-`make rust`); suite = SYNCHRONOUS + PYTHONIOENCODING=utf-8, timeout ≥1500000;
+> SMU_BUILD per-process; fc.exe not fc; cargo config now twin'd (root OR rust\ both
+> canonical — the ONE remaining cargo trap: never build from elsewhere).
 > **LIVE GATE RECIPE UPGRADE (S4): clear config nvram BEFORE EACH live run (per-side) —
 > one-sided-warm = length delta 441 frm false red. WASAPI real-device headless WORKS
 > (UR824 shared 48k float). build.rs needs MSYS2 at build time (gtmath.lib extraction;
@@ -164,7 +171,7 @@ Granularity ≈ one C++ file / device unit. Status: todo → wip → ported (com
 | state serializer | `state.h` + `mu2000::state()` + every device's dump | `src/state.rs` | M5 cross-load | ✅ **PAIRED (S2, W1-W5b-f; gates orch re-run in-session — see session-S2 log + W-entries below. ws 503/503; FULL suite 63/63 renders + statetest×3 合; cross-load both ways via bootcache; nvram interchange 3-way SHA1 `8EF4A086…`)** | state_io.rs `C47F1E5D…` + tests `F91DEF6F…`, timers.rs `F28BCC64…` state_sync, machine state.rs re-export `B613305F…`; ws 461/461 re-gated in-session) | byte-exact layout: "S2MU" + `state_version()` + ordered field dumps; field-coverage checklist per device here. **W1** = StateIo+pack/unpack (state.h:27-171) → smu-compat (dep direction!) + RunningMachine/emu_timer state_sync (mamecompat.h:556/:699-712). **W2 ✅ (S2)** smu-sh2 states: core.rs `85FD257D…` (POD mirror 424B, `pad_sleep[3]`@121 after sleep_mode — g++ offsetof golden `sizeof==424` in tests/state.rs `F0B2DC39…`; shcore stream 448B), device.rs `E6D28FB6…`, sh7042.rs `A150B3AD…` (birth order + v8 adc1 leg via trait), intc `8C05AA11…` mtu `ED5E593C…` port `470A6711…` sci `B507267A…` cmt `CCC6AD9D…` stubs `4E563C4A…`; machine lib.rs `BB8BB71B…` +Adc::state (sh_adc.cpp:380-391) +Hub seam; deviation `m_cpu_off_drc/m_test_irq_drc` DRC-slot names (const-0 interp path). ws **476/476** re-gated in-session (hashes all disk-exact). **W3a ✅ (S2)** hd44780.rs `30391C5E…` + sci4.rs `D6A7BDDF…` (disk proof: sci4 state has NO timer legs — riders via machine state_sync; `timer_ids()` seam) + NEW card.rs `E2A5B5E5…` (state-fields only, bus wiring still deferred row) + lib `6293703D…`; tests `276741A6…`/`9BD498DD…`/`82BC3AF2…`. ws 482. **W3b ✅ (S2)** swp30 state: NEW smu-swp30/src/state.rs `36091FCF…`, regs `995F409F…` meg `4DC12663…` fetch `4059B1A9…` voice `63BC886E…` mix `F47EAAFD…` lib `7903A4DB…`, tests/state.rs `07D70D17…`; g++ layout harness %TEMP%\opencode\stategt\gt.cpp `14728E8A…` (streaming=52 filter=88 iir1=28 envelope=16 lfo=16 mixer_slot=12 decoded=25 meg_state=14872 m_swp@9600→zeros; pads @14767/83/99/14834-35); Swp30 gains OWNED RunningMachine (faithful to swp30.h:465 chip-local machine — re-gate: boot trace gates W5); mix_dirty=~0 write-side-effect + ops_stale/awm_idle load effects + v6/4/3/14/15 legs verbatim. ws 495 + piano 合 worker-side. **W4 ✅ (S2)** mu2000 glue: state.rs `38FF2234…` (machine::state/save/load :3507-3664 EXACT order, CJK errors verbatim, cited no-ops cc_last/tx-ring/nfx), midi.rs `BA15FB34…` (usb state legs), lib.rs `B14E61AB…` (sampram/debt/pe/enc fields; m_sci_irq i8→i32 disk-width fix), render.rs `66D4DC18…` (--state-at LIVE), statetest bin `4285AA5B…` (237 L faithful). GATES ORCH RE-RUN IN-SESSION: ws **495/495**; statetest DIN+USB (`roms build\tests\piano.mid --warm 2.0 --steps 50`) exit 0 ×2, 50-sample 完全一致, pack 7.7% 戻し一致; flat exes 17:24. Known-scope residuals (NOT glue): C++ blob carries smartmedia m_ctrl=0x22 (card bus row stubbed), usb.rx parked bytes (usb_step M7), 軽量 escape (native not built) |
 | bootcache | `bootcache.h` | `src/bootcache.rs` | M5 | ✅ **paired (S2/W5a)** | bootcache.rs `569358ED…` (all : cites; FNV via pinned paths::fnv1a64/fnv1a_mix — same key `44a70e24df97f686` minted by BOTH builds, 6097273 B), lib.rs `BBBCBC75…`, render.rs `337635D9…` (try-before-boot / save-on-boot-success / 「起動: 前の写しから」CRLF; render never prunes = disk-faithful; ⚠ debt now continuous via m.cycle_debt — full-suite re-gate W5b **DONE: 63/63 合, 5 × = documented set only**). **CROSS-LOAD PROVEN BOTH WAYS in-session**: Rust HIT C++ cache 合; Rust-minted cache (18:02:49) → C++ harness piano 合 ×2 with mtime UNCHANGED (true hit). Old Oct-1 key `44a70f24df97f839` untouched. Deviations: refresh() sintab param, &mut save lineage, ja read-error line. ws 495 |
 | nvram | `nvram.h` | `src/nvram.rs` | M5/M6 | ✅ **paired (S2/W5b-f)** | nvram.rs `CCB6D970…` 322 L (dead-worker draft AUDITED vs nvram.h 105 L: rom_key FNV via pinned paths :37-46, subdir_keyed_path :54-65, +1-buffer exact-size gate :76-79, .tmp+replace :89-99, fail-open; 2 compile-shape defects fixed), lib `08B0A995…`, tests `698BD1BB…` (LOCALAPPDATA env-redirect; real config-dir nvram VERIFIED empty). INTERCHANGE: C++ save→Rust load RAM byte-identical + Rust save→real-C++ memcmp==0; 3-way SHA1 `8EF4A086…` (262144 B). GT key `95e194267f637e3b` pinned; harness %TEMP%\opencode\nvramgt `69D67D98…` |
-| smartmedia stub | `smartmedia.h` interface | `src/card.rs` | M4 | todo | empty-slot reads only; authoring deferred |
+| smartmedia stub | `smartmedia.h`/`.cpp` | `src/card.rs` | M4 | ✅ **paired (S5/W-CARD; orch re-gated IN-SESSION)** | **card.rs `896905EB…` 671 L (full smartmedia.cpp: create-CIS/ecc256/load/save/take_dirty_blocks/write_blocks/control_w/data_w/data_r/command/address; NAND 00/01/50/80+10/60+D0/70/90/FF; ctor explicit h:75-90; W3a state() leg byte-UNTOUCHED); lib.rs `B9A0479D…` 3572 L (Hub.card Rc REPLACES card_inserted mirror; PA19/20 via real inserted()/write_protected mu2000.cpp:1121-25; bus Dev arms LIVE — no-card data_r **0xFF** cpp:247 (stub lied 0; boot never reads window — boot_golden still byte-EQ); +Button enum/BUTTONS/button_name/set_button (:510-570) +lcd_ddram()); state.rs `ABFAD5B3…` card leg via Rc; render.rs `4B8AF8F1…` --card load(:324)+writeback(:673-680) LIVE. tests/card.rs ×8 GT-replay (%TEMP%\cardgt, real smartmedia.cpp linked; id 98 75, program 80+10 pointer-50→col-512 quirk, erase→0xFF whole-block, 128MB ac=4). Gates: ws 552→**557**, boot_golden byte-EQ, make rust flat 8/8, piano 合. Deviations: data_w short-buf clamp (disk heap-OOB UB), addr shift≥32 wrapping (x86-GCC parity), set_button skips panel_touched/native-only (:1063/:3294). ⚠ set_button NOW EXISTS = W-SAMP/W-PANEL prereq DONE** |
 | midi_out ring | `m_tx_buf` 4096 SPSC | `src/midi.rs` | M6 | ✅ **paired (S3/W-TX; orch re-gated IN-SESSION)** | not serialized into state (starts empty) — mirror CONFIRMED (state.rs zero tx refs; S2 state tests green unamended). S3/W-TX: midi.rs `BA7A504868769EBCFD68AE2ABDBA2C193D849227` 771 L (+88: fields :1028-1031 explicit ctor inits, tx_bit=-1 ctor==reset disk-verified; `tx_line` :1271-1294 line-exact incl. stop-bit-drop/full-drop `next==r`; `midi_out_take` :232-246 with usb divert as INERT arm — usb_host=false until M7); lib.rs `6040B0A4DBBD1F06B9BCA39695C20898142B43B8` 2742 L (+62: `drain_sci_pins` = the :1179 devcb shape — ch0 PIN_TX only, PIN_CLK/ch1 dropped (`write_sci_clk` 0 `.set` on disk — orch rg re-verified); drain at event_tick fan-out + pump_resched tail + post-reset_devices; `tx_pin_buf` preallocated PIN_RING, no-alloc hot path); reset stub-comment :1998 replaced by :1177-1178 faithful clear (tx_cur/tx_buf NOT cleared — disk). DEVIATION (audited-OK): drain AFTER fan-out vs disk's synchronous INSIDE — only TX-consumer-visible timing, order-preserving FIFO, no harness consumer (C++ consumers = xgtest/fx_probe ONLY, orch rg: live.cpp has ZERO midi_out_take — THRU/OUT wire-up belongs to `live main`+`midi in` rows). tests/midi_out.rs `B8A83516…` 152 L ×8 (frame LSB/stop-drop/mid-byte-guard :1273/full-4095+free/r-wrap/empty-None/usb-inert/reset-noop); Cargo.toml shim `953C144F…` (boot_golden pattern). Gates: ws **511/511**, boot_golden byte-EQ, piano 合 on fresh 20:31 exes, boot 28M stdout FC /B vs C++ no-diff |
 
 ### M6 — smu-hal / smu-hal-win / bins
@@ -305,6 +312,45 @@ Deviation log (intentional):
 ---
 
 ## Session log (append-only, newest first)
+
+### 2026-10-03 — session S5 pass 1 (build ergonomics: `make rust` + root cargo twin — live.exe/render.exe ONE-COMPILE from ROOT; user GO on JIT w/ real-time-margin directive)
+
+- Cold protocol: ledger IN FULL (1418 L); `git status --short src/ tests/` CLEAN; S4
+  ASK-USER CLOSED — tree committed `8834891`. ws **552/552** re-run in-session. Flat exes
+  were 07:21 == target (S4 state). 0 embedded commands executed.
+- USER DIRECTIVES this session: (a) run remaining tasks as subagents, ledger each pass
+  (b) **ensure live.exe/render.exe can be compiled** (c) JIT stage must chase REAL-TIME
+  MARGIN — deadline misses (RT 167.9%, starves 2×/3 s) may be logic error, diagnose
+  before/while JIT'ing.
+- W-BUILD (single writer, survived): created root `.cargo/config.toml` ([build]
+  target-dir=build-rust/target — twin of rust\.cargo; root AGENTS cargo command was
+  silently double-targeting rust\target — the stale-exe trap made FATAL) + Makefile:216
+  `.PHONY: rust` (cd rust && cargo build --release; cp flat; MSYS2-PATH note; real opt-out
+  name = SMU_GTmath_SKIP per build.rs:40). Deleted stray rust\target.
+  ORCH RE-GATE IN-SESSION: root cargo exit 0 & exes land build-rust\target\release &
+  rust\target ABSENT; `make rust` exit 0 flat==target **8/8 SHA256 EQ** (live
+  `01F9E22A…`, render `12BACF3D…` — full 8 in S4-close style), piano 合 (full render
+  group), ws 552/552. Worker-reported exe-"resurrection" of deleted exes (identical
+  bytes+old mtimes ~60 s) = NTFS recycle/tunneling artifact, non-issue (re-hash 8/8 green).
+- NEXT rewritten (W-CARD → W-SAMP → W-PANEL → M9 diagnose-first → midi re-gate REBOOT-blocked).
+- USER ADDENDUM (pass 2): JIT stage must also improve CPU of NON-JIT pathways (SWP 1.28×
+  overhead candidates) — folded into M9 scope: profile first (allocs/locks/bounds/
+  per-sample overhead), JIT + hot-path polish, gate unchanged (bit-exact or revert).
+- W-CARD (pass 2, survived): smartmedia.cpp → card.rs `896905EB…` 671 L + bus arms LIVE
+  (no-card data_r 0xFF — stub had lied 0, boot unaffected, boot_golden byte-EQ re-proved)
+  + PA19/20 real + render --card + set_button/button_name/lcd_ddram (W-SAMP/W-PANEL
+  prereqs). tests/card.rs ×8 vs %TEMP%\cardgt. ws 552→557. Orch re-gate: hashes disk-exact,
+  ws 557, flat 8/8, piano 合. Row flipped todo→paired (see row).
+- W-SAMP1 (pass 3, survived): samptest machine-glue — SWP30 **sample-RAM overlay LIVE**
+  (fetch Wave{ov} `D2B64098…` overlay-first read_dword, read_word-no-overlay quirk kept;
+  regs `2698B870…` wave-window arms live; mix `141B534D…` set_sample_ram/wave device
+  arms + 0x7000 rec block in sample_step swp30.cpp:4673-691; window map in report:
+  08e/08f/0ce/0cf/10e/10f/14e/14f + 30f), ad_peak ladder :3490-93, sample_ram()/
+  share_card_from (as_any_mut seam sh7042 `B85B149C…`), lib `3BA92331…`, bootcache
+  `9CBA3128…`; bins set_wave_rom conversion (9 sites). tests/sampram.rs ×5 (rec
+  ladder 0xAAAA5555→…, clamp legs, master-write→slave-readback). ws 557→**562**,
+  boot golden byte-EQ + deferred_hits 0 (glue boot-inert). ORCH RE-GATE: ws 562 ×1,
+  flat 8/8, piano 合 19.9 s, src/tests git-clean.
 
 ### 2026-10-03 — session S4 passes 6-7 (threaded slave **PAIRED**; `--fast-midi` sweep **63/63 EQ**; perf gate MISSED → **M9 armed**)
 

@@ -22,10 +22,14 @@
 //!   push order and bounds.
 //! - Stale `mix_tap` entries beyond `mix_ntaps` keep old bytes on both sides
 //!   (never read: :3074 loops `i != n`).
-//! - Phase B: the sampling rec block (:4362-4372) is NOT ported —
-//!   `m_wave_access` is only writable through the still-deferred wave arm
-//!   (write16 0x10e; deferred_hits gate), so it stays 0 and the block is
-//!   inert on every vector and the whole boot. Sampling-RAM row owns it.
+//! - W-SAMP1: the sampling rec block (:4673-4691 merged numbering) and the
+//!   wave-access window handlers (:2364-2446) are LIVE. The device-side
+//!   `m_wave_cache` is mirrored by the raw pins `sampram`/`wave_base`
+//!   (regs.rs fields): register-path reads/writes go through
+//!   `wave_read_dword`/`wave_write_dword`; the hot fetch path keeps the
+//!   per-call `Wave` borrow (fetch.rs overlay — same table, same memory).
+//!   Boot never touches the window (deferred_hits stays 0 — the former
+//!   deferred arms are exact passthrough replacements).
 //! - `run_sample` returns the DAC pair (C++ out-params :4220-4221); the
 //!   meg_jit legs (:4189/4193/4209/4212) are inert here (JIT never built —
 //!   same as `meg_jit_run()==false`, the only disk path the MEG row gated).
@@ -380,10 +384,149 @@ impl Swp30 {
         }
     }
 
-    /// origin: swp30.cpp:4623-4690 (merged) `sample_step`. Omitted blocks:
-    /// voice_tap (unported, null), g_verbose diagnostics;
-    /// rec block deferred to the sampling-RAM row (see module doc —
-    /// wave_access is only writable through the deferred wave arm).
+    // ---- W-SAMP1: device-side flat_space pins + wave-access window ----
+
+    /// origin: swp30.h:53 `set_sample_ram` —
+    /// `m_wave_cache.set_overlay(base, 0x1000000, bytes >> 2)`
+    /// (mamecompat.h:170-175). Called on BOTH instances from the Machine
+    /// ctor (mu2000.cpp:89-90) with the single shared 4 MB `sampram`.
+    /// Pins are NOT state (like sintab/wave): they ride install order.
+    pub fn set_sample_ram(&mut self, base: *mut u8, bytes: usize) {
+        // origin: mamecompat.h:172-174 — units fold the null case (0)
+        self.sampram = base;
+        self.sampram_words = if base.is_null() { 0 } else { (bytes >> 2) as u32 };
+    }
+
+    /// origin: swp30.cpp:1919-1922 `set_wave_rom` — `m_wave_cache.set`
+    /// (mamecompat.h:134-143; null/empty → the s_zero stand-in, handled by
+    /// the `wave_bytes == 0` legs below, never dereferenced).
+    pub fn set_wave_rom(&mut self, base: *const u8, bytes: usize) {
+        self.wave_base = base;
+        self.wave_bytes = bytes;
+    }
+
+    /// Device-side `flat_space::read_dword` (mamecompat.h:153-166) over the
+    /// pins — the register-path twin of `Wave::read_dword` (fetch.rs):
+    /// overlay check FIRST (:155-159), then pow2 mask (:160-164), then the
+    /// generic slow path (:165 offset_of/wrap, :205-216).
+    #[inline]
+    pub fn wave_read_dword(&self, addr: u32) -> u32 {
+        if addr.wrapping_sub(crate::fetch::SAMPRAM_FROM) < self.sampram_words {
+            // :156-158 — memcpy from m_ov + (addr-from)<<2
+            unsafe {
+                let p = self.sampram.add(((addr - crate::fetch::SAMPRAM_FROM) as usize) << 2);
+                u32::from_le_bytes([*p, *p.add(1), *p.add(2), *p.add(3)])
+            }
+        } else if self.wave_bytes != 0 {
+            let byte = (addr as usize) << 2; // <<(-AddrShift), AddrShift=-2
+            // :160-164 pow2 / :165+:211-216 slow wrap, element-aligned
+            let off = if self.wave_bytes & (self.wave_bytes - 1) == 0 {
+                byte & (self.wave_bytes - 1) & !3usize
+            } else {
+                (byte % self.wave_bytes) & !3usize
+            };
+            unsafe {
+                let p = self.wave_base.add(off);
+                u32::from_le_bytes([*p, *p.add(1), *p.add(2), *p.add(3)])
+            }
+        } else {
+            0 // empty space → s_zero (mamecompat.h:138, :213)
+        }
+    }
+
+    /// Device-side `flat_space::write_dword` (mamecompat.h:194-201): only
+    /// the overlay is writable — `set` (NOT `set_writable`) leaves `m_write`
+    /// null, so ROM-region writes are DISCARDED, disk-faithful (:200).
+    #[inline]
+    pub fn wave_write_dword(&mut self, addr: u32, v: u32) {
+        if addr.wrapping_sub(crate::fetch::SAMPRAM_FROM) < self.sampram_words {
+            // :196-198 — memcpy into m_ov + (addr-from)<<2 (little-endian
+            // dword on the LE target; write_unaligned = the memcpy, same
+            // byte order as the read legs' from_le_bytes)
+            unsafe {
+                let p = self.sampram.add(((addr - crate::fetch::SAMPRAM_FROM) as usize) << 2);
+                (p as *mut u32).write_unaligned(v);
+            }
+        }
+        // :200 `if (m_write)` — null on the wave space: drop
+    }
+
+    /// origin: swp30.cpp:2364-2371 `wave_adr_w<Sel>` (logerror off here)
+    pub fn wave_adr_w(&mut self, sel: usize, data: u16) {
+        if sel != 0 {
+            self.wave_adr = (self.wave_adr & 0x0000_ffff) | ((data as u32) << 16); // :2367
+        } else {
+            self.wave_adr = (self.wave_adr & 0xffff_0000) | data as u32; // :2369
+        }
+    }
+
+    /// origin: swp30.cpp:2378-2385 `wave_size_w<Sel>` (logerror off)
+    pub fn wave_size_w(&mut self, sel: usize, data: u16) {
+        if sel != 0 {
+            self.wave_size = (self.wave_size & 0x0000_ffff) | ((data as u32) << 16); // :2381
+        } else {
+            self.wave_size = (self.wave_size & 0xffff_0000) | data as u32; // :2383
+        }
+    }
+
+    /// origin: swp30.cpp:2392-2404 `wave_access_w`. 0x7000 re-arms the rec
+    /// position (:2397-2398); 0x8000/0x9000 prefetch the first word
+    /// (:2400-2403) — via the DEVICE cache, same memory as the fetch `Wave`.
+    pub fn wave_access_w(&mut self, data: u16) {
+        self.wave_access = data; // :2394
+        if data == 0x7000 {
+            self.rec_pos = 0; // :2397-2398
+        }
+        if data == 0x8000 || data == 0x9000 {
+            self.wave_val = self.wave_read_dword(self.wave_adr); // :2401
+        }
+    }
+
+    /// origin: swp30.cpp:2411-2418 `wave_busy_r`. The 0x9000 leg answers
+    /// 0x0001 while words remain (firmware waits on the low 8 bits, then
+    /// pops 0x14e/0x14f; `(v & 0x40ff) == 0x4000` would end the run early —
+    /// disk comment :2413-2414).
+    pub fn wave_busy_r(&self) -> u16 {
+        if self.wave_access == 0x9000 {
+            return if self.wave_size != 0 { 0x0001 } else { 0xffff }; // :2415-2416
+        }
+        if self.wave_size != 0 { 0 } else { 0xffff } // :2417
+    }
+
+    /// origin: swp30.cpp:2420-2430 `wave_val_r<Sel>`. Sel=0 (the LOW pop at
+    /// 0x14f) advances adr/size and preloads the next word when the 0x9000
+    /// sequential-read mode is armed (:2423-2428).
+    pub fn wave_val_r(&mut self, sel: usize) -> u16 {
+        let v = (self.wave_val >> (16 * sel)) as u16; // :2422
+        if sel == 0 && self.wave_access == 0x9000 && self.wave_size != 0 {
+            self.wave_adr = self.wave_adr.wrapping_add(1); // :2425
+            self.wave_size = self.wave_size.wrapping_sub(1); // :2426
+            self.wave_val =
+                if self.wave_size != 0 { self.wave_read_dword(self.wave_adr) } else { 0 }; // :2427
+        }
+        v
+    }
+
+    /// origin: swp30.cpp:2432-2446 `wave_val_w<Sel>`. Sel=0 commits the
+    /// dword at wave_adr (overlay only — ROM writes are discarded by the
+    /// flat_space, see `wave_write_dword`) and advances (:2438-2445).
+    pub fn wave_val_w(&mut self, sel: usize, data: u16) {
+        if sel != 0 {
+            self.wave_val = (self.wave_val & 0x0000_ffff) | ((data as u32) << 16); // :2435
+        } else {
+            self.wave_val = (self.wave_val & 0xffff_0000) | data as u32; // :2437
+        }
+        if sel == 0 && self.wave_access == 0x5000 {
+            self.wave_write_dword(self.wave_adr, self.wave_val); // :2441
+            self.wave_adr = self.wave_adr.wrapping_add(1); // :2442
+            self.wave_size = self.wave_size.wrapping_sub(1); // :2443
+        }
+    }
+
+    /// origin: swp30.cpp:4623-4694 (merged) `sample_step`. Omitted blocks:
+    /// voice_tap (unported, null), g_verbose diagnostics. W-SAMP1 wired the
+    /// rec block (:4673-4691) — the sampling recorder (see the block
+    /// comment inside).
     /// The three `--dump-dac` fprintf blocks (m/r :4632-4641, awm :4651-4658,
     /// send :3123-3129 — the send dump fires inside mixer_step on disk; here
     /// it reads `meg.m[0x20..0x30]` AFTER `mixer_step`, identical to the disk
@@ -435,6 +578,33 @@ impl Swp30 {
             }
         }
         self.meg.lfo_step(); // :4671
+
+        // :4673-4691 サンプリングの録音 (W-SAMP1) — the recorder. firmware
+        // starts a take by writing the slave's address (sampling RAM start
+        // 0x1000000) + length (words), then wave_access=0x7000; afterwards
+        // it polls 0x30f (low 16 of the written position) and 0x10f bit 14,
+        // and stops by writing access back to 0. Every sample writes the
+        // LEFT of mixer output 8 (`m_rec_bus`, set at :3077+) as 16 bits,
+        // two samples per 32-bit word, LOW half first — the same packing a
+        // voice uses reading 16-bit samples (streaming_block::read_16).
+        // Only A/D INPUT's MELI 6/7 feed output 8; the MELI scale is 16<<8,
+        // so shift back down 8 (:4680-4682).
+        if self.wave_access == 0x7000 && self.wave_size != 0 {
+            let v = (self.mixer.rec_bus >> 8).clamp(-0x8000, 0x7fff) as u16; // :4682
+            let mut w = self.wave_read_dword(self.wave_adr); // :4683
+            w = if self.rec_pos & 1 != 0 {
+                (w & 0x0000_ffff) | ((v as u32) << 16) // :4684 hi half second
+            } else {
+                (w & 0xffff_0000) | (v as u32) // :4684 lo half first
+            };
+            self.wave_write_dword(self.wave_adr, w); // :4685
+            self.rec_pos = self.rec_pos.wrapping_add(1); // :4686
+            if self.rec_pos & 1 == 0 {
+                self.wave_adr = self.wave_adr.wrapping_add(1); // :4688
+                self.wave_size = self.wave_size.wrapping_sub(1); // :4689
+            }
+        }
+
         self.meg.sample_counter = self.meg.sample_counter.wrapping_add(1); // :4693
     }
 

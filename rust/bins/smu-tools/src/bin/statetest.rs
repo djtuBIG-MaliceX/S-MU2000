@@ -75,7 +75,7 @@ fn boot(mu: &mut Machine, dir: &str, g: &Globals, sintab: &[u16]) -> bool {
             return false;
         }
     };
-    mu.wave = wave; // the Rust wave bus seam (render.rs:494)
+    mu.set_wave_rom(wave); // the Rust wave bus seam (render.rs:494; W-SAMP1 pins)
     // :54 load_sintab(dir + "/standin/sin-table.bin") — loaded by the
     // caller (sintab arg): warning-only semantics == render.rs:497-503,
     // and identical standin on BOTH machines either way.

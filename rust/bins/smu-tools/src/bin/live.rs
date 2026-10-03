@@ -871,7 +871,7 @@ fn main() {
         }
     };
     let mut m = Machine::new(prog); // attach-before-reset (mu2000.cpp:383-393/997)
-    m.wave = wave; // :493 wave bus glue (mu2000.cpp:395-402)
+    m.set_wave_rom(wave); // :493 wave bus glue (W-SAMP1: + device pins, mu2000.cpp:395-411)
     let sintab: Vec<u16> = match roms::load_sintab(&format!("{dir}/standin/sin-table.bin")) {
         Ok(t) => t,
         Err(e) => {

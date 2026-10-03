@@ -46,6 +46,13 @@ pub const CPU_TYPE_SH2: i32 = 1;
 // ---------------------------------------------------------------------------
 #[allow(unused_variables)]
 pub trait Sh7042Peripherals {
+    /// Downcast seam for machine-level handle swaps over the boxed arena
+    /// (W-SAMP1 `Machine::share_card_from`): the concrete owner (smu-machine
+    /// `Hub`) returns itself; plain impls return None.
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        None
+    }
+
     // ---- internal SCI0/1, 0xffff81a0-81a5 / 81b0-81b5 (map:15-26) ----
     fn sci_r8(&mut self, sci: usize, a: u32) -> u8 {
         0

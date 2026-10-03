@@ -12,8 +12,10 @@
 
 /// Wave-ROM reader — `flat_space<25, 2, -2>` restricted to the read seam the
 /// streaming block actually uses (`read_dword`; `read_word` ported for parity).
-/// The sampling-RAM overlay (mamecompat.h:155-159, 170-175) is not wired here:
-/// the wave path runs overlay-free; the overlay belongs to the sampling-RAM row.
+/// W-SAMP1: the sampling-RAM overlay (`set_overlay`, mamecompat.h:155-159,
+/// 170-175) is wired — `read_dword` checks the overlay FIRST (disk order).
+/// `read_word` keeps the disk quirk: NO overlay check (mamecompat.h:145-148
+/// never consults `m_ov`) — transliterated, not "fixed".
 /// origin: src/compat/mamecompat.h:130-233 (flat_space)
 #[derive(Debug, Clone, Copy)]
 pub struct Wave<'a> {
@@ -23,13 +25,24 @@ pub struct Wave<'a> {
     mask: usize,
     /// m_pow2 (mamecompat.h:142)
     pow2: bool,
+    /// m_ov (mamecompat.h:230) — sampling-RAM window base, raw-shared with
+    /// the Machine (set_sample_ram, swp30.h:53). Null when unset.
+    ov: *const u8,
+    /// m_ov_units (mamecompat.h:232) — window size in 32-bit words; 0 = off
+    /// (set_overlay folds the null-base case into units, :174)
+    ov_units: u32,
 }
 
 const WAVE_ZERO: [u8; 8] = [0u8; 8];
 
+/// Overlay origin from `set_sample_ram` (swp30.h:53: `set_overlay(base,
+/// 0x1000000, bytes >> 2)`) — word address where the sampling RAM starts.
+pub const SAMPRAM_FROM: u32 = 0x0100_0000;
+
 impl<'a> Wave<'a> {
     /// Mirrors `set(base, bytes)` (mamecompat.h:134-143): a null/empty base
     /// reads as zeros instead of requiring an emptiness check at read sites.
+    /// Overlay OFF (mamecompat.h:229-232 member defaults m_ov=null, units 0).
     pub fn new(bytes: &'a [u8]) -> Self {
         // origin: mamecompat.h:138-142
         let (bytes, mask, pow2) = if bytes.is_empty() {
@@ -38,7 +51,26 @@ impl<'a> Wave<'a> {
             let n = bytes.len();
             (bytes, n - 1, n & (n - 1) == 0)
         };
-        Self { bytes, mask, pow2 }
+        Self { bytes, mask, pow2, ov: std::ptr::null(), ov_units: 0 }
+    }
+
+    /// `set(base, bytes)` + `set_overlay(base, SAMPRAM_FROM, words)`
+    /// (mamecompat.h:134-143 + 170-175, called by swp30.h:53 `set_sample_ram`
+    /// on BOTH devices from mu2000.cpp:89-90).
+    ///
+    /// SAFETY: `ov` must stay valid and readable for `'a` (the Machine owns
+    /// `sampram: Vec<u8>`; the buffer never reallocs — only in-place
+    /// `StateIo::mem` restore, state.rs:55 / mu2000.cpp:3530), and the window
+    /// must be exactly `words * 4` bytes. Raw-pointer aliasing matches disk
+    /// (`u8 *m_ov`): the write side is the device-side `wave_write_dword`
+    /// (regs of the same or the OTHER swp instance — exactly the C++
+    /// shared-sampram race the master/slave handshake serializes).
+    pub unsafe fn with_overlay(bytes: &'a [u8], ov: *const u8, words: u32) -> Self {
+        // origin: mamecompat.h:170-175 — m_ov_units = base ? units : 0
+        let mut w = Self::new(bytes);
+        w.ov = ov;
+        w.ov_units = if ov.is_null() { 0 } else { words };
+        w
     }
 
     /// AddrShift byte offset with element-aligned wrap.
@@ -57,10 +89,20 @@ impl<'a> Wave<'a> {
 
     /// The hottest read (2-3 per sample). pow2 fast path is branch-free;
     /// little-endian dword, addr 1 = one dword (AddrShift = -2).
-    /// origin: mamecompat.h:153-166 (read_dword; pow2 leg :160-164)
+    /// Overlay check comes FIRST — same order and same single-compare cost
+    /// as disk (mamecompat.h:155-159); with the overlay off (units 0, the
+    /// `Wave::new` default and every boot path) the branch folds away.
+    /// origin: mamecompat.h:153-166 (read_dword; overlay leg :155-159,
+    /// pow2 leg :160-164)
     #[inline]
     pub fn read_dword(&self, addr: u32) -> u32 {
-        if self.pow2 {
+        if addr.wrapping_sub(SAMPRAM_FROM) < self.ov_units {
+            // origin: mamecompat.h:156-158 — memcpy(&v, m_ov + (addr-from)<<2, 4)
+            unsafe {
+                let p = self.ov.add(((addr - SAMPRAM_FROM) as usize) << 2);
+                u32::from_le_bytes([*p, *p.add(1), *p.add(2), *p.add(3)])
+            }
+        } else if self.pow2 {
             let off = ((addr as usize) << 2) & self.mask & !3usize;
             u32::from_le_bytes([
                 self.bytes[off],
@@ -79,7 +121,9 @@ impl<'a> Wave<'a> {
         }
     }
 
-    /// origin: mamecompat.h:145-148 (read_word — slow path only in C++ too)
+    /// origin: mamecompat.h:145-148 (read_word — slow path only in C++ too;
+    /// DISK QUIRK kept: `read_word` does NOT check the overlay, only
+    /// `read_dword` does — mamecompat.h:145-148 vs :153-159)
     #[inline]
     pub fn read_word(&self, addr: u32) -> u16 {
         let off = self.offset_of(addr, 2);

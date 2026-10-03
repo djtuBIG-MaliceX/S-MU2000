@@ -170,7 +170,7 @@ fn main() {
         }
     };
     let mut m = Machine::new(prog);
-    m.wave = wave; // :64 wave parked for the M3 render rows (mu2000.cpp:395-402)
+    m.set_wave_rom(wave); // :64 (W-SAMP1: stashes + pins both devices, mu2000.cpp:395-411)
 
     // :68-69 sin-table: WARNING only, exit code unaffected.
     if let Err(e) = roms::load_sintab(&format!("{dir}/standin/sin-table.bin")) {

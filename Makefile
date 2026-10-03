@@ -228,6 +228,20 @@ install-panel-art:
 	done
 	@echo "絵を置いておいた: $(PANEL_DATA_DIR)"
 
+# Rust port: one canonical command from the repo root. Builds into the same
+# build-rust/target tree (.cargo/config.toml up here is the twin of
+# rust/.cargo/config.toml — cargo reads .cargo/config.toml from the CWD, so the
+# root twin stops a stray rust/target tree from appearing at root-build time),
+# then stages the same-named flat exes into build-rust/ for the regression
+# harness (SMU_BUILD=build-rust). Note: crates/smu-hal-win/build.rs links GT
+# objects from mingw-w64, so build with the AGENTS.md MSYS2 PATH prefix;
+# SMU_GTmath_SKIP=1 opts out (build-rust exes then lack the GT math members).
+.PHONY: rust
+rust:
+	cd rust && cargo build --release
+	cp -f build-rust/target/release/*$(EXE) build-rust/
+	@echo -n "rust staged: "; for f in build-rust/*$(EXE); do printf '%s ' "$$(basename $$f)"; done; echo
+
 SRCS := \
 	src/compat/compat.cpp \
 	src/smartmedia.cpp \

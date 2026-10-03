@@ -168,7 +168,7 @@ fn main() {
         Ok(prog) => match roms::load_wave(&format!("{dir}/dump")) {
             Ok(wave) => {
                 let mut mu = Box::new(Machine::new(prog)); // Machine attaches
-                mu.wave = wave; // the wave bus seam (render.rs:494)
+                mu.set_wave_rom(wave); // the wave bus seam (render.rs:494)
                 Rig {
                     mu,
                     reader: model::Model::new(), // :34
@@ -784,7 +784,7 @@ fn main() {
             let wave = roms::load_wave(&format!("{dir}/dump")).unwrap_or_default(); // :471
             let sintab = roms::load_sintab(&format!("{dir}/standin/sin-table.bin")).unwrap_or_default(); // :472
             let mut mu = Box::new(Machine::new(prog));
-            mu.wave = wave;
+            mu.set_wave_rom(wave);
             mu.set_usb_host(usb_host); // :473 BEFORE reset (M7 LIVE)
             mu.reset(); // :474
             let mut samples: u64 = 0;

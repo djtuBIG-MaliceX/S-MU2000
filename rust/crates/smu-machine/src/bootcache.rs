@@ -185,7 +185,8 @@ pub fn refresh(live: &Machine, sintab: &[u16]) -> bool {
     // :198-204 fresh.set_program_rom / set_wave_rom / set_sintab_rom /
     // set_usb_host / set_nvram (size mismatch -> false; sizes match by type).
     let mut fresh = Machine::new(live.soc.bus.rom.clone()); // :199
-    fresh.wave = live.wave.clone(); // :200
+    fresh.set_wave_rom(live.wave.clone()); // :200 (W-SAMP1: also pins the
+    // fresh machine's devices — their pins are per-machine Rc, mu2000.cpp:404-411)
     fresh.set_usb_host(live.usb_host()); // :202 (sintab :201 = `sintab` param)
     fresh.soc.bus.ram.copy_from_slice(&live.soc.bus.ram[..]); // :203 set_nvram
 

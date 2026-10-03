@@ -30,3 +30,9 @@ path = "../../tests/xg_model.rs"
 [[test]]
 name = "usb"
 path = "../../tests/usb.rs"
+
+# Row gate "sampling RAM overlay + windows + ad_peak + card share" (W-SAMP1):
+# synthetic bus vectors through the real slave window, no ROMs.
+[[test]]
+name = "sampram"
+path = "../../tests/sampram.rs"

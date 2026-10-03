@@ -337,7 +337,7 @@ fn main() {
         }
     };
     let mut mu = Machine::new(prog); // :73 mu2000 mu（attach-before-reset）
-    mu.wave = wave; // load_wave の bus glue（render.rs:514 と同じ）
+    mu.set_wave_rom(wave); // load_wave の bus glue（render.rs:514 と同じ；W-SAMP1 で device pin も）
     // :76 load_sintab — 戻り値を捨てる（C++ も無視。失敗時は空表で進む）
     let sintab: Vec<u16> = roms::load_sintab(&format!("{dir}/standin/sin-table.bin")).unwrap_or_default();
     // :77 set_threaded(!SMU2000_SINGLE) — LIVE (M8 `threaded slave` row).
@@ -369,7 +369,7 @@ fn main() {
     let mut more: Vec<Machine> = Vec::new();
     for _ in 1..copies {
         let mut m = Machine::new(prog0_clone(&dir)); // Deviation: ROM を再ロード/clone
-        m.wave = mu.wave.clone();
+        m.set_wave_rom(mu.wave.clone());
         // :95 set_sintab_rom（C++ は同じポインタを分け合う — Rust も同じ
         // バッファをピン）と :96 set_threaded を reset の前に
         m.set_sintab_pin(&sintab); // :95

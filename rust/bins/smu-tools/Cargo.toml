@@ -29,6 +29,9 @@ path = "src/bin/midisend.rs"
 [[bin]]
 name = "xgtest"
 path = "src/bin/xgtest.rs"
+[[bin]]
+name = "samptest"
+path = "src/bin/samptest.rs"
 
 [dependencies]
 smu-compat = { path = "../../crates/smu-compat" }
