@@ -75,6 +75,11 @@
 
 pub mod bootcache;
 pub mod card;
+/// M9b MEG (SWP30) x86-64 JIT. Phase B1 lands the non-engaging seam
+/// (`build()` returns false ⇒ interpreter), so this module is cfg-free by
+/// design — only the B2 emitter bodies gate (JIT_M10_HANDOFF §7-G). Cites the
+/// machine wiring lives against: `run_sample_jit` + `MegJitHook` (smu-swp30/mix.rs).
+pub mod meg_jit;
 #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
 pub mod jit;
 #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
@@ -2142,6 +2147,13 @@ struct SlaveRaws {
     sintab_len: usize,
     sampram: *const u8,
     sampram_words: u32,
+    // M9b: the slave's OWN MEG JIT (mirror of the per-device m_jit). Same
+    // raw-pin discipline as `swp`/`wave`/`sintab` above: `&mut Machine` is not
+    // moved while the slave thread is alive (already required by the `wave`
+    // Vec pin), so this field address is stable for the thread's lifetime, and
+    // the tag handshake serialises it against the master's `meg_jit` — the two
+    // are never touched concurrently.
+    meg_jit: *mut meg_jit::MegJit,
 }
 unsafe impl Send for SlaveRaws {}
 
@@ -2266,6 +2278,20 @@ pub struct Machine {
     /// (Invariant 3) — env flags decided in `Jit::new`.
     #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
     pub jit: jit::Jit,
+    /// M9b MEG JIT — the C++ per-device `swp30_device::m_jit` (swp30.h:598)
+    /// for the MASTER SWP. Rust deviation (JIT_M10_HANDOFF §7-A + the B1
+    /// report): kept machine-side (the emitter lives here; smu-swp30 →
+    /// smu-machine would be a cycle) and reached only through the
+    /// `MegJitHook` trait on `Swp30::run_sample_jit`. `gen`/`spec`/ops belong
+    /// to ONE program, so the two SWP devices need TWO instances (a shared
+    /// one would cross the master's and slave's MEG programs). Explicit
+    /// construction (Invariant 3); env flags decided in `MegJit::new`.
+    pub meg_jit: meg_jit::MegJit,
+    /// slave counterpart (mirrors the slave's own `m_jit`). In the sequential
+    /// path the main thread drives it; in the threaded path its address rides
+    /// `SlaveRaws` and only the slave thread touches it (never concurrent with
+    /// the master's `meg_jit` — the tag handshake serialises the two samples).
+    pub meg_jit_s: meg_jit::MegJit,
     /// wave ROM bytes (mu2000.cpp:395-402 loaded, parked until the M3 row)
     pub wave: Vec<u8>,
     /// origin: mu2000.h:868 m_ad_in[2] = {} (A/D INPUT, set_audio_input :258;
@@ -2466,6 +2492,10 @@ impl Machine {
             trace_on: false,
             #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
             jit: jit::Jit::new(), // M9 — env flags only, no allocation yet
+            // M9b MEG JIT — one instance per SWP device (per-device m_jit
+            // mirror); env flags read once, no code buffer yet (build()==false).
+            meg_jit: meg_jit::MegJit::new(), // master
+            meg_jit_s: meg_jit::MegJit::new(), // slave
             wave: Vec::new(),
             ad_in: [0, 0], // mu2000.h:868 = {}
             midi, // mu2000.h:990-1015 (built above; the usb Rcs are shared)
@@ -2643,14 +2673,26 @@ impl Machine {
         self.upd.is_some()
     }
     /// origin: boot.cpp:94-97 `g_pc_hash = fopen(...)` — folds route through
-    /// `paths::pc_hash` (compat row).
+    /// `paths::pc_hash` (compat row). hash runs stay interpreter-only for the
+    /// MEG too (JIT_M10_HANDOFF §4 last row / jit.rs:342-343 pattern): force
+    /// both device JITs off so a PC-hash regression reproduces the paired
+    /// interpreter, not a compiled sample.
     pub fn set_hash_pc(&mut self, path: &str) -> bool {
         self.hash_on = paths::open_pc_hash(path);
+        if self.hash_on {
+            self.meg_jit.force_off();
+            self.meg_jit_s.force_off();
+        }
         self.hash_on
     }
-    /// origin: boot.cpp:84-89 `g_pc_trace`/skip/left.
+    /// origin: boot.cpp:84-89 `g_pc_trace`/skip/left. (see set_hash_pc: trace
+    /// forces the MEG JIT off for the same reproducibility reason.)
     pub fn set_trace_pc(&mut self, path: &str, skip: u64, left: u64) -> bool {
         self.trace_on = paths::open_pc_trace(path, skip, left);
+        if self.trace_on {
+            self.meg_jit.force_off();
+            self.meg_jit_s.force_off();
+        }
         self.trace_on
     }
 
@@ -2966,6 +3008,8 @@ impl Machine {
             sintab_len: self.sintab_len,
             sampram: self.sampram.as_ptr(), // mu2000.cpp:90 pin (ctor :2298)
             sampram_words: (self.sampram.len() >> 2) as u32, // mamecompat.h:174
+            // M9b: slave's own MEG JIT (see the SlaveRaws field SAFETY note)
+            meg_jit: std::ptr::addr_of_mut!(self.meg_jit_s),
         };
         self.slave = Some(std::thread::spawn(move || {
             Self::slave_loop(seen, go, done, quit, out, parked, waker, raw)
@@ -3008,6 +3052,11 @@ impl Machine {
                 std::slice::from_raw_parts(raw.sintab, raw.sintab_len)
             }
         };
+        // M9b: this thread's slave MEG JIT. Same ownership discipline as `swp`
+        // above — touched ONLY here (the main thread drives the master's
+        // `meg_jit`, never `meg_jit_s` while this thread is alive), and the
+        // tag handshake orders every access against the master sample.
+        let jit: &mut meg_jit::MegJit = unsafe { &mut *raw.meg_jit };
         loop {
             // :356-364 合図を待つ (まず回して待つ; SLAVE_SPINS 空振りで眠る)
             let mut spins = 0u32;
@@ -3045,7 +3094,8 @@ impl Machine {
             // (mu2000.cpp:90/mamecompat.h:170-175). SAFETY: `sampram`
             // never reallocs (fixed 4 MB, ctor-sized; :2132-2136 note).
             let w = unsafe { Wave::with_overlay(wave, raw.sampram, raw.sampram_words) };
-            let (l, r) = swp.borrow_mut().run_sample(sintab, &w); // :370
+            // M9b: slave device MEG JIT seam (build()==false ⇒ interprets)
+            let (l, r) = swp.borrow_mut().run_sample_jit(sintab, &w, &mut *jit); // :370
             out.set((l, r));
             done.store(seen, Ordering::Release); // :371
         }
@@ -3089,7 +3139,10 @@ impl Machine {
             let tag = self.slave_go.load(Ordering::Relaxed).wrapping_add(1); // :3450
             self.slave_go.store(tag, Ordering::Release); // :3451
             self.kick_slave(); // :3452 眠っていたら起こす。起きていれば素通り
-            let (lm, rm) = self.swpm.borrow_mut().run_sample(sintab, &w); // :3453
+            // M9b: master MEG JIT engaged seam (build()==false ⇒ interprets,
+            // byte-identical). Disjoint-field borrows (self.swpm RefCell vs
+            // self.meg_jit) — the jit.rs:491 run_core idiom.
+            let (lm, rm) = self.swpm.borrow_mut().run_sample_jit(sintab, &w, &mut self.meg_jit); // :3453
             while self.slave_done.load(Ordering::Acquire) != tag {
                 std::hint::spin_loop(); // :3454-3455 cpu_pause spin (錠は使わない)
             }
@@ -3097,8 +3150,8 @@ impl Machine {
             (lm, rm, ls, rs)
         } else {
             // :3458-3461 else-arm — sequential, master-first (:3414-3415 note)
-            let (lm, rm) = self.swpm.borrow_mut().run_sample(sintab, &w); // :3459
-            let (ls, rs) = self.swps.borrow_mut().run_sample(sintab, &w); // :3460
+            let (lm, rm) = self.swpm.borrow_mut().run_sample_jit(sintab, &w, &mut self.meg_jit); // :3459
+            let (ls, rs) = self.swps.borrow_mut().run_sample_jit(sintab, &w, &mut self.meg_jit_s); // :3460
             (lm, rm, ls, rs)
         };
         self.wave = wave;
@@ -3466,18 +3519,18 @@ impl Machine {
                 if done <= 0 {
                     // :1220-1224 — abort_timeslice mid-instruction (sh.h:219-223)
                     core_abort = true;
-                    eprintln!("MDBG inner done<=0 pc={:08x}", self.soc.dev.core.pc);
+                    //eprintln!("MDBG inner done<=0 pc={:08x}", self.soc.dev.core.pc);
                     break;
                 }
                 ran += done as u64;
                 if held || ev_changed || ran >= chunk {
-                    eprintln!("MDBG inner-break held={held} evch={ev_changed} ran={ran} chunk={chunk} done={done} pc={:08x}", self.soc.dev.core.pc);
+                    //eprintln!("MDBG inner-break held={held} evch={ev_changed} ran={ran} chunk={chunk} done={done} pc={:08x}", self.soc.dev.core.pc);
                     break;
                 }
             }
             if core_abort {
                 if self.soc.event_cycles() == ev {
-                    eprintln!("MDBG OUTER-BREAK core_abort ev={ev} pc={:08x}", self.soc.dev.core.pc);
+                    //eprintln!("MDBG OUTER-BREAK core_abort ev={ev} pc={:08x}", self.soc.dev.core.pc);
                     break;
                 }
                 continue;

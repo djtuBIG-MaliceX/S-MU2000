@@ -108,6 +108,12 @@ pub const LFO_INCREMENT_TABLE: [u32; 256] = {
 
 /// origin: swp30.h:333-446 `meg_state` (phase-A fields; every field an
 /// explicit initializer per Invariant 3 — mirrors the in-class `= {}`s).
+/// `#[repr(C)]` (B2b-1, handoff §7-B/§8 step 4): the MEG JIT bakes
+/// `offset_of!` constants into machine code, so the layout must be the
+/// stable declared order (jit.rs:62 `Sh2Core` precedent). Serialization
+/// is UNAFFECTED — `state_pod` below is an explicit per-field stream,
+/// never a struct-image dump.
+#[repr(C)]
 pub struct MegState {
     /// swp30.h:351 `m_decoded` (filled by decode_program only; NOT cleared by
     /// meg_state::reset on disk — kept zero at construction like `= {}`).

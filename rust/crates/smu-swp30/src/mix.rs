@@ -35,9 +35,74 @@
 //!   same as `meg_jit_run()==false`, the only disk path the MEG row gated).
 
 use crate::fetch::Wave;
-use crate::meg::{build_ops, MegState};
+use crate::meg::{build_ops, MegState, MegSwp, Op};
 use crate::regs::Swp30;
 use crate::voice::{dbg_awm_chans, dbg_meg_regs, dbg_send};
+
+/// origin: dispatch question answered in JIT_M10_HANDOFF §7-A — the
+/// device-side MEG-JIT seam. `swp30_device::meg_jit` (swp30_jit.cpp:265) is
+/// a per-device member (swp30.h:598) but lives in `smu-machine` (the emitter
+/// `jit_emit.rs` is machine-side; smu-swp30 -> smu-machine is a cycle), so
+/// `Swp30` reaches it only through this trait. `Swp30::run_sample_jit`
+/// threads the C++ `if(!meg_jit_run()) run_program()` legs (:4441/4444) and
+/// the invalidate/rebuild latch (:4412-4416) here; `Machine` owns the real
+/// `MegJit` (one per device, mirroring the per-device `m_jit`).
+///
+/// B1 CONTRACT: with `build()` returning false the machine's `run()` always
+/// returns false, so every leg above falls through to the PAIRED interpreter
+/// `run_program` — byte-identical to today's inert legs (mix.rs:675/680/
+/// 724-725). The `NoopJit` below is the hook `run_sample` / `run_sample_harness`
+/// pass so those (harness / vectors) never touch a JIT even when B2 lands.
+pub trait MegJitHook {
+    /// machine-level engage gate (jit.rs:344 `can` precedent; the C++ gate is
+    /// the `SMU2000_MEG_JIT` switch + platform, swp30_jit.cpp:346-357).
+    fn can(&self) -> bool;
+    /// mark compiled code unusable (origin: swp30_jit.cpp:380-386
+    /// `meg_jit_invalidate`); buffers kept, next `run()` returns false.
+    fn invalidate(&mut self);
+    /// rebuild after the writes settle (origin: swp30_jit.cpp:359-377
+    /// `meg_jit_rebuild`); false => interpret until the next rebuild.
+    #[allow(clippy::too_many_arguments)]
+    fn rebuild(
+        &mut self,
+        meg: &MegState,
+        ops: &[Op; 0x180],
+        ram_len: usize,
+        revram_enable: u16,
+        sintab: &[u16],
+        const_gen: u32,
+    ) -> bool;
+    /// run one compiled sample (origin: swp30_jit.cpp:388-516 `meg_jit_run`);
+    /// true => the caller must NOT call `run_program` (the hook ran its
+    /// pc/icount tail at :513-514).
+    fn run(&mut self, meg: &mut MegState, swp: &mut MegSwp, jit_wait: &mut u32, const_gen: u32) -> bool;
+}
+
+/// The inert hook: every leg is a no-op and `run()` returns false, so the
+/// interpreter path is byte-identical. Used by `run_sample` /
+/// `run_sample_harness` (harness / vectors) and non-Windows/non-x64 builds —
+/// mirrors the C++ `build()==false` stub (:591-595).
+pub struct NoopJit;
+impl MegJitHook for NoopJit {
+    fn can(&self) -> bool {
+        false
+    }
+    fn invalidate(&mut self) {}
+    fn rebuild(
+        &mut self,
+        _meg: &MegState,
+        _ops: &[Op; 0x180],
+        _ram_len: usize,
+        _revram_enable: u16,
+        _sintab: &[u16],
+        _const_gen: u32,
+    ) -> bool {
+        false
+    }
+    fn run(&mut self, _meg: &mut MegState, _swp: &mut MegSwp, _jit_wait: &mut u32, _const_gen: u32) -> bool {
+        false
+    }
+}
 
 /// origin: swp30.h:94 `SERIAL_FULL_SCALE`
 pub const SERIAL_FULL_SCALE: i32 = 1 << 26;
@@ -612,8 +677,9 @@ impl Swp30 {
     /// per-region dirty wake, `meg_regions_rebuild(true)` +
     /// `meg_ops_rebuild()`, idle-primed seed skip, `meg_skip_after`).
     /// Deviations (module doc): DAC pair returned instead of out-params;
-    /// JIT legs inert (only the `!meg_jit_run()` interpret path exists here
-    /// — the MEG-row-paired `run_program`); :4423-4425/:4453-4454 meg_tap,
+    /// JIT legs are WIRED through the `MegJitHook` seam (M9b B1) — with
+    /// `build()==false` the hook's `run()` is always false so only the
+    /// `!meg_jit_run()` interpret path (`run_program`) executes; :4423-4425/:4453-4454 meg_tap,
     /// :4426-4427 native skip, :4438-4443 profile wall-clock (invariant 5),
     /// :4407 `m_mfx_gen++` (native-FX identify — native engine unported,
     /// dead in this port, kept as a comment) and the :4461+ native-FX block
@@ -621,20 +687,41 @@ impl Swp30 {
     /// (--trace-meg seam, inert unless the bin sets `dbg_meg`).
     /// `run_sample_impl` carries the body; the `wave: Option` seam is the
     /// harness leg (meg_b replay drives the real chain without voices/mixer).
+    /// The MEG JIT never engages here: the inert `NoopJit` hook makes every
+    /// JIT leg a no-op / `run()` false, so this path is byte-identical to the
+    /// pre-seam interpreter-only `run_sample` (harness / vectors keep using it).
     pub fn run_sample(&mut self, sintab: &[u16], wave: &Wave) -> (i32, i32) {
-        self.run_sample_impl(sintab, Some(wave), 0, false)
+        self.run_sample_impl(sintab, Some(wave), 0, false, &mut NoopJit)
+    }
+
+    /// M9b Phase B1 seam (JIT_M10_HANDOFF §7-A/§8.B2): the `run_sample` a
+    /// `Machine` uses once the MEG JIT is owned — identical body, but the
+    /// invalidate/rebuild latch (:4412-4416) and the `if(!meg_jit_run())`
+    /// interpret leg (:4444) drive the real `hook`. With `build()==false` the
+    /// hook's `run()` always returns false, so this stays byte-identical to
+    /// `run_sample` (B1 acceptance rule).
+    pub fn run_sample_jit(&mut self, sintab: &[u16], wave: &Wave, hook: &mut dyn MegJitHook) -> (i32, i32) {
+        self.run_sample_impl(sintab, Some(wave), 0, false, hook)
     }
 
     /// harness entry (MEG row): body EXACTLY as `run_sample`, :4419's
     /// `sample_step(wave)` replaced by its disk-inside legs that the C++
     /// harness stubs the same way (`sample_step` :4306 flush_writes,
     /// :4374 `m_sample_counter += sstep` — the legacy `k && sstep` step
-    /// cadence of the pre-merge harness, pinned through `sstep`).
+    /// cadence of the pre-merge harness, pinned through `sstep`). Inert JIT.
     pub fn run_sample_harness(&mut self, sintab: &[u16], sstep: u32, lfostep: bool) -> (i32, i32) {
-        self.run_sample_impl(sintab, None, sstep, lfostep)
+        self.run_sample_impl(sintab, None, sstep, lfostep, &mut NoopJit)
     }
 
-    fn run_sample_impl(&mut self, sintab: &[u16], wave: Option<&Wave>, sstep: u32, lfostep: bool) -> (i32, i32) {
+    #[allow(clippy::too_many_arguments)]
+    fn run_sample_impl(
+        &mut self,
+        sintab: &[u16],
+        wave: Option<&Wave>,
+        sstep: u32,
+        lfostep: bool,
+        jit: &mut dyn MegJitHook,
+    ) -> (i32, i32) {
         if self.meg_program_changed || self.meg_ops_stale { // :4383
             self.meg.decode_program(); // :4384
             // :4385-4402 (merged 6.238): a program change wakes ONLY the
@@ -672,14 +759,28 @@ impl Swp30 {
             // doc / AGENTS.md ignore-list), so the counter has no readers:
             // ported as a no-op citation (dead on every Rust path).
             self.meg_ops_stale = false; // :4408
-            // :4412 meg_jit_invalidate() — JIT never built
+            // :4412 meg_jit_invalidate() — drop any compiled translation; the
+            // Rust seam always has a hook (NoopJit = no-op), so this is the
+            // unconditional C++ call (swp30.cpp:4412, the `if(m_jit)` null
+            // arm is covered by the hook object always existing).
+            jit.invalidate(); // :4412
             self.meg_jit_wait = 1; // :4413
         } else if self.meg_jit_wait != 0 {
             // :4414 `m_meg_jit_wait && ++m_meg_jit_wait > 64` (pre-:4415)
             self.meg_jit_wait = self.meg_jit_wait.wrapping_add(1);
             if self.meg_jit_wait > 64 {
-                // :4415-4416 meg_jit_rebuild never happens (no JIT)
-                self.meg_jit_wait = 0;
+                // :4415-4416 — disk order: reset the wait counter FIRST, then
+                // meg_jit_rebuild. Rebuild self-gates (`if !enabled return`)
+                // so the NoopJit and JIT-off cases cost nothing but the call.
+                self.meg_jit_wait = 0; // :4415
+                let _ = jit.rebuild(
+                    &self.meg,
+                    &self.meg_ops,
+                    self.reverb_ram.len(),
+                    self.revram_enable,
+                    sintab,
+                    self.meg_const_gen,
+                ); // :4416
             }
         }
         match wave {
@@ -700,7 +801,7 @@ impl Swp30 {
         // :4420-4422 (merged): sound arrived at an idle region's entrance —
         // restore it BEFORE this sample's MEG run
         if self.meg_skip_mask != 0 {
-            self.meg_skip_before();
+            self.meg_skip_before(jit);
         }
         // :4423-4425 meg_tap pre-copy — tap unported (always null here)
         let dbg = self.dbg_meg.is_some();
@@ -720,9 +821,15 @@ impl Swp30 {
                 self.step(sintab);
             }
         } else {
-            // :4438-4443 profile leg unported (wall-clock, invariant 5);
-            // :4444 meg_jit_run always false
-            self.meg_run_program(sintab); // :4444-4446
+            // :4438-4443 profile leg unported (wall-clock, invariant 5); the
+            // profile arm `if(!meg_jit_run()) run_program` and the plain
+            // :4444 arm collapse to ONE here (no wall clock in the port).
+            // Try the MEG JIT first; on false run the PAIRED interpreter.
+            // Phase B1: `build()==false` keeps `gen.fnp` null so `meg_jit_run`
+            // returns false on every sample => byte-identical interpret path.
+            if !self.meg_jit_run(sintab, jit) {
+                self.meg_run_program(sintab); // :4444-4446
+            }
         }
         // :4447-4449 (merged): after one all-empty sample has been run,
         // the following samples take the seed-skip path above
@@ -732,7 +839,7 @@ impl Swp30 {
         // :4450-4452 (merged): count the quieted regions (only when the MEG
         // ran this sample)
         if self.meg_skip_on && !dbg {
-            self.meg_skip_after();
+            self.meg_skip_after(jit);
         }
         // :4453-4454 meg_tap post-call — unported (null)
         // :4456-4459 DAC = first two of outputs 0-3 (scale 1<<17)
@@ -885,7 +992,7 @@ impl Swp30 {
     /// origin: swp30.cpp:4312-4337 `meg_skip_before` (merged 6.237).
     /// After sample_step, before the MEG run: sound reached a sleeping
     /// region's entrance -> wake it from THIS sample.
-    pub fn meg_skip_before(&mut self) {
+    pub fn meg_skip_before(&mut self, jit: &mut dyn MegJitHook) {
         let mut wake: u32 = 0; // :4314
         for k in 0..8usize {
             if (self.meg_skip_mask >> k) & 1 == 0 {
@@ -914,15 +1021,17 @@ impl Swp30 {
             }
         }
         self.meg_ops_rebuild(); // :4332
-        // :4333-4335 meg_jit_invalidate() — JIT never built (interpret runs
-        // until writes settle, same result as the ops table)
+        // :4333-4335 meg_jit_invalidate() — the ops table just changed under
+        // any compiled code; drop it (meg_ops_rebuild FIRST, then invalidate —
+        // JIT_M10_HANDOFF §5.1). NoopJit = no-op; B1 build()==false is moot.
+        jit.invalidate(); // :4333-4335
         self.meg_jit_wait = 1; // :4336
     }
 
     /// origin: swp30.cpp:4339-4374 `meg_skip_after` (merged 6.237).
     /// After the MEG run: count samples with entrance+exit (and the
     /// still-pending 3-cycle delayed writes, :4353-4358) all zero.
-    pub fn meg_skip_after(&mut self) {
+    pub fn meg_skip_after(&mut self, jit: &mut dyn MegJitHook) {
         let mut add: u32 = 0; // :4341
         for k in 0..8usize {
             // :4342-4345 — only USED regions WITH entrances, not sleeping
@@ -978,8 +1087,39 @@ impl Swp30 {
         self.meg_skip_mask |= add; // :4368
         // :4369-4370 meg-skip quiet stderr sink (debug) — not ported
         self.meg_ops_rebuild(); // :4371
-        // :4372 meg_jit_invalidate() — JIT never built
+        // :4372 meg_jit_invalidate() — the ops table just changed (region
+        // went quiet); drop any compiled translation (see :4333 leg).
+        jit.invalidate(); // :4372
         self.meg_jit_wait = 1; // :4373
+    }
+
+    /// origin: swp30.cpp:4441/4444 `if(!meg_jit_run())` device seam — the
+    /// `m_swp->` bundle is assembled exactly as `meg_run_program` (regs.rs:399)
+    /// and the Machine-owned JIT is asked to run ONE compiled sample. The
+    /// hook owns the pc/icount tail (:513-514) on its success path, so the
+    /// caller skips `run_program` when this returns true.
+    ///
+    /// B1: `MegJit::run` returns false at the `!gen.fn` null guard
+    /// (swp30_jit.cpp:390-392, kept unreachable while `build()==false`), so
+    /// `run_sample_jit` == `run_sample` (bit-identical). The disjoint-field
+    /// split is the same borrowck idiom as regs.rs `meg_run_program`.
+    fn meg_jit_run(&mut self, sintab: &[u16], jit: &mut dyn MegJitHook) -> bool {
+        let mut seam = crate::meg::MegSwp {
+            flag_n: &mut self.meg_flag_n,
+            flag_z: &mut self.meg_flag_z,
+            ix2_value: &mut self.meg_ix2_value,
+            ix2_act: &mut self.meg_ix2_act,
+            ram_index2: &mut self.meg_ram_index2,
+            skip_to: &mut self.meg_skip_to,
+            revram_enable: self.revram_enable,
+            reverb_ram: &mut self.reverb_ram,
+            seed: &mut self.rand_seed,
+            sintab,
+        };
+        let meg = &mut self.meg;
+        let wait = &mut self.meg_jit_wait;
+        let const_gen = self.meg_const_gen;
+        jit.run(meg, &mut seam, wait, const_gen)
     }
 
     /// origin: swp30.cpp:4281-4300 `dump_meg` (--dump-meg program/const/off/

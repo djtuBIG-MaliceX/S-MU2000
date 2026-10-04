@@ -41,3 +41,10 @@ path = "../../tests/sampram.rs"
 [[test]]
 name = "jit"
 path = "../../tests/jit.rs"
+
+# Row gate "M9b MEG JIT seam" (JIT_M10_HANDOFF §8.B5): layout/ABI offset pins,
+# the emit_* selftest sweeps vs the PAIRED meg.rs ground truth, and the
+# B1 build()==false / never-runs contract. Same mount pattern as jit.
+[[test]]
+name = "meg_jit"
+path = "../../tests/meg_jit.rs"
