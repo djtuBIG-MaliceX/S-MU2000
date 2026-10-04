@@ -75,6 +75,10 @@
 
 pub mod bootcache;
 pub mod card;
+#[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+pub mod jit;
+#[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+mod jit_emit;
 pub mod midi;
 pub mod nvram;
 pub mod state;
@@ -175,6 +179,10 @@ impl usb::UsbIrq for QIrq<'_> {
 }
 
 /// Shared clock seam: instruction-start total cycles + event-window flag.
+/// M9: `#[repr(C)]` so jit-emitted `jit_head` can bake the field offsets
+/// (codegen reads now/in_event/pc/pre_seam directly — see jit.rs; layout
+/// pinned in tests/jit.rs). Field order UNCHANGED.
+#[repr(C)]
 pub struct HubNow {
     pub now: u64,
     pub in_event: bool,
@@ -2252,6 +2260,12 @@ pub struct Machine {
     /// hook gates mirroring g_pc_hash / g_pc_trace nullness
     pub hash_on: bool,
     pub trace_on: bool,
+    /// M9 SH-2 JIT (the C++ per-device `sh2_device::jit` in sh2_jit.cpp:69;
+    /// the Rust seam lives machine-side because the batched bus/hook is
+    /// machine-owned). x86-64/Windows only; explicit construction
+    /// (Invariant 3) — env flags decided in `Jit::new`.
+    #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+    pub jit: jit::Jit,
     /// wave ROM bytes (mu2000.cpp:395-402 loaded, parked until the M3 row)
     pub wave: Vec<u8>,
     /// origin: mu2000.h:868 m_ad_in[2] = {} (A/D INPUT, set_audio_input :258;
@@ -2450,6 +2464,8 @@ impl Machine {
             upd: None,
             hash_on: false,
             trace_on: false,
+            #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+            jit: jit::Jit::new(), // M9 — env flags only, no allocation yet
             wave: Vec::new(),
             ad_in: [0, 0], // mu2000.h:868 = {}
             midi, // mu2000.h:990-1015 (built above; the usb Rcs are shared)
@@ -2541,6 +2557,10 @@ impl Machine {
 
     /// origin: mu2000::reset :1051-1153 (the boot entry the traces start from).
     pub fn reset(&mut self) {
+        // M9: sh2.cpp:65 jit_flush() (device_reset) — the ONLY C++ flush
+        // call site; every translated block is stale after a reset.
+        #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+        self.jit.flush();
         // :1053 m_cc_last memset — MIDI CC cache (M4 row, no boot effect).
         // :1061-1064 cable reset (midi row; disk order: BEFORE lcd.reset
         // :1126). Queues deliberately NOT cleared on disk — bytes survive.
@@ -3418,6 +3438,20 @@ impl Machine {
                     };
                     let w0 = *self.swp_wait.borrow();
                     let budget = (chunk - ran).min(i32::MAX as u64) as i32;
+                    // M9 swap point (JIT_S9_HANDOFF): the JIT takes the burst
+                    // when allowed — same return contract as run_cycles
+                    // (same icount/ctr setup, same done math), same dirty-
+                    // stop cadence (dev_dirty tested in jit.rs epilogue/
+                    // next_block). hash/trace on => C++ jit_run bail :232
+                    // (g_pc_trace/g_pc_hash) => interpreter. Everything else
+                    // in this loop UNCHANGED (pumps/held/dev_dirty.set).
+                    #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+                    let d = if self.jit.can() && !self.hash_on && !self.trace_on {
+                        self.jit.run_core(&mut self.soc.dev.core, &mut ctx, &mut hook, budget)
+                    } else {
+                        self.soc.dev.core.run_cycles(&mut ctx, &mut hook, budget)
+                    };
+                    #[cfg(not(all(target_arch = "x86_64", target_os = "windows")))]
                     let d = self.soc.dev.core.run_cycles(&mut ctx, &mut hook, budget);
                     (d, *self.swp_wait.borrow() > w0) // held = SWP-write abort (:855)
                 };
@@ -3432,15 +3466,18 @@ impl Machine {
                 if done <= 0 {
                     // :1220-1224 — abort_timeslice mid-instruction (sh.h:219-223)
                     core_abort = true;
+                    eprintln!("MDBG inner done<=0 pc={:08x}", self.soc.dev.core.pc);
                     break;
                 }
                 ran += done as u64;
                 if held || ev_changed || ran >= chunk {
+                    eprintln!("MDBG inner-break held={held} evch={ev_changed} ran={ran} chunk={chunk} done={done} pc={:08x}", self.soc.dev.core.pc);
                     break;
                 }
             }
             if core_abort {
                 if self.soc.event_cycles() == ev {
+                    eprintln!("MDBG OUTER-BREAK core_abort ev={ev} pc={:08x}", self.soc.dev.core.pc);
                     break;
                 }
                 continue;

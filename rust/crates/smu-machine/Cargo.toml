@@ -36,3 +36,8 @@ path = "../../tests/usb.rs"
 [[test]]
 name = "sampram"
 path = "../../tests/sampram.rs"
+
+# Row gate "M9 SH-2 JIT layout pins" (x64-windows): offset_of! table vs jit.rs
+[[test]]
+name = "jit"
+path = "../../tests/jit.rs"

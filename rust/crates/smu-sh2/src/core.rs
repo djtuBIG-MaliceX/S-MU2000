@@ -2424,6 +2424,13 @@ impl Sh2Core {
         self.step(bus, hook);
     }
 
+    /// M9 JIT callout seam (origin: src/mame/cpu/sh2_jit.cpp:153-156
+    /// `jit_exec` — `c->execute_one(u16(opcode))`; the smu-machine JIT
+    /// callouts reach the private dispatcher through this shim ONLY).
+    pub fn jit_exec_op<B: Sh2Bus>(&mut self, bus: &mut B, op: u16) {
+        self.execute_one(bus, op)
+    }
+
     pub fn execute_run<B: Sh2Bus, H: InstructionHook>(&mut self, bus: &mut B, hook: &mut H) {
         // origin: src/mame/cpu/sh2.cpp:254-259 (m_cpu_off bail; debugger_wait_hook
         // is a no-op, mamecompat.h:81)
