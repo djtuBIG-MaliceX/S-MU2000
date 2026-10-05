@@ -332,6 +332,28 @@ impl Assembler {
     // origin: x64asm.h:165 sub32i_mem: sub dword [m], imm32 (81 /5)
     #[inline]
     pub fn sub32i_mem(&mut self, m: Mem, v: u32) { self.rm(0, false, &[0x81], 5, m); self.d32(v); }
+    // MEG JIT addition (B2b-2a; NO x64asm.h analogue — store16 there is the
+    // reg form x64asm.h:109 only). Width adaptation for the Rust u16
+    // meg_skip_to (C++ m_meg_jit_skip is u32, swp30.h:614, so swp30_jit.cpp
+    // :840 uses store32i): mov word [m], imm16 (66 C7 /0). The 0x66 prefix
+    // flips the imm to 16 bits too — rm() stays disp32 (fixed length).
+    // Consumer: meg_jit::emit_skip_reset (tests/meg_jit.rs byte-pinned).
+    #[inline]
+    pub fn store16i(&mut self, m: Mem, v: u16) {
+        self.rm(0x66, false, &[0xc7], 0, m);
+        self.byte(v as u8);
+        self.byte((v >> 8) as u8);
+    }
+    // MEG JIT addition (B2b-2a): the width-adapted twin of cmp32i_mem
+    // (x64asm.h:164) for the u16 skip leg — cmp word [m], imm16 (66 81 /7).
+    // Arrives live with the B2b-3 branch gate (swp30_jit.cpp:1082 equivalent);
+    // emitted+pinned now.
+    #[inline]
+    pub fn cmp16i_mem(&mut self, m: Mem, v: u16) {
+        self.rm(0x66, false, &[0x81], 7, m);
+        self.byte(v as u8);
+        self.byte((v >> 8) as u8);
+    }
     // origin: x64asm.h:167 jcc_fwd: jcc rel32 (cc = 0x84 je / 0x85 jne / 0x8e jle …)
     #[inline]
     pub fn jcc_fwd(&mut self, cc: u8) -> usize {

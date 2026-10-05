@@ -113,6 +113,7 @@ pub const LFO_INCREMENT_TABLE: [u32; 256] = {
 /// stable declared order (jit.rs:62 `Sh2Core` precedent). Serialization
 /// is UNAFFECTED — `state_pod` below is an explicit per-field stream,
 /// never a struct-image dump.
+#[derive(Clone)] // B2b-3c CHECK A/B leg — `meg_state before(*m_meg)` swp30_jit.cpp:430
 #[repr(C)]
 pub struct MegState {
     /// swp30.h:351 `m_decoded` (filled by decode_program only; NOT cleared by

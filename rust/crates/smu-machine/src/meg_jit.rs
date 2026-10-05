@@ -10,9 +10,39 @@
 //! SWP side over the `MegSwpDev` pointer window — §7-B decision), the
 //! :826-837 prologue now loading SEED through the window, and the §5.3-5/6
 //! compile-time analysis (`branchy` / `need_tval` / `early_r/m` /
-//! `last_slot_r/m`). `build()` STILL returns FALSE behind
-//! `PHASE_B2_EMIT_OK = false` (op loop, LFO hoist and CHECK leg arrive in
-//! B2b-2+); with `fnp == 0` no emitted byte is ever executed.
+//! `last_slot_r/m`). B2b-2a lands the width-adapted 16-bit skip reset
+//! (:839-840 through the u16 window slot) and the delay-ring apply legs
+//! (:1000-1048 3-ring head/folded, :1050-1077 2-ring head/folded) plus the
+//! `store16i`/`cmp16i_mem` emitter methods they need. B2b-2b lands the
+//! :1414-1496 dm/dr op-loop legs (`emit_dm_src`/`emit_dm_store`/
+//! `emit_dr_apply`) plus the `pack24`/`rnd`/`rnd_skip`/`p_packed` lambda
+//! helpers (:843-889) they consume. B2b-2c lands the :1501-1525 memw + index
+//! op-loop legs (`emit_memw_acc`/`emit_index_legs`) plus the shared
+//! `AccFromP`/`ShrAcc`/`ShrAccTZ15` accumulator lambdas (:883-889) they and
+//! the t leg consume. B2b-2d lands the :1530-1561/:1647-1675 t/tval op-loop
+//! legs (`emit_t_leg` folded + `emit_t_branchy` erase-twin + the shared
+//! `emit_tval_clamp` ±0x8000 pair) — all inert. B2b-2e lands the
+//! :1566-1638 memop address leg (`emit_memop_addr_base`/`emit_memop_addr`/
+//! `emit_memop_table`/`emit_memop` — offset+ix+ix2−SC math with baked
+//! addr_mask/addr_base, the compile-time region-enable gate, and the scale-2
+//! RAM store/load routed through the already-landed revram helpers) — also
+//! inert. B2b-3a lands the LFO hoist head `emit_lfo` (:897-969 — a
+//! transliteration of the PAIRED `meg::get_lfo`), the `emit_call_lfo`
+//! callout (`:1431-1448`, `meg_jit_call_lfo` trampoline + the :1448
+//! `load_p_limits`), and routes the two un-hoisted dm_src 0-3 arms through
+//! them — the module's LAST `unimplemented!` is gone. B2b-3b lands the
+//! FULL PROGRAM: the :971-991 LFO hoist SCAN, the :995-1679 per-op k-loop
+//! stitch (`emit_program` — ring apply head/folded, the branchy skip gate
+//! :1079-1104 with the u16-adapted skip legs, the ALU :1107-1409 incl. the
+//! bake fold + pow2-strength reduction, and every landed leg emitter wired
+//! at its C++ call point) and the loop-bound `meg_jit_upto()` gate leg
+//! (CHECK-coupled per §4/§9 — default 0x180 ≡ the C++ x64 fixed bound
+//! :995; only ever < 0x180 with `SMU2000_MEG_JIT_CHECK` set non-'0', the
+//! inverted `env_flag_on` polarity :322-325). `build()` assembles the whole
+//! program into the PRIVATE Assembler and STILL returns FALSE behind
+//! `PHASE_B2_EMIT_OK = false`; with `fnp == 0` no emitted byte is ever
+//! executed by the live path (the tests' X64Exec full-program parity rigs
+//! are the only executors, vs the PAIRED `meg::run_program`).
 //! With no compiled code the run guard :390-392 always bails, so `run()`
 //! == C++ `meg_jit_run()==false` and every call site falls to the PAIRED
 //! `meg::run_program` — BIT-IDENTICAL to the B1 stub (B2a acceptance rule:
@@ -37,25 +67,28 @@
 
 use std::ffi::c_void;
 use std::mem::offset_of;
+use std::ptr::addr_of;
 use std::sync::OnceLock;
 
-use smu_swp30::meg::{MegState, MegSwp, Op};
+use smu_swp30::meg::{meg_step, rand_jump, run_program, MegState, MegSwp, Op};
 use smu_swp30::mix::MegJitHook;
 
 // Re-export for tests/meg_jit.rs (jit_emit stays a private crate module,
 // lib.rs:86 — the brief's allowlist keeps lib.rs untouched). Same items are
 // in scope here (a `pub use` is also an import).
 pub use crate::jit_emit::{
-    Assembler, Mem, NOREG, ARG0, ARG1, ARG2, R8, R9, R10, R11, R12, R13, R14, R15, RAX, RBP, RBX,
-    RCX, RDI, RDX, RSI, RSP,
+    Assembler, Mem, NOREG, ARG0, ARG1, ARG2, ARG3, R8, R9, R10, R11, R12, R13, R14, R15, RAX, RBP,
+    RBX, RCX, RDI, RDX, RSI, RSP,
 };
 
 /// B2a inertness lever (brief): while false, `build()` never reaches the
 /// buffer handoff, so no `fnp` is ever published and no emitted byte is
-/// ever executed. Flip to true in B2b ONLY when the op loop + LFO hoist +
-/// early-write analysis + offset table are all transliterated and the
-/// CHECK leg is wired (handoff §8 gate sequence).
-pub const PHASE_B2_EMIT_OK: bool = false;
+/// ever executed. B2b-3c ENABLEMENT: flipped true — op loop + LFO hoist +
+/// early-write analysis + offset table + CHECK leg all transliterated and
+/// full-program parity green vs `meg::run_program` (S12g 53/53 ×2). The
+/// byte-EQ battery (JIT入切 dense/piano, live wav byte-EQ, blocktime) is
+/// the B2b-3c gate; revert to false on any stubborn red (S12g NEXT).
+pub const PHASE_B2_EMIT_OK: bool = true;
 
 // origin: swp30_jit.cpp:69-70 RENC/RDEC (x64 mode; the x86-32 ESI pairing
 // at :66-67 is DEAD here — SMU_X64ASM_MODE==64 is the only live half).
@@ -103,6 +136,19 @@ pub const MEG_OPS: u32 = 0x180;
 pub const FRAME: i32 = 152;
 // origin: swp30_jit.cpp:816 LFO_SLOT_BASE = 48 (frame slots 48..144, §5.3-8)
 pub const LFO_SLOT_BASE: i32 = 48;
+
+/// origin: swp30_jit.cpp:898-901 `lfo_offsets[16]` — the phase table whose
+/// ADDRESS is baked (`imm64 R8, u64(uintptr_t(lfo_offsets))` :915) into every
+/// emitted `emit_lfo`, then indexed `load32 [R8 + RCX*4]` (:916). The byte
+/// values are the PAIRED `meg::get_lfo` `OFFSETS` (meg.rs:381-386). A `static`
+/// has one process-lifetime address (the rlib is statically linked into every
+/// binary that bakes it — jit.rs:254-273 offsets precedent), so the emitted
+/// table load reads the real bytes at run time. `addr_of!` (not a reference
+/// coerce) avoids any vtable/padding reinterpretation.
+static LFO_OFFSETS: [u32; 16] = [
+    0x00000, 0x02aaa, 0x04000, 0x05555, 0x08000, 0x0aaaa, 0x0c000, 0x0d555, 0x10000, 0x12aaa,
+    0x14000, 0x15555, 0x18000, 0x1aaaa, 0x1c000, 0x1d555,
+];
 
 /// origin: swp30_jit.cpp:616 `slot3 = (d3 + k) % 3` — compile-time ring
 /// fold lambda (§6: "plain Rust arithmetic, no emitter method").
@@ -582,6 +628,21 @@ pub struct MegJit {
     // any stale code can run (§7-D assert pin: tests/meg_jit.rs).
     sintab: *const u16,
     sintab_len: usize,
+    /// CHECK-leg persistent buffers (see `CheckScratch`). Never touched
+    /// when CHECK is off — zero effect on the gated (no-CHECK) path.
+    scratch: std::cell::RefCell<CheckScratch>,
+}
+
+/// CHECK A/B scratch for `check_ab` (:426-511). The C++ heap-allocates
+/// `ram0`/`ramj` EVERY call (:431/:436) — on this box that per-sample
+/// VirtualAlloc/fault churn made a dense 1 s CHECK render take minutes
+/// (2026-10-05 slow-leg hunt). The port allocates ONCE and reuses; same
+/// bytes compared. Explicit construction (Invariant 3).
+struct CheckScratch {
+    ram0: Vec<u16>, // :431 — pre-JIT reverb RAM (restore)
+    ramj: Vec<u16>, // :436 — JIT-side reverb RAM result
+    jimg: Vec<u8>,  // :449 `jb` — post-JIT state byte image
+    iimg: Vec<u8>,  // :450 `ib` — post-interpreter state byte image
 }
 
 unsafe impl Send for MegJit {}
@@ -620,6 +681,12 @@ impl MegJit {
             stats,
             sintab: std::ptr::null(),
             sintab_len: 0,
+            scratch: std::cell::RefCell::new(CheckScratch {
+                ram0: Vec::new(),
+                ramj: Vec::new(),
+                jimg: Vec::new(),
+                iimg: Vec::new(),
+            }),
         }
     }
 
@@ -687,6 +754,8 @@ impl MegJit {
         revram_enable: u16,
         bake: bool,
         early: bool,
+        sintab_ptr: *const u16,
+        sintab_len: usize,
     ) -> bool {
         // :604 `fn = nullptr` FIRST — and every early return below keeps it
         // null (the brief's B2a rule: build() must never leave a non-zero fnp).
@@ -726,27 +795,33 @@ impl MegJit {
         // (now over the REAL field element types, not bare primitives).
         let o = offs();
 
-        let _ = revram_enable; // :1589 per-region compile-time gate — B2b-2
-        let _ = bake;          // :403-421 spec/baked variant — B2b-2
+        // :645 — sintab capture, the GATE included: machine-code LFO only when
+        // the table is resident for a full 1/4 period (0x8000); otherwise the
+        // dm_src 0-3 legs take the :1431-1448 callout. `sintab_ptr`/`sintab_len`
+        // are the rebuild() capture (§7-D pin — the Machine keeps the table
+        // process-pinned; an empty slice's dangling ptr never escapes here).
+        let sintab = if sintab_len >= 0x8000 { sintab_ptr } else { std::ptr::null() };
 
-        // :730 assembler — the frame skeleton (prologue :826-837, epilogue
-        // :1688-1694) with the REAL offsets; the seed legs deref the
-        // MegSwpDev slot once (§7-B). tests/meg_jit.rs pins ret
-        // termination + rsp alignment + exact prologue/epilogue bytes.
-        // :839-840 branchy skip reset — B2b-2: Rust meg_skip_to is u16
-        // (C++ u32, swp30.h:614) and jit_emit has store16i/cmp16 only as
-        // reg forms; the width-adapted legs land with the branch gate.
-        // :971-991 LFO hoist (emit_lfo :897-969) — B2b-2.
-        // :995-1638 the per-op loop (ring apply :1000-1077, branch gate
-        // :1079-1104, ALU :1107-1409, dm/dr :1414-1496, memw/index/t
-        // :1501-1561, memop :1566-1638) consuming `an` + `o` — B2b-2.
-        // DO NOT EMIT HALF A PROGRAM: the PHASE_B2_EMIT_OK guard below is
-        // what keeps that true.
+        // :730 assembler — the WHOLE program now: prologue :826-837, the
+        // branchy skip reset :839-840 (u16-adapted, B2b-2a), the :971-991
+        // LFO hoist SCAN, the :995-1679 per-op k-loop (emit_program, B2b-3b)
+        // and the epilogue :1688-1694. `revram_enable` feeds the :1589
+        // compile-time region gate inside emit_memop; `bake` the :1111 ALU
+        // const fold and the :1534 t-konst bake. The bytes live ONLY in this
+        // private Assembler until the PHASE gate below flips — the observable
+        // contract stays the C++ non-JIT stub :591-595 (fnp==0, run() falls
+        // to the PAIRED interpreter, audio BIT-IDENTICAL). tests/meg_jit.rs
+        // executes full programs through `program_bytes` (the same
+        // emit_program) against `meg::run_program` — never a half-emitted
+        // program and never a published fnp while the flag is false.
         let mut a = Assembler::new();
-        emit_frame_skeleton(&mut a, &o, an.branchy);
+        emit_program(&mut a, &o, ms, ops, revram_enable, bake, &an, cd.d3, cd.d2, sintab, sintab_len);
 
-        // THE single inertness gate (brief): unreachable until B2b flips the
-        // const, so the handoff below — and fnp publication — never runs.
+        // THE single emission gate (B2b-3c flipped it true — the handoff
+        // below and fnp publication are LIVE). Setting the const back to
+        // false re-enters stub parity :591-595 (fnp==0, run() falls to the
+        // PAIRED interpreter, audio BIT-IDENTICAL) — the standing revert
+        // lever from the NEXT gate list.
         if !PHASE_B2_EMIT_OK {
             return false; // stub parity :591-595; fnp already 0 (:604)
         }
@@ -817,7 +892,17 @@ impl MegJitHook for MegJit {
         self.sintab_len = sintab.len();
         // :369-370 — false ⇒ gen.fn=null, interpret until the next rebuild
         let built =
-            Self::build(&mut self.gen, meg, &self.ops, ram_len, revram_enable, false, self.early);
+            Self::build(
+                &mut self.gen,
+                meg,
+                &self.ops,
+                ram_len,
+                revram_enable,
+                false,
+                self.early,
+                self.sintab,
+                self.sintab_len,
+            );
         if !built {
             self.gen.fnp = 0;
         }
@@ -893,6 +978,8 @@ impl MegJitHook for MegJit {
                     swp.revram_enable,
                     true,
                     self.early,
+                    self.sintab,
+                    self.sintab_len,
                 ) {
                     self.spec_const_gen = cg; // :416
                     use_spec = true; // :417
@@ -914,19 +1001,26 @@ impl MegJitHook for MegJit {
             return false;
         }
 
-        // :426-511 — CHECK A/B leg (SMU2000_MEG_JIT_CHECK, handoff §9:
-        // snapshot meg_state/reverb_ram/seed/flags, JIT step, restore,
-        // interpreter from the same start — `_UPTO` per-op step bisect
-        // :444-448, field-wise compare per §7-E, 40-report cap :461-462).
-        // PHASE B2 (needs the emission to compare against; the env polarity
-        // helper `env_flag_on` + `meg_jit_upto` already landed and are
-        // pinned in tests/meg_jit.rs).
+        // :426-511 — CHECK A/B leg (SMU2000_MEG_JIT_CHECK, handoff §9):
+        // snapshot meg_state/reverb_ram/seed/flags, run the JIT, restore,
+        // run the PAIRED interpreter from the same start (full block, or
+        // `upto` per-op steps for the bisect :444-448), report the first
+        // difference. The env polarity helper `env_flag_on` +
+        // `meg_jit_upto` landed in B1; the build side already truncates the
+        // k loop at the SAME static (emit_program :2361) — exactly the C++
+        // "ignored unless the check above is on" coupling (:335-337/:2035).
+        // NOTE (upstream design): in CHECK mode :434 runs the JIT once for
+        // the A/B and :512 runs it AGAIN afterwards — debug mode doubles the
+        // MEG block; audio in CHECK mode is deliberately NOT the gated path.
+        if self.check {
+            self.check_ab(c.fnp, meg, swp);
+        }
 
-        // :512 c->fn(m_meg, this, m_reverb_ram.data()) — PHASE B2-3
-        // (transmute of the RWX buffer, jit.rs:380-384 pattern; ARG
-        // laundering §7-B — ARG1 becomes a MegSwpDev::from_swp window
-        // built from this very seam, B2b-1).
-        let _ = use_spec;
+        // :512 c->fn(m_meg, this, m_reverb_ram.data()) — PHASE B2-3 landed:
+        // transmute of the RWX buffer (jit.rs:380-384 pattern; ARG laundering
+        // §7-B — ARG1 becomes a MegSwpDev::from_swp window built from this
+        // very seam, ARG2 the live reverb RAM, never baked :611-612/:831).
+        unsafe { call_meg_fn(c.fnp, meg, swp) };
 
         // :513-514 — the caller-side half of run_program: pc wrap + icount
         // tail (mirrors meg.rs:1000-1002; run_program subtracts the 0x180
@@ -935,6 +1029,277 @@ impl MegJitHook for MegJit {
         meg.icount = meg.icount.wrapping_sub(0x180);
         true // :515
     }
+}
+
+impl MegJit {
+    /// origin: swp30_jit.cpp:426-511 — the CHECK A/B leg body. Runs `fp`
+    /// (the compiled block, already truncated to `meg_jit_upto()` at compile
+    /// time), restores the device + state, runs the interpreter for the SAME
+    /// steps, and reports the first divergence (field byte, RAM diff count +
+    /// first index, seed, flags — :461-465), the full field dumps on the
+    /// first hit (:466-489) and every differing field after (:490-509).
+    /// The report cap is `shown < 40` (:461); the counter is one process
+    /// static shared by both devices, like the C++ file-scope `static int`.
+    fn check_ab(&self, fp: usize, meg: &mut MegState, swp: &mut MegSwp) {
+        let mut sc = self.scratch.borrow_mut();
+        let rlen = swp.reverb_ram.len();
+        if sc.ram0.len() != rlen || sc.ramj.len() != rlen {
+            // size only changes on a state reload (meg.rs reverb_ram is
+            // state-sized) — steady state NEVER allocates here
+            sc.ram0.resize(rlen, 0);
+            sc.ramj.resize(rlen, 0);
+        }
+        // :430-433 — before snapshot (meg_state copy + RAM + seed + flags).
+        // `before`/`jit` are stack structs exactly like the C++ (:430/:435);
+        // the RAM copies ride the persistent scratch above.
+        let before: MegState = meg.clone(); // :430
+        sc.ram0.copy_from_slice(&swp.reverb_ram); // :431
+        let seed0 = *swp.seed; // :432
+        let (fn0, fz0) = (*swp.flag_n, *swp.flag_z); // :433
+
+        // :434 — JIT the LIVE state
+        unsafe { call_meg_fn(fp, meg, swp) };
+
+        // :435-438 — JIT-result snapshots. `jit` carries the typed values the
+        // report needs; the byte scan images the LIVE struct at both sample
+        // points so padding is the same bytes on both sides (C++ compares a
+        // raw struct copy — :449-450 — and reads its padding too).
+        let jit: MegState = meg.clone(); // :435
+        sc.ramj.copy_from_slice(&swp.reverb_ram); // :436
+        let (seedj, fnj, fzj) = (*swp.seed, *swp.flag_n, *swp.flag_z);
+        let sz = std::mem::size_of::<MegState>();
+        sc.jimg.resize(sz, 0);
+        // SAFETY: jimg is exactly sz bytes; the struct is POD (repr(C),
+        // no pointers — the same imaging `state_pod` relies on, minus the
+        // per-call Vec).
+        unsafe {
+            std::ptr::copy_nonoverlapping(meg as *const MegState as *const u8, sc.jimg.as_mut_ptr(), sz);
+        }
+
+        // :439-443 — restore
+        *meg = before.clone();
+        swp.reverb_ram.copy_from_slice(&sc.ram0);
+        *swp.seed = seed0;
+        *swp.flag_n = fn0;
+        *swp.flag_z = fz0;
+
+        // :444-448 — the interpreter from the same start, SAME step count as
+        // the emitted program (the UPTO bisect: step() per op when set, else
+        // the full block through run_program).
+        let upto = meg_jit_upto(); // :444
+        if upto != MEG_OPS {
+            for _ in 0..upto {
+                meg_step(meg, swp, &mut None, 0, 0, 0, 0); // :446 m_meg->step()
+            }
+        } else {
+            run_program(meg, swp, &self.ops); // :448 run_program(m_meg_ops)
+        }
+
+        // :449-457 — byte compare through the live struct image; the icount
+        // (and the retval next to it) are the caller-side halves and are
+        // EXPECTED to differ — stop short of them (:451-454).
+        let end = offset_of!(MegState, icount); // :454
+        sc.iimg.resize(sz, 0);
+        // SAFETY: as jimg above; same struct address, so the padding bytes
+        // in the two images are byte-identical by construction (:449 note).
+        unsafe {
+            std::ptr::copy_nonoverlapping(meg as *const MegState as *const u8, sc.iimg.as_mut_ptr(), sz);
+        }
+        let mut first = end; // :455
+        for i in 0..end {
+            if sc.jimg[i] != sc.iimg[i] {
+                first = i;
+                break;
+            }
+        }
+        // :458-460 — RAM diff count + first index (zip keeps the exact same
+        // scan; equal lengths by the resize above)
+        let mut rambad = 0usize;
+        let mut ramfirst = 0usize;
+        for (i, (a, b)) in sc.ramj.iter().zip(swp.reverb_ram.iter()).enumerate() {
+            if a != b {
+                if rambad == 0 {
+                    ramfirst = i;
+                }
+                rambad += 1;
+            }
+        }
+        // :461 — the report gate (40 cap)
+        if first != end
+            || rambad != 0
+            || seedj != *swp.seed
+            || fnj != *swp.flag_n
+            || fzj != *swp.flag_z
+        {
+            let shown = MEGCHECK_SHOWN.load(std::sync::atomic::Ordering::Relaxed);
+            if shown < 40 {
+                MEGCHECK_SHOWN.store(shown + 1, std::sync::atomic::Ordering::Relaxed);
+                // :462-465 — shown is printed POST-increment (shown++ first)
+                let seedok = if seedj == *swp.seed { "ok" } else { "BAD" };
+                let fnok = if fnj == *swp.flag_n { "ok" } else { "BAD" };
+                let fzok = if fzj == *swp.flag_z { "ok" } else { "BAD" };
+                eprintln!(
+                    "MEGCHECK sample {} state@{first}/{end} ram {rambad} (first {ramfirst}) seed {seedok} flags {fnok}{fzok}",
+                    shown + 1
+                );
+                if shown == 0 {
+                    // :466-473 — m_m windows
+                    for b in (0..0x40usize).step_by(8) {
+                        let mut lj = String::new();
+                        let mut li = String::new();
+                        for i in 0..8usize {
+                            lj.push_str(&format!(" {:8}", jit.m[b + i]));
+                            li.push_str(&format!(" {:8}", meg.m[b + i]));
+                        }
+                        eprintln!("  m[{b:02x}..] jit{lj}");
+                        eprintln!("         interp{li}");
+                    }
+                    // :474-478 — the m32/m33/m48/m49 + mw summary pair
+                    eprintln!(
+                        "  jit    m32 {} m33 {} m48 {} m49 {} mwv {},{},{} mwr {},{},{}",
+                        jit.m[32], jit.m[33], jit.m[48], jit.m[49],
+                        jit.mw_value[0], jit.mw_value[1], jit.mw_value[2],
+                        jit.mw_reg[0], jit.mw_reg[1], jit.mw_reg[2]
+                    );
+                    eprintln!(
+                        "  interp m32 {} m33 {} m48 {} m49 {} mwv {},{},{} mwr {},{},{}",
+                        meg.m[32], meg.m[33], meg.m[48], meg.m[49],
+                        meg.mw_value[0], meg.mw_value[1], meg.mw_value[2],
+                        meg.mw_reg[0], meg.mw_reg[1], meg.mw_reg[2]
+                    );
+                    // :480-485 — the delayed-write ops that could produce it
+                    for k in 0..MEG_OPS {
+                        let op = &self.ops[k as usize];
+                        if op.dm == 32 || op.dm == 33 || op.dm == 48 || op.dm == 49 {
+                            eprintln!(
+                                "  ops[{k}] dm={} dm_src={} mmode={} asel={} rop={} shift={} clamp={} sm={} sr={} alu={}",
+                                op.dm, op.dm_src, op.mmode, op.asel, op.rop,
+                                op.shift, op.clamp, op.sm, op.sr, op.alu
+                            );
+                        }
+                    }
+                    // :486-488 — the before state
+                    eprintln!(
+                        "  before m32 {} m33 {} m48 {} m49 {} p {} mwv {},{},{} mwr {},{},{} d3 {} d2 {}",
+                        before.m[32], before.m[33], before.m[48], before.m[49], before.p,
+                        before.mw_value[0], before.mw_value[1], before.mw_value[2],
+                        before.mw_reg[0], before.mw_reg[1], before.mw_reg[2],
+                        before.delay_3, before.delay_2
+                    );
+                }
+                // :490-509 — every differing field, interpreter side-by-side
+                for i in 0..0x40usize {
+                    if jit.m[i] != meg.m[i] {
+                        eprintln!("  m[{i}] jit {} interp {}", jit.m[i], meg.m[i]);
+                    }
+                }
+                for i in 0..0x80usize {
+                    if jit.r[i] != meg.r[i] {
+                        eprintln!("  r[{i}] jit {} interp {}", jit.r[i], meg.r[i]);
+                    }
+                }
+                for i in 0..8usize {
+                    if jit.t[i] != meg.t[i] {
+                        eprintln!("  t[{i}] jit {} interp {}", jit.t[i], meg.t[i]);
+                    }
+                }
+                if jit.p != meg.p {
+                    eprintln!("  p jit {} interp {}", jit.p, meg.p);
+                }
+                if jit.ram_index != meg.ram_index {
+                    eprintln!("  ix jit {} interp {}", jit.ram_index, meg.ram_index);
+                }
+                if jit.ram_read != meg.ram_read {
+                    eprintln!("  rr jit {} interp {}", jit.ram_read, meg.ram_read);
+                }
+                if jit.ram_write != meg.ram_write {
+                    eprintln!("  rw jit {} interp {}", jit.ram_write, meg.ram_write);
+                }
+                if jit.delay_3 != meg.delay_3 || jit.delay_2 != meg.delay_2 {
+                    eprintln!(
+                        "  d3/d2 jit {},{} interp {},{}",
+                        jit.delay_3, jit.delay_2, meg.delay_3, meg.delay_2
+                    );
+                }
+                for i in 0..3usize {
+                    if jit.mw_value[i] != meg.mw_value[i] || jit.mw_reg[i] != meg.mw_reg[i] {
+                        eprintln!(
+                            "  mw[{i}] jit {}/{} interp {}/{}",
+                            jit.mw_value[i], jit.mw_reg[i], meg.mw_value[i], meg.mw_reg[i]
+                        );
+                    }
+                    if jit.rw_value[i] != meg.rw_value[i] || jit.rw_reg[i] != meg.rw_reg[i] {
+                        eprintln!(
+                            "  rw[{i}] jit {}/{} interp {}/{}",
+                            jit.rw_value[i], jit.rw_reg[i], meg.rw_value[i], meg.rw_reg[i]
+                        );
+                    }
+                    if jit.index_value[i] != meg.index_value[i]
+                        || jit.index_active[i] != meg.index_active[i]
+                    {
+                        eprintln!(
+                            "  ixv[{i}] jit {}/{} interp {}/{}",
+                            jit.index_value[i], jit.index_active[i] as u8,
+                            meg.index_value[i], meg.index_active[i] as u8
+                        );
+                    }
+                    if jit.memw_value[i] != meg.memw_value[i]
+                        || jit.memw_active[i] != meg.memw_active[i]
+                    {
+                        eprintln!(
+                            "  memw[{i}] jit {}/{} interp {}/{}",
+                            jit.memw_value[i], jit.memw_active[i] as u8,
+                            meg.memw_value[i], meg.memw_active[i] as u8
+                        );
+                    }
+                    if jit.memr_value[i] != meg.memr_value[i]
+                        || jit.memr_active[i] != meg.memr_active[i]
+                    {
+                        eprintln!(
+                            "  memr[{i}] jit {}/{} interp {}/{}",
+                            jit.memr_value[i], jit.memr_active[i] as u8,
+                            meg.memr_value[i], meg.memr_active[i] as u8
+                        );
+                    }
+                }
+                for i in 0..2usize {
+                    if jit.t_value[i] != meg.t_value[i] {
+                        eprintln!("  tv[{i}] jit {} interp {}", jit.t_value[i], meg.t_value[i]);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// B2b-3c — the live :512 native call + CHECK support (:426-511).
+// ---------------------------------------------------------------------------
+
+/// origin: swp30_jit.cpp:429 `static int shown` — ONE file-scope counter
+/// shared by both devices, capped at 40 reports (:461). Atomic for
+/// form (master+slave run on one audio thread — C++'s static has exactly
+/// the same benign-race shape in the threaded build it shipped with).
+static MEGCHECK_SHOWN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// SMU_HUNT probe counter (temporary, B2b-3c dense hang hunt) — removed once
+/// the divergence is fixed.
+static HUNT_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// origin: swp30_jit.cpp:512 `c->fn(m_meg, this, m_reverb_ram.data())` —
+/// the native entry call. §7-B ARG laundering lives here, at the call
+/// boundary: ARG0 = MegState*, ARG1 = a stack `MegSwpDev` window built
+/// from this very seam (jit.rs:70-73 precedent — valid for the duration
+/// of the call only), ARG2 = the live reverb RAM base (per-call, never
+/// baked — :611-612 RAM guard + :831 load `mov r15,rdx`). Win64
+/// `extern "system"` == the Microsoft x64 C ABI the emitted prologue
+/// (:826-837) speaks; the B2b-3b parity rigs exec through the SAME
+/// transmute shape (tests/meg_jit.rs `run_parity`).
+unsafe fn call_meg_fn(fp: usize, meg: &mut MegState, swp: &mut MegSwp) {
+    let mut dev = MegSwpDev::from_swp(swp);
+    let f: unsafe extern "system" fn(*mut MegState, *mut MegSwpDev, *mut u16) =
+        std::mem::transmute(fp);
+    f(meg as *mut MegState, &mut dev, swp.reverb_ram.as_mut_ptr());
 }
 
 // ---------------------------------------------------------------------------
@@ -1180,6 +1545,904 @@ pub fn emit_revram_decode(a: &mut Assembler) {
 }
 
 // ---------------------------------------------------------------------------
+// B2b-2a — skip reset + delay-ring legs (origin: swp30_jit.cpp:839-840,
+// :1000-1048, :1050-1077). Additive scaffolding for the future op loop:
+// build() still refuses at the PHASE_B2_EMIT_OK gate, so NONE of these bytes
+// reaches an exec buffer or runs — same contract as the frame skeleton
+// (tests/meg_jit.rs `b2b2a_build_inert` pins fnp==0; the exec rigs execute
+// the helpers STANDALONE, never a half-emitted program).
+// Width adaptation (brief §2): the Rust skip slot is `*mut u16`
+// (`MegSwpDev.skip` ← `Swp30::meg_skip_to`, C++ u32 swp30.h:614), so the
+// skip legs are 16-bit (`store16i`/`cmp16i_mem` added to jit_emit.rs in
+// this slice). RDX is free scratch in every leg below: live cross-leg regs
+// are RBX/R12/R13/R14/R15/RSI/RDI/RBP/R9/R10 (§3) and ring-apply contains
+// no callout — RAX/RCX/RDX are the C++ legs' own scratch (:1003-1029).
+// ---------------------------------------------------------------------------
+
+/// origin: swp30_jit.cpp:839-840 `if (branchy) store32i mem{SWP, o_skip}, 0`
+/// (prologue tail, :838). The C++ zeroes the device's u32 `m_meg_jit_skip`
+/// once per sample so the per-op branch gate (:1082) starts each program
+/// walk unskipped. Rust: through the §7-B window — load the `*mut u16` slot
+/// into RAX, then `store16i [rax+0], 0` (width-adapted u16 `meg_skip_to`).
+/// RAX is scratch at the prologue tail (live from :829-837 are the pinned
+/// register-plan regs only); nothing downstream consumes it before the op loop.
+pub fn emit_skip_reset(a: &mut Assembler, o: &Offs) {
+    a.load64(RAX, Mem::b(SWP, o.skip)); // window slot -> live meg_skip_to
+    a.store16i(Mem::b(RAX, 0), 0);      // :840 (u16 adaptation, brief §2)
+}
+
+/// origin: swp30_jit.cpp:1000-1029 — 3-ring apply HEAD (the dynamic leg the
+/// op loop emits for `k < 3 || branchy`): test each ring byte at slot `s`,
+/// apply the delayed write through the register index (scale-4 store :1007),
+/// same for rw→r (:1010-1015), index→ram_index (:1017-1022), and index2→
+/// ram_index2 (:1024-1029 — window legs: one extra deref load per field,
+/// §7-B; the values land in the same live Swp30 bytes the interpreter uses).
+pub fn emit_ring3_head(a: &mut Assembler, o: &Offs, s: usize) {
+    let s = s as i32;
+    // m (:1003-1008)
+    a.loadu8(RAX, Mem::b(MS, o.mw_reg + s)); // :1003
+    a.test32(RAX, RAX);                      // :1004
+    let j1 = a.jz_fwd();                     // :1005
+    a.load32(RCX, Mem::b(MS, o.mw_value + 4 * s)); // :1006
+    a.store32(
+        Mem { base: MS, index: RAX, scale: 4, disp: o.m }, // :1007 scale 4
+        RCX,
+    );
+    a.patch(j1); // :1008
+    // r (:1010-1015)
+    a.loadu8(RAX, Mem::b(MS, o.rw_reg + s));
+    a.test32(RAX, RAX);
+    let j2 = a.jz_fwd();
+    a.load32(RCX, Mem::b(MS, o.rw_value + 4 * s));
+    a.store32(Mem { base: MS, index: RAX, scale: 4, disp: o.r }, RCX); // :1014
+    a.patch(j2);
+    // index (:1017-1022)
+    a.loadu8(RAX, Mem::b(MS, o.ix_act + s));
+    a.test32(RAX, RAX);
+    let j3 = a.jz_fwd();
+    a.load32(RCX, Mem::b(MS, o.ix_value + 4 * s));
+    a.store32(Mem::b(MS, o.ram_index), RCX); // :1021
+    a.patch(j3);
+    // 2nd index (:1024-1029) — §7-B window legs: C++ addressed the device
+    // inline; here each SWP-side field costs one deref load of its slot.
+    a.load64(RDX, Mem::b(SWP, o.ix2_act)); // *mut [u8;3]
+    a.loadu8(RAX, Mem::b(RDX, s));         // :1024
+    a.test32(RAX, RAX);                    // :1025
+    let j4 = a.jz_fwd();                   // :1026
+    a.load64(RDX, Mem::b(SWP, o.ix2_value)); // *mut [i32;3]
+    a.load32(RCX, Mem::b(RDX, 4 * s));     // :1027
+    a.load64(RDX, Mem::b(SWP, o.ram_index2)); // *mut i32
+    a.store32(Mem::b(RDX, 0), RCX);        // :1028
+    a.patch(j4); // :1029
+}
+
+/// origin: swp30_jit.cpp:1030-1048 — 3-ring apply FOLDED (the `else` leg,
+/// non-branchy ops with `k >= 3`): ops[k-3]'s (`w`) writes go straight from
+/// the ring slot to their destination, register numbers compile-time
+/// constants. Early-written regs (`early_m`/`early_r`, §5.3-6) were already
+/// stored at the writing op and are skipped here (:1033/:1038); index legs
+/// are always folded (:1041-1048).
+pub fn emit_ring3_folded(a: &mut Assembler, o: &Offs, s: usize, w: &Op, an: &Analysis) {
+    let s = s as i32;
+    if w.dm != 0 && !an.early_m[w.dm as usize] {
+        // :1033-1036
+        a.load32(RCX, Mem::b(MS, o.mw_value + 4 * s));
+        a.store32(Mem::b(MS, o.m + 4 * w.dm as i32), RCX);
+    }
+    if w.dr != 0 && !an.early_r[w.dr as usize] {
+        // :1037-1040
+        a.load32(RCX, Mem::b(MS, o.rw_value + 4 * s));
+        a.store32(Mem::b(MS, o.r + 4 * w.dr as i32), RCX);
+    }
+    if w.index != 0 {
+        // :1041-1044
+        a.load32(RCX, Mem::b(MS, o.ix_value + 4 * s));
+        a.store32(Mem::b(MS, o.ram_index), RCX);
+    }
+    if w.index2 != 0 {
+        // :1045-1048 (window deref, §7-B)
+        a.load64(RDX, Mem::b(SWP, o.ix2_value));
+        a.load32(RCX, Mem::b(RDX, 4 * s));
+        a.load64(RDX, Mem::b(SWP, o.ram_index2));
+        a.store32(Mem::b(RDX, 0), RCX);
+    }
+}
+
+/// origin: swp30_jit.cpp:1050-1065 — 2-ring (mem ports) HEAD for
+/// `k < 2 || branchy`: apply ops' delayed memw/memr values AND clear the
+/// act bytes (:1057/:1064 — the interpreter's one-shot clear; Rust bools are
+/// the 1-byte flags pinned by the const asserts above, so `store8i 0` is a
+/// legal `false`). All six legs are MS-side — no window deref.
+pub fn emit_ring2_head(a: &mut Assembler, o: &Offs, s: usize) {
+    let s = s as i32;
+    a.loadu8(RAX, Mem::b(MS, o.memw_act + s)); // :1052
+    a.test32(RAX, RAX);                        // :1053
+    let j1 = a.jz_fwd();                       // :1054
+    a.load32(RCX, Mem::b(MS, o.memw_val + 4 * s)); // :1055
+    a.store32(Mem::b(MS, o.ram_write), RCX);   // :1056
+    a.store8i(Mem::b(MS, o.memw_act + s), 0);  // :1057
+    a.patch(j1); // :1058
+    a.loadu8(RAX, Mem::b(MS, o.memr_act + s)); // :1059
+    a.test32(RAX, RAX);                        // :1060
+    let j2 = a.jz_fwd();                       // :1061
+    a.load32(RCX, Mem::b(MS, o.memr_val + 4 * s)); // :1062
+    a.store32(Mem::b(MS, o.ram_read), RCX);    // :1063
+    a.store8i(Mem::b(MS, o.memr_act + s), 0);  // :1064
+    a.patch(j2); // :1065
+}
+
+/// origin: swp30_jit.cpp:1066-1077 — 2-ring FOLDED (`else`, non-branchy
+/// `k >= 2`): ops[k-2]'s memw/memop apply from their slots; NO act clear
+/// (nothing was queued dynamically — the fold is the decision). The memr
+/// leg is gated by memop 2/3 (read ports, :1073).
+pub fn emit_ring2_folded(a: &mut Assembler, o: &Offs, s: usize, w: &Op) {
+    let s = s as i32;
+    if w.memw != 0 {
+        // :1069-1072
+        a.load32(RCX, Mem::b(MS, o.memw_val + 4 * s));
+        a.store32(Mem::b(MS, o.ram_write), RCX);
+    }
+    if w.memop == 2 || w.memop == 3 {
+        // :1073-1076
+        a.load32(RCX, Mem::b(MS, o.memr_val + 4 * s));
+        a.store32(Mem::b(MS, o.ram_read), RCX);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// B2b-2b — dm/dr op-loop legs + the value lambdas they consume (origin:
+// swp30_jit.cpp:843-889 `pack24`/`rnd`/`rnd_skip`/`p_packed` lambdas,
+// :988 hoist-store, :1414-1496 dm/dr blocks). Additive scaffolding exactly
+// like B2b-2a: build() still refuses at the PHASE_B2_EMIT_OK gate, so NONE
+// of these bytes reaches an exec buffer or runs — tests/meg_jit.rs executes
+// the helpers STANDALONE (exec rigs), never a half-emitted program.
+// Register contract (from the §3 plan): RAX is the value register every
+// lambda returns (:842 comment), RCX is pack24's scratch (:845), RSI=SEED
+// is advanced DELIBERATELY by rnd/rnd_skip (:862/:871 — the same stream
+// position the interpreter walks, handoff risk 3), R13=P is read-only here
+// (:874-882 p_packed), and the K_MAX/K_MIN registers (:835-836) must be
+// pre-pinned by the caller — the prologue does it at :835-836, the exec
+// rigs emulate that. P_MAX/P_MIN are NOT touched (no saturation clamp in
+// these legs) and no callout exists here, so load_p_limits (:1448 twin)
+// stays irrelevant within this slice.
+// ---------------------------------------------------------------------------
+
+/// origin: swp30_jit.cpp:843-857 `pack24` lambda — ground truth
+/// `meg::meg_pack24` (meg.rs:562, PAIRED). Input rax (s64 p), output eax
+/// (24-bit folded, zero-extended into rax by the 32-bit tail). Truncates
+/// toward ZERO (:844 comment: negative inputs get +0x7fff before the
+/// arithmetic shift), clamps the ONE-past-limit values exactly to the K
+/// registers (:850 — anything further over still folds 24-bit), then the
+/// shl32/sar32 fold. C++ passes `u32(s32(-0x800001))` to the sign-extended
+/// cmp64ri (:853) — same call here, same sext.
+pub fn emit_pack24(a: &mut Assembler) {
+    a.mov64(RCX, RAX); // :845
+    a.sar64(RCX, 63);  // :846 — -1 when negative
+    a.and32i(RCX, 0x7fff); // :847 — round-toward-zero bias
+    a.add64(RAX, RCX); // :848
+    a.sar64(RAX, 15);  // :849 — p / 32768 truncated toward 0
+    a.cmp64ri(RAX, 0x80_0000); // :851
+    a.cmove64(RAX, K_MAX);     // :852
+    a.cmp64ri(RAX, (-0x80_0001i32) as u32); // :853 u32(s32(-0x800001))
+    a.cmove64(RAX, K_MIN);     // :854
+    a.shl32(RAX, 8);           // :855 — 24-bit fold
+    a.sar32(RAX, 8);           // :856
+}
+
+/// origin: swp30_jit.cpp:859-864 `rnd` lambda — one draw of
+/// swp30_device::rand (paired `voice::swp_rand`, meg.rs:28/:445 seam).
+/// Constants 1664525/1013904223 + rol16 must match swp_rand bit-for-bit
+/// (handoff §H). Advances SEED (RSI); output eax.
+pub fn emit_rnd(a: &mut Assembler) {
+    a.imul32i(RAX, SEED, 1664525);    // :860
+    a.add32i(RAX, 1013904223);        // :861
+    a.mov32(SEED, RAX);               // :862 — the new seed lives in RSI
+    a.rol32(RAX, 16);                 // :863 — the draw is the rotated form
+}
+
+/// origin: swp30_jit.cpp:866-872 `rnd_skip(n)` lambda — advance the seed
+/// exactly n draws without using values (:868 `swp30_device::rand_jump` =
+/// the PAIRED `meg::rand_jump` meg.rs:586). Feeds the dr leg's coalesced
+/// skipped-region draws (:1481-1482 ← swp30.cpp:4282-4298 — the seed
+/// advance stays at the same stream position, handoff risk 3).
+pub fn emit_rnd_skip(a: &mut Assembler, n: u32) {
+    let (mul, add) = rand_jump(n); // :868 (C++ out-params -> tuple, §dev)
+    a.imul32i(RAX, SEED, mul);     // :869
+    a.add32i(RAX, add);            // :870
+    a.mov32(SEED, RAX);            // :871
+}
+
+/// origin: swp30_jit.cpp:874-882 `p_packed(noise)` lambda — p with optional
+/// dither, packed (dm src 6 :1461, dr p-leg :1487). Noise is the small
+/// POSITIVE draw `& 0x07e0` (:877, handoff risk 3 — the mask appears ONLY
+/// on these legs). Input P (R13), output eax.
+pub fn emit_p_packed(a: &mut Assembler, noise: bool) {
+    if noise {
+        emit_rnd(a);              // :876
+        a.and32i(RAX, 0x07e0);    // :877 — 雑音（正の小さな値）
+        a.add64(RAX, P);          // :878 — p をそのまま足す
+    } else {
+        a.mov64(RAX, P);          // :880
+    }
+    emit_pack24(a);               // :881
+}
+
+/// origin: swp30_jit.cpp:988 — the LFO hoist tail: park the emit_lfo result
+/// (shl32 :968, eax) in the frame slot `LFO_SLOT_BASE + 4n` (:985). `emit_lfo`
+/// (:897-969) landed alongside it in B2b-3a; the hoist SCAN (:971-991) that
+/// decides which numbers to hoist and calls both halves lands with the
+/// B2b-3b op-loop stitch. This is the store half of the slot the dm-src frame
+/// load (:1419) reads.
+pub fn emit_lfo_slot_store(a: &mut Assembler, slot: i32) {
+    debug_assert!(slot >= LFO_SLOT_BASE && slot < LFO_SLOT_BASE + 0x18 * 4); // :985 range
+    a.store32(fm(slot), RAX); // :988
+}
+
+// ---------------------------------------------------------------------------
+// B2b-3a — LFO HOIST head + callout (origin: swp30_jit.cpp:897-969 emit_lfo,
+// :971-991 hoist scan, :1414-1448 dm LFO arms + call_lfo callout). Additive
+// scaffolding exactly like B2b-2a..2e: build() STILL refuses at the
+// PHASE_B2_EMIT_OK gate (op loop, hoist SCAN and stitch arrive in B2b-3b), so
+// NONE of these bytes reaches an exec buffer or runs — tests/meg_jit.rs runs
+// them STANDALONE. This closes the LAST `unimplemented!` in the module: the
+// two un-hoisted dm_src 0-3 arms now emit (in-place emit_lfo, or the callout).
+// Register contract (§3, handoff §5.3-8): emit_lfo is loop-invariant and
+// clobbers ONLY RAX (out), RCX (shift/table scratch), RDX (lfo word/wave
+// select) and R8 (baked table/sintab base) — the C++ :896 note "rcx rdx r8 を
+// 壊す". It does NOT touch SEED(RSI)/P(R13)/SC(R14)/RAM(R15)/K_MAX(RDI)/
+// K_MIN(RBP)/P_MAX(R9)/P_MIN(R10) — so the rand stream stays aligned (handoff
+// §H: no rand draw on the LFO path; a dither draw lives only on dm_src 5 /
+// dr-p, already landed). The callout's only clobber is RAX (call_abs target)
+// plus the Win64-volatile set inside the trampoline; the 8 callee-saves the op
+// loop keeps live survive, and load_p_limits (:1448 twin) reloads the
+// caller-saved P_MAX/P_MIN after the call.
+// ---------------------------------------------------------------------------
+
+/// origin: swp30_jit.cpp:897-969 `emit_lfo` — the hoist head, a transliteration
+/// of `meg_state::get_lfo` (the PAIRED `meg::get_lfo`, meg.rs:379). `idx` is
+/// the LFO number (`o.lfo`, < 0x18 — the dm/hoist gate :978/:1418/:1420).
+/// `sintab` is the compile-time-captured table base (baked at :937, §7-D pin):
+/// the resident table is ≥ 0x8000 so every sine index (< 0x8000) is in range,
+/// exactly the meg.rs:379 precondition. Result in RAX (the caller stores it
+/// with `emit_lfo_slot_store` :988, or reads it straight in dm_src 0-3 :1421).
+///
+/// Legs, in C++ order: counter>>5 (:902-903 == meg.rs:392 phase); pitch shift
+/// bits 8-9 via `shl32cl` (:904-908 == meg.rs:393 depth); the offsets table
+/// (:915-916, the LFO_OFFSETS address + `lfo>>12` *4 == meg.rs:394); `& 0x1ffff`
+/// (:919); wave select bits 10-11 (:920-921). sine (0): `& 0x7fff` folded by
+/// bit15 (:926-931 == meg.rs:400-403 arm 1/2), sintab load (:939), negate on
+/// bit16 via `xor 0xffff` (:941-944 == arm 3/4). tri (1): `+0x8000`, `& 0x1ffff`,
+/// fold `xor 0x1ffff` on bit16 (:951-956 == meg.rs:412-415). saw up (2): `>>1`
+/// (:962 == meg.rs:418). saw down (3): `xor 0x1ffff` then `>>1` (:965-966 ==
+/// meg.rs:419). `<<7` final (:968 == meg.rs:421). The three forward-leg jumps
+/// (not_sine/not_tri/not_up) and the `done` patch list mirror the C++ exactly.
+pub fn emit_lfo(a: &mut Assembler, o: &Offs, idx: u32, sintab: *const u16) {
+    // :902-903 — phase = counter[idx] >> 5 (meg.rs:392)
+    a.load32(RAX, Mem::b(MS, o.lfo_counter + 4 * idx as i32)); // :902
+    a.shr32(RAX, 5); // :903
+    // :904-908 — base <<= (lfo[idx] >> 8) & 3  (meg.rs:393, depth)
+    a.loadu16(RDX, Mem::b(MS, o.lfo + 2 * idx as i32)); // :904
+    a.mov32(RCX, RDX); // :905
+    a.shr32(RCX, 8); // :906
+    a.and32i(RCX, 3); // :907
+    a.shl32cl(RAX); // :908
+    // :909-916 — base += offsets[lfo[idx] >> 12]  (meg.rs:394)
+    a.mov32(RCX, RDX); // :909
+    a.shr32(RCX, 12); // :910
+    a.imm64(R8, addr_of!(LFO_OFFSETS) as *const u8 as u64); // :915 (baked addr)
+    a.load32(RCX, Mem { base: R8, index: RCX, scale: 4, disp: 0 }); // :916
+    a.add32(RAX, RCX); // :918
+    a.and32i(RAX, 0x1ffff); // :919
+    // :920-924 — wave select = (lfo[idx] >> 10) & 3 into RDX; dispatch
+    a.shr32(RDX, 10); // :920
+    a.and32i(RDX, 3); // :921
+    let mut done: Vec<usize> = Vec::new(); // :922
+    a.test32(RDX, RDX); // :923
+    let not_sine = a.jcc_fwd(0x85); // :924 jne
+    {
+        // sine (:926-945)
+        a.mov32(RCX, RAX); // :926 — rcx = base & 0x7fff, flipped on bit15
+        a.and32i(RCX, 0x7fff); // :927
+        a.test32ri(RAX, 0x8000); // :928
+        let no_rev = a.jcc_fwd(0x84); // :929 je (bit15 clear ⇒ keep rcx)
+        a.xor32ri(RCX, 0x7fff); // :930
+        a.patch(no_rev); // :931
+        a.imm64(R8, sintab as u64); // :937 — baked sintab base (§7-D)
+        a.mov32(RDX, RAX); // :938 — keep base for the bit16 sign test
+        a.loadu16(RAX, Mem { base: R8, index: RCX, scale: 2, disp: 0 }); // :939
+        a.test32ri(RDX, 0x10000); // :941
+        let no_neg = a.jcc_fwd(0x84); // :942 je
+        a.xor32ri(RAX, 0xffff); // :943 — upper half is the inverted quarter
+        a.patch(no_neg); // :944
+        done.push(a.jmp_fwd()); // :945
+    }
+    a.patch(not_sine); // :947
+    a.cmp32ri(RDX, 1); // :948
+    let not_tri = a.jcc_fwd(0x85); // :949 jne
+    {
+        // tri (:951-957)
+        a.add32ri(RAX, 0x8000); // :951
+        a.and32i(RAX, 0x1ffff); // :952
+        a.test32ri(RAX, 0x10000); // :953
+        let no_fold = a.jcc_fwd(0x84); // :954 je
+        a.xor32ri(RAX, 0x1ffff); // :955 — fold down across the mid line
+        a.patch(no_fold); // :956
+        done.push(a.jmp_fwd()); // :957
+    }
+    a.patch(not_tri); // :959
+    a.cmp32ri(RDX, 2); // :960
+    let not_up = a.jcc_fwd(0x85); // :961 jne
+    a.shr32(RAX, 1); // :962 — saw up
+    done.push(a.jmp_fwd()); // :963
+    a.patch(not_up); // :964
+    a.xor32ri(RAX, 0x1ffff); // :965 — saw down
+    a.shr32(RAX, 1); // :966
+    for d in done {
+        a.patch(d); // :967
+    }
+    a.shl32(RAX, 7); // :968 — scale to the sample range (meg.rs:421)
+}
+
+/// origin: swp30_jit.cpp:1431-1448 (`#else` / Windows-x64 arm) — the dm_src
+/// 0-3 CALLOUT: `sintab` is not resident (or `lfo >= 0x18`), so the value is
+/// produced by the `meg_jit_call_lfo` trampoline instead of machine code.
+/// Faithful to the C++ caller: `mov64 ARG0, MS` (:1441), `imm32 ARG1, o.lfo`
+/// (:1442), `call_abs` (:1443), then the MANDATORY `load_p_limits` (:1448 —
+/// P_MAX/P_MIN are Win64-volatile). The SysV `push SEED/K_MAX` legs
+/// (:1437-1440/:1444-1447) are DEAD here (§7-G — SEED/K_MAX are callee-saved on
+/// Win64, so the trampoline preserves them and nothing is pushed; the C++
+/// comment :1434-1436 says exactly this).
+///
+/// Rust deviation (§3 note): the C++ `call_lfo` reaches the table through
+/// `ms->m_sintab` (device field, swp30.h:468 — swp30_jit.cpp:645). Rust's
+/// `MegState` has NO sintab field; the paired seam is
+/// `meg::get_lfo(lfo, sintab: &[u16])` (meg.rs:379). So the compile-time
+/// sintab base and length are baked into ARG2(R8)/ARG3(R9) — both volatile
+/// (R8 scratch, R9 = P_MAX reloaded right after by load_p_limits), and it is
+/// the SAME base `emit_lfo` bakes at :937, so the §7-D sintab-pin invariant
+/// covers the callout path identically. rsp is 16-aligned at the `call`
+/// (frame body, §3 risk 5) with the 32-byte shadow space at `[rsp..rsp+32)`
+/// inside `FRAME` — below the LFO slots (:816), so the callee home writes
+/// cannot touch them.
+pub fn emit_call_lfo(a: &mut Assembler, lfo: u32, sintab: *const u16, sintab_len: usize) {
+    a.mov64(ARG0, MS); // :1441 — ARG0 = meg_state*
+    a.imm32(ARG1, lfo); // :1442 — ARG1 = LFO number
+    a.imm64(ARG2, sintab as u64); // Rust dev: ARG2 = sintab base (§3)
+    a.imm64(ARG3, sintab_len as u64); // Rust dev: ARG3 = sintab len (§3)
+    // :1443 `&meg_jit::call_lfo` — the fn item coerces to a fn pointer
+    // (jit.rs:134-145 fnptr precedent), then bakes its address.
+    let tramp: unsafe extern "system" fn(*const MegState, u32, *const u16, usize) -> u32 =
+        meg_jit_call_lfo;
+    a.call_abs(tramp as *const () as u64); // :1443
+    load_p_limits(a); // :1448
+}
+
+/// origin: swp30_jit.cpp:298 `static u32 call_lfo(meg_state *ms, u32 lfo) {
+/// return ms->get_lfo(int(lfo)); }` — the runtime trampoline the callout
+/// above targets. C++ reads `ms->m_sintab`; the Rust `get_lfo` seam takes the
+/// table explicitly, so it arrives through ARG2/ARG3 (§3 deviation). Reaches
+/// ONLY the PAIRED `meg::get_lfo` (meg.rs:379) so the callout and the
+/// interpreter compute the identical word. Never executed while
+/// PHASE_B2_EMIT_OK==false (the op loop that emits the callout is not stitched;
+/// `fnp==0` ⇒ `run()` never enters compiled code); exercised ONLY by the
+/// tests/meg_jit.rs exec rigs. All callee-saves are preserved by the
+/// compiler-emitted `extern "system"` prologue (S11 lesson).
+pub unsafe extern "system" fn meg_jit_call_lfo(
+    ms: *const MegState,
+    lfo: u32,
+    sintab: *const u16,
+    sintab_len: usize,
+) -> u32 {
+    // §3/:1443 — the table the compile baked; len is the resident count so the
+    // index bound is identical to the interpreter's swp.sintab (meg.rs:1368).
+    let tab = unsafe { core::slice::from_raw_parts(sintab, sintab_len) };
+    unsafe { (*ms).get_lfo(lfo as usize, tab) }
+}
+
+/// origin: swp30_jit.cpp:1414-1465 — the dm VALUE SOURCE select (the switch
+/// inside `if (o.dm)` :1415); RAX receives the value. `lfo_slot` mirrors the
+/// C++ `lfo_slot[o.lfo]` (:973): nonzero ⇔ `sintab && lfo < 0x18 &&
+/// lfo_hoist[lfo]` (:981-984), i.e. the head produced the value once through
+/// `emit_lfo_slot_store` and :1419 just reads it. `sintab` is the same
+/// compile-time capture (`MegJit::sintab`, null when the table is NOT resident,
+/// C++ :645). The 0-3 arms now cover all three C++ sub-cases (no more
+/// `unimplemented!`): hoisted → frame load (:1419); resident-but-unhoisted →
+/// in-place `emit_lfo` (:1421); otherwise (no sintab, or `lfo >= 0x18`) → the
+/// `emit_call_lfo` callout (:1431-1448). The hoist SCAN that fills lfo_slot
+/// (:971-991) and the op-loop stitch arrive in B2b-3b — the gate keeps every
+/// caller unreachable, so no half program is emitted either way.
+pub fn emit_dm_src(
+    a: &mut Assembler,
+    o: &Offs,
+    op: &Op,
+    lfo_slot: i32,
+    sintab: *const u16,
+    sintab_len: usize,
+) {
+    match op.dm_src {
+        0..=3 => {
+            if lfo_slot != 0 {
+                a.load32(RAX, fm(lfo_slot)); // :1419 頭で 1 回だけ作っておいた値
+            } else if !sintab.is_null() && (op.lfo as usize) < 0x18 {
+                emit_lfo(a, o, op.lfo as u32, sintab); // :1421 1 回しか使わない番号はその場で
+            } else {
+                emit_call_lfo(a, op.lfo as u32, sintab, sintab_len); // :1431-1448 sin 表無しは呼ぶ
+            }
+        }
+        4 => a.load32(RAX, Mem::b(MS, o.ram_read)), // :1453 — ram_read port
+        5 => {
+            emit_rnd(a);       // :1456 — noise draw
+            a.shl32(RAX, 8);   // :1457
+            a.sar32(RAX, 8);   // :1458 — sign-extend the 24-bit draw
+        }
+        6 => emit_p_packed(a, op.no_noise == 0), // :1461 p_packed(!o.no_noise)
+        _ => a.load32(RAX, Mem::b(MS, o.m + 4 * op.sm as i32)), // :1464 default m[sm]
+    }
+}
+
+/// origin: swp30_jit.cpp:1467-1475 — the dm STORE legs (RAX → destination).
+/// `k < 0x17d && early_m[o.dm]` stores DIRECTLY into m[dm] and only ALSO
+/// writes the ring slot when it is the last writer for that slot
+/// (:1467-1470 — "not read, but keeps the state save identical" :713-714;
+/// m_mw_value is SERIALIZED state, §5.3-6 Rust invariant); otherwise the
+/// value enters the ring (:1472). The `mw_reg` TAIL BYTE (:1474-1475) sits
+/// OUTSIDE the dm gate: at the tail trio (`k >= 0x17d`) or in branchy mode
+/// it writes `o.dm` UNCONDITIONALLY — dm==0 clears the byte, which is
+/// exactly the interpreter's no-op slot (the skipped-op eraser :1655-1659
+/// rides the same byte). `s3` = slot3(d3,k) (:616), caller-computed.
+pub fn emit_dm_store(a: &mut Assembler, o: &Offs, k: u32, op: &Op, s3: usize, an: &Analysis) {
+    if op.dm != 0 {
+        if k < 0x17d && an.early_m[op.dm as usize] {
+            a.store32(Mem::b(MS, o.m + 4 * op.dm as i32), RAX); // :1468
+            if an.last_slot_m[k as usize] {
+                a.store32(Mem::b(MS, o.mw_value + 4 * s3 as i32), RAX); // :1470
+            }
+        } else {
+            a.store32(Mem::b(MS, o.mw_value + 4 * s3 as i32), RAX); // :1472
+        }
+    }
+    if k >= 0x17d || an.branchy {
+        a.store8i(Mem::b(MS, o.mw_reg + s3 as i32), op.dm); // :1474-1475
+    }
+}
+
+/// origin: swp30_jit.cpp:1480-1496 — the complete dr APPLY block. The
+/// coalesced skipped-region seed jump goes FIRST (:1481-1482 — the draws of
+/// every folded-away skipped op ride here so the rand stream stays aligned,
+/// swp30.cpp:4272-4273/:4282-4298 = mix.rs:845-858). Then the value:
+/// the `r[sr]` bank read (:1485 — the same live r[] the interpreter and the
+/// ALU a-term asel==1 / mmode reads :679-685 consume, which is why this leg
+/// "feeds the ALU bank reads"), or the p_packed twin (:1487). Stores mirror
+/// the dm shape on the r/rw side (:1488-1493), and the `rw_reg` tail byte
+/// (:1495-1496) twins :1474-1475 including its unconditional-at-tail/
+/// branchy, zero-clears-the-slot semantics.
+pub fn emit_dr_apply(a: &mut Assembler, o: &Offs, k: u32, op: &Op, s3: usize, an: &Analysis) {
+    if op.rand_n != 0 {
+        emit_rnd_skip(a, op.rand_n as u32); // :1481-1482
+    }
+    if op.dr != 0 {
+        if op.dr_from_r != 0 {
+            a.load32(RAX, Mem::b(MS, o.r + 4 * op.sr as i32)); // :1485
+        } else {
+            emit_p_packed(a, op.no_noise == 0); // :1487
+        }
+        if k < 0x17d && an.early_r[op.dr as usize] {
+            a.store32(Mem::b(MS, o.r + 4 * op.dr as i32), RAX); // :1489
+            if an.last_slot_r[k as usize] {
+                a.store32(Mem::b(MS, o.rw_value + 4 * s3 as i32), RAX); // :1491
+            }
+        } else {
+            a.store32(Mem::b(MS, o.rw_value + 4 * s3 as i32), RAX); // :1493
+        }
+    }
+    if k >= 0x17d || an.branchy {
+        a.store8i(Mem::b(MS, o.rw_reg + s3 as i32), op.dr); // :1495-1496
+    }
+}
+
+// ---------------------------------------------------------------------------
+// B2b-2c — memw accumulator + ix2 index op-loop legs (origin:
+// swp30_jit.cpp:883-889 `AccFromP`/`ShrAcc`/`ShrAccTZ15` lambdas + :1501-1509
+// memw + :1511-1525 index blocks). Additive scaffolding exactly like
+// B2b-2a/2b: build() still refuses at the PHASE_B2_EMIT_OK gate, so NONE of
+// these bytes reaches an exec buffer or runs — tests/meg_jit.rs executes the
+// helpers STANDALONE (exec rigs), never a half-emitted program.
+// Register contract (from the §3 plan + the B2b-2b note): RAX is the value
+// accumulator every lambda returns (:842 comment on pack24), RCX is the
+// ShrAccTZ15/pack24 scratch (:887/:845), RDX is the free §7-B window-deref
+// scratch (B2b-2a note :1202-1204) — the ix2 legs load the window SLOT
+// through it WITHOUT touching RAX, so the value survives to the store.
+// Interpreter ground truth: meg.rs:881-900 (memw_value = `meg_mem_value(p)`
+// = p/32768 truncate-TOWARD-ZERO :3843/:578 — NOT a plain `>>15`, which left
+// reverb feedback tails stuck below 0, upstream.md 39; index_value/ix2_value
+// = `p >> (15+8)` = arithmetic `>>23` :3814/:3819). The two therefore DIFFER
+// for negative p (p=-1: memw 0, index -1) — a distinction the exec rigs pin.
+// P (R13) is read-only here; no callout exists in these legs, so load_p_limits
+// (:1448 twin) stays irrelevant within this slice.
+// ---------------------------------------------------------------------------
+
+/// origin: swp30_jit.cpp:884 `AccFromP` — copy the p accumulator (R13) into
+/// the RAX value register. Shared by the memw (:1504), index (:1513/:1520)
+/// and t (:1541) legs. `mov rax,r13` ⇒ REX 0x49 (rm form), `49 8b c5`.
+pub fn emit_acc_from_p(a: &mut Assembler) {
+    a.mov64(RAX, P); // :884
+}
+
+/// origin: swp30_jit.cpp:885 `ShrAcc(n)` — arithmetic-shift the accumulator
+/// right by n. index/index2 use `ShrAcc(15+8)` (= arith `>>23`, meg.rs:893/
+/// :899); the t index-form leg uses `ShrAcc(8)` (:1543). Arithmetic (sar64),
+/// NOT round-toward-zero — only ShrAccTZ15 (:886) is the round helper.
+pub fn emit_shr_acc(a: &mut Assembler, n: u8) {
+    a.sar64(RAX, n); // :885
+}
+
+/// origin: swp30_jit.cpp:886-889 `ShrAccTZ15` — shift the accumulator right
+/// 15 TOWARD ZERO (upstream.md 39; the ground truth is `meg_mem_value`
+/// meg.rs:578 = p/32768). Round-toward-zero bias via the sign byte (:887
+/// mov64/sar64 63/and32i 0x7fff, identical to pack24 :845-847) then the
+/// arithmetic shift (:888). Feeds ONLY the memw value (:1505): a plain `>>15`
+/// left reverb feedback tails stuck below 0 (meg.rs:575 discussion #69).
+pub fn emit_shr_acc_tz15(a: &mut Assembler) {
+    a.mov64(RCX, RAX); // :887
+    a.sar64(RCX, 63); // :887 — -1 when negative
+    a.and32i(RCX, 0x7fff); // :887 — round-toward-zero bias
+    a.add64(RAX, RCX); // :888
+    a.sar64(RAX, 15); // :888 — p / 32768 truncated toward 0
+}
+
+/// origin: swp30_jit.cpp:1501-1509 — the memw VALUE block. When the op writes
+/// the delay memory (`o.memw`), the value is `ShrAccTZ15(AccFromP())` =
+/// `meg_mem_value(p)` (truncate toward ZERO, meg.rs:884-885/:3843 — NOT a
+/// plain `>>15`, upstream.md 39) stored into `memw_value[slot2(k)]` (:1506).
+/// The `memw_act` ring byte is a 2-RING byte: written ONLY at the tail
+/// (`k >= 0x17e`) or in branchy mode (:1508-1509) — the folded consumer
+/// (`emit_ring2_folded`, B2b-2a :1066-1077) reads the value slot directly and
+/// needs no act byte for mid-program non-branchy ops. Note the tail threshold
+/// is the 2-ring `0x17e`, NOT the 3-ring `0x17d` the dm/dr/index legs use.
+/// The value store is gated on `o.memw` (:1502) while the act byte is the
+/// gated `o.memw ? 1 : 0` copy (:1509) — interpreter twin meg.rs:883-888
+/// writes both under the same branch. `s2` = slot2(d2,k) (:617), caller-fed.
+pub fn emit_memw_acc(a: &mut Assembler, o: &Offs, k: u32, op: &Op, s2: usize, an: &Analysis) {
+    if op.memw != 0 {
+        emit_acc_from_p(a); // :1504
+        emit_shr_acc_tz15(a); // :1505
+        a.store32(Mem::b(MS, o.memw_val + 4 * s2 as i32), RAX); // :1506
+    }
+    if k >= 0x17e || an.branchy {
+        // :1509 `o.memw ? 1 : 0` (Op carries the decoded flag as u8, meg.rs:1036)
+        a.store8i(Mem::b(MS, o.memw_act + s2 as i32), (op.memw != 0) as u8);
+    }
+}
+
+/// origin: swp30_jit.cpp:1511-1525 — the index blocks. First index
+/// (:1512-1518, meg_state side): `ShrAcc(15+8)` (arithmetic `>>23`,
+/// meg.rs:893) into `index_value[slot3(k)]`. Second index (:1519-1525, device
+/// side): the SAME `p >> 23` value goes to `ix2_value[slot3(k)]`, but through
+/// the §7-B pointer window — `o_ix2_value` is a `*mut [i32;3]` SLOT, so load
+/// the slot into the free RDX scratch and store `[rdx+4*s3]` (one deref where
+/// C++ :1522 had a direct device field; the value lands in the same live
+/// `Swp30::meg_ix2_value` the interpreter reads at meg.rs:899/:686). The act
+/// bytes (`ix_act` MS side :1518, `ix2_act` window :1525) are 3-RING bytes
+/// written ONLY at the tail (`k >= 0x17d`) or branchy. Both write `?1:0`
+/// unconditionally inside that window (interpreter `swp.ix2_act[d3] =
+/// d.index2 as u8` meg.rs:897), and the ix2 ACT deref also rides the window
+/// (`o_ix2_act` is a `*mut [u8;3]` SLOT). `s3` = slot3(d3,k) (:616), fed by
+/// the caller (the future op loop). The RDX load leaves RAX intact, so the
+/// shifted p survives the window deref to its store.
+pub fn emit_index_legs(a: &mut Assembler, o: &Offs, k: u32, op: &Op, s3: usize, an: &Analysis) {
+    // ---- first index (meg_state side) :1512-1518 ----
+    if op.index != 0 {
+        emit_acc_from_p(a); // :1513
+        emit_shr_acc(a, 15 + 8); // :1514 — arith >>23
+        a.store32(Mem::b(MS, o.ix_value + 4 * s3 as i32), RAX); // :1515
+    }
+    if k >= 0x17d || an.branchy {
+        a.store8i(Mem::b(MS, o.ix_act + s3 as i32), (op.index != 0) as u8); // :1517-1518
+    }
+    // ---- second index (device side, §7-B window deref) :1519-1525 ----
+    if op.index2 != 0 {
+        emit_acc_from_p(a); // :1520
+        emit_shr_acc(a, 15 + 8); // :1521
+        a.load64(RDX, Mem::b(SWP, o.ix2_value)); // *mut [i32;3] window slot
+        a.store32(Mem::b(RDX, 4 * s3 as i32), RAX); // :1522 (window-deref)
+    }
+    if k >= 0x17d || an.branchy {
+        a.load64(RDX, Mem::b(SWP, o.ix2_act)); // *mut [u8;3] window slot
+        a.store8i(Mem::b(RDX, s3 as i32), (op.index2 != 0) as u8); // :1525 (window-deref)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// B2b-2d — t/tval op-loop legs (origin: swp30_jit.cpp:1530-1561 folded t +
+// need_tval publish, :1647-1675 branchy erase-twin; brief §1). Additive
+// scaffolding exactly like B2b-2a/2b/2c: build() still refuses at the
+// PHASE_B2_EMIT_OK gate, so NONE of these bytes reaches an exec buffer or
+// runs — tests/meg_jit.rs executes the helpers STANDALONE (exec rigs),
+// never a half-emitted program.
+// Register contract (from the §3 plan + the B2b-2b/2c notes): RAX is the
+// value register every lambda returns (:842 comment), RCX is the ±0x8000
+// clamp scratch (:845 pack24 precedent), RDX the free §7-B window scratch
+// (B2b-2a note) — P (R13) is read-only here, no callout exists, so
+// load_p_limits (:1448 twin) stays irrelevant within this slice.
+// Interpreter ground truth: run_program's t block meg.rs:1429-1441 (folded:
+// the t WRITE reads `t_value[i2]`/`konst[pc]` BEFORE the publish overwrites
+// the slot — :1430-1435 vs :1438-1441, the same load-then-store order as
+// C++ :1533-1538 before :1560); index form `(p >> 8) & 0x7fff` (:4129 =
+// meg.rs:1439, non-negative 15-bit by construction); clamp form
+// s16_p23_clamped = `(p >> 23).clamp(-0x8000, 0x7fff)` (:3671/:4130 =
+// meg.rs:617-618). The publish is FOLDED behind the compile-time
+// `need_tval[k]` (analysis §5.3-5, :660-666 — only the tail pair and the op
+// feeding a t-read-from-p two slots later keep it; the folded consumer is
+// meg.rs:1431 `t_value[i2]` for t_from_p writers).
+// ---------------------------------------------------------------------------
+
+/// origin: swp30_jit.cpp:1552-1557 (x64 arm; the x86-32 jlt/jgt form
+/// :1549-1550 is DEAD) — the ±0x8000 clamp of the t publish, shared by the
+/// folded leg (:1546-1558) and the branchy twin (:1667-1672, identical
+/// bytes). Two STRICT cmp/cmov64 pairs: below −0x8000 clamps to −0x8000,
+/// above 0x7fff clamps to 0x7fff, and both exact boundaries pass through
+/// unchanged — the byte-for-byte mirror of
+/// `s16_p23_clamped` (meg.rs:618). Clobbers RCX (the clamp scratch, :845
+/// precedent); value in/out RAX.
+pub fn emit_tval_clamp(a: &mut Assembler) {
+    a.imm64(RCX, (-0x8000i64) as u64); // :1552 u64(s64(-0x8000))
+    a.cmp64(RAX, RCX); // :1553
+    a.cmovl64(RAX, RCX); // :1554
+    a.imm64(RCX, 0x7fff); // :1555
+    a.cmp64(RAX, RCX); // :1556
+    a.cmovg64(RAX, RCX); // :1557
+}
+
+/// origin: swp30_jit.cpp:1530-1561 — the non-branchy (op-loop-body) t leg.
+/// t WRITE (:1531-1539): `t_from_p` loads the CURRENT ring slot
+/// `t_value[slot2(k)]` — the value op k−2 published (or this sample's head
+/// seed) — BEFORE the publish below overwrites it (:1533, interpreter order
+/// meg.rs:1430); a baked spec op carries the konst[k] immediate (:1535,
+/// `bake` arg — the ONLY leg besides the LFO hoist that consumes it), else
+/// the runtime konst load (:1537). Stored 16-bit to `t[o.t]` (:1538).
+/// t PUBLISH (:1540-1560, folded behind `an.need_tval[k]`): `AccFromP`
+/// (:1541) then the INDEX form `ShrAcc(8); and 0x7fff` (:1543-1544,
+/// `(p>>8)&0x7fff` = meg.rs:1439) when `op.index || op.index2`, else
+/// arithmetic `>>23` + `emit_tval_clamp` (:1546-1557); stored to
+/// `t_value[slot2(k)]` (:1560). `s2` = slot2(d2,k) (:617), caller-computed
+/// (the future op loop).
+pub fn emit_t_leg(
+    a: &mut Assembler,
+    o: &Offs,
+    ms: &MegState,
+    k: u32,
+    op: &Op,
+    s2: usize,
+    bake: bool,
+    an: &Analysis,
+) {
+    // ---- t write (:1531-1539) ----
+    if op.t_write != 0 {
+        if op.t_from_p != 0 {
+            a.loadu16(RAX, Mem::b(MS, o.t_value + 2 * s2 as i32)); // :1533
+        } else if bake {
+            // :1535 `u16(ms.m_const[k])` — konst word baked at compile time
+            a.imm32(RAX, ms.konst[k as usize] as u16 as u32);
+        } else {
+            a.loadu16(RAX, Mem::b(MS, o.konst + 2 * k as i32)); // :1537
+        }
+        a.store16(Mem::b(MS, o.t + 2 * op.t as i32), RAX); // :1538
+    }
+    // ---- t publish (:1540-1560) ----
+    if an.need_tval[k as usize] {
+        emit_acc_from_p(a); // :1541
+        if op.index != 0 || op.index2 != 0 {
+            emit_shr_acc(a, 8); // :1543
+            a.and32i(RAX, 0x7fff); // :1544
+        } else {
+            emit_shr_acc(a, 15 + 8); // :1546 (arith >>23)
+            emit_tval_clamp(a); // :1552-1557
+        }
+        a.store16(Mem::b(MS, o.t_value + 2 * s2 as i32), RAX); // :1560
+    }
+}
+
+/// origin: swp30_jit.cpp:1647-1675 — the branchy twin, the skipped/jump-tail
+/// ERASE body. Reached ONLY through the B2b-3 branch gate routing (`ja`
+/// :1082-1083 over the skip counter, or the jump-op hop :1105→:1639 into
+/// :1643) — which is why this leg itself carries NO runtime skip check: by
+/// construction `skip > k` holds here, or op is the jump op itself.
+/// The jump op still writes t when `t_write` (:1647-1654, upstream.md 31 —
+/// interpreter meg.rs:1283-1290): the same two sources as the folded leg,
+/// but WITHOUT the bake arm (:1652 always loads the runtime konst). The five
+/// ring-byte erasers (:1655-1659 — "the write the skipped op would have
+/// queued is erased, only t kept" :606) clear mw_reg/rw_reg/ix_act on the
+/// 3-ring slot and memw_act on the 2-ring slot; the ix2_act byte rides the
+/// §7-B window (RDX deref — one load where C++ :1659 addressed the device
+/// field inline; it zeroes the live `Swp30::meg_ix2_act` interpreter twin
+/// of meg.rs:1295). Finally the need_tval publish (:1660-1674): ALWAYS the
+/// clamp form — even for index ops — because the interpreter's jump/skip
+/// path publishes `s16_p23_clamped(p)` unconditionally (meg.rs:1296 =
+/// :4027); the index `>>8&0x7fff` form lives only in the folded leg.
+pub fn emit_t_branchy(
+    a: &mut Assembler,
+    o: &Offs,
+    k: u32,
+    op: &Op,
+    s2: usize,
+    s3: usize,
+    an: &Analysis,
+) {
+    // ---- jump-op t write (:1647-1654, no bake arm) ----
+    if op.jump != 0 && op.t_write != 0 {
+        if op.t_from_p != 0 {
+            a.loadu16(RAX, Mem::b(MS, o.t_value + 2 * s2 as i32)); // :1650
+        } else {
+            a.loadu16(RAX, Mem::b(MS, o.konst + 2 * k as i32)); // :1652
+        }
+        a.store16(Mem::b(MS, o.t + 2 * op.t as i32), RAX); // :1653
+    }
+    // ---- ring-byte erasers (:1655-1659) ----
+    a.store8i(Mem::b(MS, o.mw_reg + s3 as i32), 0); // :1655
+    a.store8i(Mem::b(MS, o.rw_reg + s3 as i32), 0); // :1656
+    a.store8i(Mem::b(MS, o.memw_act + s2 as i32), 0); // :1657
+    a.store8i(Mem::b(MS, o.ix_act + s3 as i32), 0); // :1658
+    a.load64(RDX, Mem::b(SWP, o.ix2_act)); // :1659 §7-B window slot deref
+    a.store8i(Mem::b(RDX, s3 as i32), 0); // :1659 (live meg_ix2_act)
+    // ---- t publish, clamp form always (:1660-1674) ----
+    if an.need_tval[k as usize] {
+        emit_acc_from_p(a); // :1661
+        emit_shr_acc(a, 15 + 8); // :1662 (arith >>23)
+        emit_tval_clamp(a); // :1667-1672
+        a.store16(Mem::b(MS, o.t_value + 2 * s2 as i32), RAX); // :1674
+    }
+}
+
+// ---------------------------------------------------------------------------
+// B2b-2e — memop ADDRESS leg (origin: swp30_jit.cpp:1566-1638; brief §1).
+// Additive scaffolding exactly like B2b-2a..2d: build() still refuses at the
+// PHASE_B2_EMIT_OK gate, so NONE of these bytes reaches an exec buffer or
+// runs — tests/meg_jit.rs executes the helpers STANDALONE (exec rigs),
+// never a half-emitted program.
+// Register contract (from the §3 plan + the B2b-2a..2d notes): RAX is the
+// address/value register every leg ends in (:1582/:1613), RCX is the ix-term
+// scratch (:1572/:1595), RDX the free §7-B window scratch (B2b-2a note — the
+// ix2 load reads the `ram_index2` SLOT, one deref where C++ :1576/:1599
+// addressed the device inline), R8 holds the write-leg address across the
+// encode (:1623 — SAFE: emit_revram_encode clobbers rcx/rdx/r11 only, RENC
+// :69; RDEC/R8 is touched by DECODE alone, which the write leg never runs).
+// The scale-2 RAM operand `mem{RAM, RAX|R8, 2, 0}` (:1582/:1626/:1630) is the
+// pub-fields Mem literal (handoff §6; emit_ring3_head set the precedent with
+// scale 4). RAM (R15) is indexed, never written as a base. P/SEED untouched,
+// no callout in this block — load_p_limits (:1448 twin) stays irrelevant.
+// Interpreter ground truth (PAIRED meg.rs, run_program :4132-4158):
+// mem_table read = offset+ix+ix2(+1) u32-wrap then &0x3ffff, NO map and NO
+// sample counter (meg.rs:1446-1459, upstream.md 24); normal leg =
+// (off+ix+ix2−SC(+1) & addr_mask)+addr_base & 0x3ffff (meg.rs:1468-1483) —
+// all 32-bit ops, so the −SC wrap is u32 (offset 0 − SC 1 → 0xffff_ffff,
+// mask-clipped); `BIT(m_revram_enable, region)` SET means the region is
+// DISABLED (mamecompat.h:238 BIT; meg.rs:1462 twin): writes are dropped and
+// reads forced 0 at COMPILE time (:1587-1591 — "無効な区画への出し入れは、
+// 訳すときに省く"), which is why invalidate rides revram_enable_w
+// (swp30.cpp:2488-2491) and run() re-checks (:396-400).
+// ---------------------------------------------------------------------------
+
+/// origin: swp30_jit.cpp:1570-1578 ≡ :1593-1601 — the shared address base
+/// both memop paths open with: the runtime offset word (firmware rewrites
+/// the table mid-song — header :12; never baked even under BAKE), plus the
+/// optional first index (MS side) and second index (§7-B window deref).
+/// All three legs are 32-bit (meg.rs:1468-1478 u32 wrapping_*), so the sum
+/// keeps the interpreter's u32 wrap semantics. RAX out.
+pub fn emit_memop_addr_base(a: &mut Assembler, o: &Offs, op: &Op) {
+    a.loadu16(RAX, Mem::b(MS, o.offset + 2 * op.offset_index as i32)); // :1570/:1593
+    if op.mem_use_index != 0 {
+        a.load32(RCX, Mem::b(MS, o.ram_index)); // :1572/:1595
+        a.add32(RAX, RCX);                       // :1573/:1596
+    }
+    if op.mem_use_index2 != 0 {
+        a.load64(RDX, Mem::b(SWP, o.ram_index2)); // §7-B window slot (:1576/:1599)
+        a.load32(RCX, Mem::b(RDX, 0));
+        a.add32(RAX, RCX); // :1577/:1600
+    }
+}
+
+/// origin: swp30_jit.cpp:1593-1612 — the region-mapped (normal) address leg
+/// (the brief's `emit_memop_addr`): base sum, minus the sample counter
+/// (:1606 x64 arm — the x86-32 `FM(F_SC)` spill :1602-1604 is DEAD), the
+/// memop-3 +1 (:1608-1609), then the COMPILE-TIME baked map legs
+/// `& o.addr_mask` / `+ o.addr_base` (:1610-1611, value-equivalent twin of
+/// meg.rs:1483) and the 18-bit wrap (:1612). RAX in/out.
+pub fn emit_memop_addr(a: &mut Assembler, o: &Offs, op: &Op) {
+    emit_memop_addr_base(a, o, op); // :1593-1601
+    a.sub32(RAX, SC); // :1606 — u32 wrap (meg.rs:1479 wrapping_sub)
+    if op.memop == 3 {
+        a.add32i(RAX, 1); // :1608-1609
+    }
+    a.and32i(RAX, op.addr_mask); // :1610 baked (build_ops :3972)
+    a.add32i(RAX, op.addr_base); // :1611 baked (build_ops :3973)
+    a.and32i(RAX, 0x3ffff); // :1612 — 18-bit wrap (meg.rs:1483)
+}
+
+/// origin: swp30_jit.cpp:1568-1586 — the mem_table ABSOLUTE read
+/// (bit 0x23, upstream.md 24, meg.rs:1446-1459): no map, no addr_mask/
+/// addr_base, NO sample-counter subtraction; base sum + the memop-3 +1
+/// (:1579-1580) & 0x3ffff (:1581), scale-2 RAM load (:1582), the PAIRED
+/// emit_revram_decode (:1583) and the 2-ring value store (:1584). Returns
+/// the `table_done` jmp label (:1585) for the caller to patch at :1635-1636
+/// — the C++ 0-sentinel works here unconditionally because the e9's rel32
+/// field sits ≥ 7 bytes into the buffer (the offset load disp32; jit_emit
+/// rm() is ALWAYS disp32), so the label is never 0 — same reasoning as
+/// C++ `size_t table_done = 0` (:1567).
+pub fn emit_memop_table(a: &mut Assembler, o: &Offs, op: &Op, s2: usize) -> usize {
+    emit_memop_addr_base(a, o, op); // :1570-1578
+    if op.memop == 3 {
+        a.add32i(RAX, 1); // :1579-1580
+    }
+    a.and32i(RAX, 0x3ffff); // :1581 — absolute, map-free
+    a.loadu16(RAX, Mem { base: RAM, index: RAX, scale: 2, disp: 0 }); // :1582
+    emit_revram_decode(a); // :1583
+    a.store32(Mem::b(MS, o.memr_val + 4 * s2 as i32), RAX); // :1584
+    a.jmp_fwd() // :1585 — over the region gate + normal path
+}
+
+/// origin: swp30_jit.cpp:1566-1638 — the whole per-op memop block.
+/// Order (C++ verbatim): table leg first (:1568-1586) — it bypasses the
+/// enable gate exactly like the interpreter's :1446-first test; then the
+/// COMPILE-TIME region gate :1589: `BIT(revram_enable, op.region)` set ⇒
+/// region DISABLED — reads emit only the forced-0 store (:1590-1591),
+/// writes emit NOTHING (dropped); RAM is never touched and the address math
+/// is never emitted for that case (why revram_enable_w invalidates,
+/// swp30.cpp:2488-2491, and run() re-checks the latch :396-400 — handoff
+/// §5.1). ENABLED regions take `emit_memop_addr` (:1593-1612) then the
+/// scale-2 store leg: write = park the address in R8 (survives the encode,
+/// RENC=R11), eax=ram_write, PAIRED emit_revram_encode (:1623-1626 ≡
+/// meg.rs:1485), read = scale-2 load + PAIRED emit_revram_decode + the
+/// 2-ring value store (:1630-1632 ≡ meg.rs:1487-1488). The `table_done`
+/// patch lands BEFORE the 2-ring `memr_act` byte (:1635-1638) — the byte
+/// rides the 2-ring tail threshold `k >= 0x17e` (NOT the 3-ring 0x17d;
+/// same gate note as emit_memw_acc) or branchy, and is 1 only for reads
+/// (memop 2/3 ≡ the interpreter's memr_active=true legs meg.rs:1459/:1465/
+/// :1489 — writes never arm it). `s2` = slot2(d2,k) (:617), caller-fed.
+pub fn emit_memop(
+    a: &mut Assembler,
+    o: &Offs,
+    k: u32,
+    op: &Op,
+    s2: usize,
+    revram_enable: u16,
+    an: &Analysis,
+) {
+    // :1567 — C++ 0-sentinel; see emit_memop_table's never-0 note.
+    let mut table_done = 0usize;
+    if op.memop >= 2 && op.mem_table != 0 {
+        table_done = emit_memop_table(a, o, op, s2); // :1568-1585
+    }
+    // :1589 — the compile-time gate. BIT(v,n) = (v>>n)&1 (mamecompat.h:238);
+    // `op.region` was resolved by build_ops (:3974 = meg.rs:1198), so this is
+    // a constant decision per op. Bit SET = region disabled (meg.rs:1462).
+    let region_off = (revram_enable >> op.region) & 1 != 0;
+    if op.memop != 0 && region_off {
+        if op.memop != 1 {
+            a.store32i(Mem::b(MS, o.memr_val + 4 * s2 as i32), 0); // :1590-1591
+        }
+        // (memop==1: the write is simply not emitted — 書き込みは落ちる)
+    } else if op.memop != 0 {
+        emit_memop_addr(a, o, op); // :1593-1612
+        if op.memop == 1 {
+            a.mov64(R8, RAX); // :1623 — address survives the encode
+            a.load32(RAX, Mem::b(MS, o.ram_write)); // :1624
+            emit_revram_encode(a); // :1625
+            a.store16(Mem { base: RAM, index: R8, scale: 2, disp: 0 }, RAX); // :1626
+        } else {
+            a.loadu16(RAX, Mem { base: RAM, index: RAX, scale: 2, disp: 0 }); // :1630
+            emit_revram_decode(a); // :1631
+            a.store32(Mem::b(MS, o.memr_val + 4 * s2 as i32), RAX); // :1632
+        }
+    }
+    if table_done != 0 {
+        a.patch(table_done); // :1635-1636
+    }
+    if k >= 0x17e || an.branchy {
+        a.store8i(Mem::b(MS, o.memr_act + s2 as i32), ((op.memop == 2 || op.memop == 3) as u8)); // :1637-1638
+    }
+}
+
+// ---------------------------------------------------------------------------
 // B2a — frame: prologue/epilogue skeleton (origin: swp30_jit.cpp:826-840
 // + :1688-1694, x64 arm; the x86-32 halves :737-812/:1682-1687 are DEAD).
 // Handoff §3/§5.3-7/§5.3-10. tests/meg_jit.rs proves the emitted bytes
@@ -1188,10 +2451,11 @@ pub fn emit_revram_decode(a: &mut Assembler) {
 // honor Win64 callee-saves exactly — jit.rs:397-400).
 // ---------------------------------------------------------------------------
 
-/// origin: swp30_jit.cpp:818 `FM` — a frame-slot operand (rsp-based). The
-/// LFO hoist slots (LFO_SLOT_BASE+4n, :985) land in B2b through this.
-#[allow(dead_code)] // first live readers arrive with the B2b LFO hoist
-const fn fm(disp: i32) -> Mem {
+/// origin: swp30_jit.cpp:818 `FM` — a frame-slot operand (rsp-based). Live
+/// readers: `emit_lfo_slot_store` (:988) and the `emit_dm_src` frame-slot
+/// load (:1419) landed in B2b-2b (with the `emit_lfo` head B2b-3a); the hoist
+/// SCAN (:971-991) that fills the slots arrives B2b-3b.
+pub const fn fm(disp: i32) -> Mem {
     Mem { base: RSP, index: NOREG, scale: 1, disp }
 }
 
@@ -1199,8 +2463,12 @@ const fn fm(disp: i32) -> Mem {
 /// limits. MANDATORY after every callout (R9/R10 are volatile on Win64;
 /// :819 comment, :1448 after call_lfo).
 pub fn load_p_limits(a: &mut Assembler) {
-    a.imm64(P_MAX, 0x3fff_ffff_ffff);            // :821
-    a.imm64(P_MIN, (-0x400_0000_0000i64) as u64); // :822 u64(s64(-0x4000000000))
+    // B2b-3b FIX: digit-count exact vs disk :821-822 — 0x3fffffffff is
+    // 0x3f_ffff_ffff (2^38−1), NOT 0x3fff_ffff_ffff (2^46−1); the clamp
+    // bounds are 2^38, the same "digit-count quirk" meg.rs:1349-1355 pins
+    // for the interpreter (saturation ≠ the 42-bit wrap width).
+    a.imm64(P_MAX, 0x3f_ffff_ffff); // :821
+    a.imm64(P_MIN, (-0x40_0000_0000i64) as u64); // :822 u64(s64(-0x4000000000))
 }
 
 /// origin: swp30_jit.cpp:826-837 entry. ARG0=ms, ARG1=swp, ARG2=reverb RAM
@@ -1262,18 +2530,462 @@ pub fn emit_epilogue(a: &mut Assembler, o_p: i32, o_seed: i32) {
 
 /// B2b-1: the frame skeleton WITHOUT the op loop — now with the REAL
 /// offset table (`offs()` §5.3-3) and the `branchy` analysis result
-/// (:607-610). Half-emitted op loops are never produced (brief §5; the
-/// op loop :995-1638 and the branchy skip reset :839-840 arrive in
-/// B2b-2 — the skip legs must be 16-bit-wide for the Rust u16
-/// `meg_skip_to`, and jit_emit gains `store16i` additively there).
+/// (:607-610). KEPT for the B2b-1/B2b-2a byte-pin tests (they transmute
+/// the skeleton standalone); the LIVE program is `emit_program` below,
+/// which stitches the :995-1679 op loop between the same prologue and
+/// epilogue (B2b-3b). B2b-2a: the :839-840 branchy skip reset lands here,
+/// width-adapted 16-bit for the Rust u16 `meg_skip_to` (§7-B window slot
+/// deref + `store16i`; INERT for non-branchy programs either way, exactly
+/// like the C++ `if (branchy)`).
 /// Nothing here is ever executed: build() still returns false at the
 /// PHASE_B2_EMIT_OK gate, so no skeleton byte is copied into an exec
-/// buffer (tests/meg_jit.rs `b2b1_build_inert` pins fnp==0).
+/// buffer (tests/meg_jit.rs `b2b1_build_inert` + `b2b2a_build_inert` pin
+/// fnp==0).
 pub fn emit_frame_skeleton(a: &mut Assembler, o: &Offs, branchy: bool) {
     emit_prologue(a, o.p, o.sample, o.seed);
-    // :839-840 `if (branchy) store32i mem{SWP, o_skip}, 0` — B2b-2
-    // (width-adapted store16i through the window slot; INERT for
-    // non-branchy programs either way).
-    let _ = branchy;
+    if branchy {
+        emit_skip_reset(a, o); // :839-840 (u16-adapted, B2b-2a)
+    }
     emit_epilogue(a, o.p, o.seed);
+}
+
+// ---------------------------------------------------------------------------
+// B2b-3b — the FULL program: LFO hoist SCAN (:971-991) + the per-op k-loop
+// (:995-1679) stitching every landed emitter at its exact C++ call point.
+// Transliterated from build()'s x64 arms (:723-1694 — the x86-32 halves are
+// DEAD, §5.3); §5.3-8/9/10 is the sequence map. THE PROGRAM IS STILL INERT:
+// build() assembles this into its PRIVATE Assembler and refuses at the
+// PHASE_B2_EMIT_OK gate, so no byte reaches an exec buffer and `fnp` stays 0
+// (`b2b3b_build_inert`). The only executors are the tests/meg_jit.rs
+// FULL-PROGRAM parity rigs through `program_bytes` (below), A/B against the
+// PAIRED `meg::run_program` — the same CHECK idea as :426-511.
+// Register contract (handoff §3 plan, :814/:819): live across the loop are
+// MS(RBX) SWP(R12) P(R13) SC(R14) RAM(R15) SEED(RSI) K_MAX(RDI) K_MIN(RBP)
+// P_MAX(R9) P_MIN(R10); RAX is the value register, RCX/RDX the C++ legs' own
+// scratch, R8/R11 the revram/LFO scratch — R8/RDX additionally serve the §7-B
+// window derefs (flag_n/flag_z/skip) inside the new legs. No callout exists
+// between the prologue and the dm callout (:1443), and `load_p_limits`
+// (the :1448 twin) reloads R9/R10 right after it.
+// CHECK gate leg (§4/§7-F/§9): the loop bound is `meg_jit_upto()`, whose
+// inverted `env_flag_on` polarity (`set && first char != '0'`, :322-325)
+// makes the DEFAULT 0x180 — byte-identical to the C++ x64 fixed bound
+// (:995; the aarch64 arm :2036-2037 is DEAD here). Only `SMU2000_MEG_JIT_CHECK`
+// set non-'0' (plus `_UPTO`) ever truncates the emitted program — the bisect
+// knob "ignored unless the check above is on" (:2035, kept coupled in
+// meg_jit_upto :335-337). So no CHECK-specific byte is emitted unless the
+// CHECK env is ON at compile time — faithful to C++.
+// Stats NOTE: the C++ `jit_stats st` / `sz_*` counters (:724-728, :1160-1186,
+// :1411, :1477/:1498/:1527/:1563) are compile-time-only bookkeeping printed
+// under SMU2000_MEG_JIT_STATS (:1713-1731, a Rust TODO with the stats block —
+// they emit ZERO machine-code bytes, so the transliteration omits them with
+// this note; the loop bodies below are otherwise instruction-for-instruction).
+// ---------------------------------------------------------------------------
+
+/// origin: swp30_jit.cpp:971-991 — the LFO hoist SCAN. "Only the numbers
+/// used 2+ times get built at the head" (:971 comment — once only is a net
+/// loss against parking+reading). The count pass (:975-979) runs only with
+/// a resident sintab (:976 gate — the GATED sintab, :645). The emit pass
+/// (:981-989; the x86-32 `#if` exclusion :980 is DEAD here) walks
+/// `i != 0x18`, and for `uses[i] >= 2` (:983): mark hoisted, allocate the
+/// next frame slot `LFO_SLOT_BASE + 4n` (:985, FRAME/96 B = 24 slots — the
+/// max n is 0x18 slots ≤ 96 B, never past FRAME), `emit_lfo(i)` (:987) and
+/// store RAX into it (:988, `emit_lfo_slot_store`). The dm_src 0-3 legs
+/// then read the slot (:1418-1419) or run `emit_lfo` in place (:1421) —
+/// loop-invariant because `lfo_step()` runs only BETWEEN samples (:892-896;
+/// Rust `lfo_step` meg.rs — do NOT move). Values out: `lfo_slot[i] != 0`
+/// ⇔ hoisted (0 = not hoisted, mirroring the C++ zero-init :973).
+pub fn emit_lfo_hoist_scan(
+    a: &mut Assembler,
+    o: &Offs,
+    ops: &[Op; 0x180],
+    sintab: *const u16,
+) -> [i32; 0x18] {
+    let mut lfo_slot = [0i32; 0x18]; // :973 (lfo_hoist[] is implicit in != 0)
+    let mut uses = [0u32; 0x18]; // :975
+    if !sintab.is_null() {
+        // :976-979 — count uses per LFO number (dm gate first, then src≤3)
+        for op in ops.iter() {
+            if op.dm != 0 && op.dm_src <= 3 && (op.lfo as usize) < 0x18 {
+                uses[op.lfo as usize] += 1;
+            }
+        }
+    }
+    let mut n = 0u32; // :981
+    for i in 0..0x18u32 {
+        if uses[i as usize] >= 2 {
+            // :983-984
+            lfo_slot[i as usize] = LFO_SLOT_BASE + (4 * n as i32); // :985
+            n += 1;
+            emit_lfo(a, o, i, sintab); // :987
+            emit_lfo_slot_store(a, lfo_slot[i as usize]); // :988
+        }
+    }
+    lfo_slot
+}
+
+/// origin: swp30_jit.cpp:971-1694 — the whole program body: the :971-991
+/// hoist scan, the :995-1679 per-op loop and the epilogue (:1688-1694
+/// through the same B2a helper). `d3`/`d2` are the ring snapshot COMMITTED
+/// to the code (build()'s :614-615 — slot3/slot2 close over them, :616-617).
+/// Per-op ORDER is C++ verbatim (:995 comment §5.3-9: ring-apply → branch
+/// gate → ALU → dm → dr → memw → index → t → memop → post-branch fixups).
+/// `#[allow(clippy::too_many_arguments)]` — the C++ builds read the same
+/// eleven things from build()'s scope (:598-995).
+#[allow(clippy::too_many_arguments)]
+pub fn emit_program(
+    a: &mut Assembler,
+    o: &Offs,
+    ms: &MegState,
+    ops: &[Op; 0x180],
+    revram_enable: u16,
+    bake: bool,
+    an: &Analysis,
+    d3: u32,
+    d2: u32,
+    sintab: *const u16,
+    sintab_len: usize,
+) {
+    let branchy = an.branchy; // :607-610 (already scanned — analyze_ops)
+
+    // ---- prologue :826-837 + branchy skip reset :839-840 ----
+    emit_prologue(a, o.p, o.sample, o.seed);
+    if branchy {
+        emit_skip_reset(a, o); // :839-840 (u16-adapted, B2b-2a)
+    }
+
+    // ---- :971-991 LFO hoist SCAN (fills the frame slots the dm legs read) ----
+    let lfo_slot = emit_lfo_hoist_scan(a, o, ops, sintab);
+
+    // ---- :995 per-op loop. CHECK gate leg: bound = meg_jit_upto() —
+    // DEFAULT 0x180 (== C++ x64 fixed bound :995); < 0x180 only with
+    // SMU2000_MEG_JIT_CHECK set non-'0' (inverted env_flag_on polarity,
+    // :322-325 — see section note). ----
+    let upto = meg_jit_upto();
+    for k in 0..upto {
+        let op = &ops[k as usize]; // :996
+        let s3 = slot3(d3, k); // :616
+        let s2 = slot2(d2, k); // :617
+
+        // ---- 3-ring apply :1000-1049 (head dynamic, else folded k-3) ----
+        if k < 3 || branchy {
+            emit_ring3_head(a, o, s3); // :1000-1029
+        } else {
+            emit_ring3_folded(a, o, s3, &ops[k as usize - 3], an); // :1030-1048
+        }
+        // ---- 2-ring (mem ports) :1050-1077 ----
+        if k < 2 || branchy {
+            emit_ring2_head(a, o, s2); // :1050-1065
+        } else {
+            emit_ring2_folded(a, o, s2, &ops[k as usize - 2]); // :1066-1077
+        }
+
+        // ---- branch gate :1079-1104 (branchy only) ----
+        // Skip slot read: §7-B window deref + U16 width adaptation (brief §2:
+        // Rust meg_skip_to is u16; the C++ u32 legs :1082/:1099 become
+        // cmp16i_mem/store16i through the *mut u16 — same decision, k < 0x180).
+        let mut skip_jump = 0usize; // :1080
+        let mut jump_done = 0usize; // :1080
+        if branchy {
+            a.load64(RDX, Mem::b(SWP, o.skip)); // §7-B deref (RDX free here)
+            a.cmp16i_mem(Mem::b(RDX, 0), k as u16); // :1082 (u16-adapted)
+            skip_jump = a.jcc_fwd(0x87); // :1083 ja — skip lands past this op
+            if op.jump != 0 {
+                // meg_cond in machine code :1085-1096. !cond&8 ⇒ always true
+                // (:1087 skip; meg.rs:604-605 `meg_cond` returns true there).
+                let mut no_jump = 0usize;
+                if op.cond & 8 != 0 {
+                    a.load64(RDX, Mem::b(SWP, o.flag_n)); // :1088 §7-B deref
+                    a.loadu8(RAX, Mem::b(RDX, 0)); // :1088
+                    if op.cond & 4 == 0 {
+                        a.xor32ri(RAX, 1); // :1089-1090
+                    }
+                    if op.cond & 2 != 0 {
+                        a.load64(RDX, Mem::b(SWP, o.flag_z)); // :1092 §7-B deref
+                        a.loadu8(RCX, Mem::b(RDX, 0)); // :1092
+                        a.or32(RAX, RCX); // :1093
+                    }
+                    a.test32(RAX, RAX); // :1095
+                    no_jump = a.jz_fwd(); // :1096
+                }
+                if (op.target as u32) > k {
+                    // :1098-1099 — target>k is a COMPILE-TIME constant (§5.3-9;
+                    // backward jumps never set skip — meg.rs:1280 twin)
+                    a.load64(RDX, Mem::b(SWP, o.skip)); // §7-B deref
+                    a.store16i(Mem::b(RDX, 0), op.target); // :1099 (u16-adapted)
+                }
+                if no_jump != 0 {
+                    a.patch(no_jump); // :1100-1101
+                }
+                jump_done = a.jmp_fwd(); // :1102 the jump op joins the erase tail
+            }
+        }
+
+        // ---- op body, elided for the jump op itself :1105 (→ :1639) ----
+        if !(branchy && op.jump != 0) {
+            // ================= ALU :1107-1409 =================
+            // BAKE fold :1111-1159 (only !m1_from_t && mmode!=3 :1111).
+            let mut alu_skip = false; // :1110
+            if op.alu != 0 && bake && op.m1_from_t == 0 && op.mmode != 3 {
+                let mut c: i64 = ms.konst[k as usize] as i64; // :1112 (s16 sext)
+                if op.m1_expand != 0 {
+                    c = MegState::m1_expand(c as i16) as i64; // :1113-1114
+                }
+                let m_zero = op.mmode == 0 || c == 0; // :1115
+                if m_zero
+                    && op.asel == 0
+                    && op.rop == 0
+                    && op.shift == 0
+                    && op.clamp == 0
+                    && op.latch == 0
+                {
+                    alu_skip = true; // :1116-1117 — p already fits 42 bits
+                } else if m_zero {
+                    a.xor32(RAX, RAX); // :1119 (acc hi is the same reg here)
+                } else if op.mmode == 1 {
+                    // :1128 imm64 c<<(8+15) — wrapping_shl mirrors the
+                    // interpreter's own wrap (meg.rs:1326), same in-range c
+                    a.imm64(RAX, c.wrapping_shl(8 + 15) as u64);
+                } else {
+                    // :1138 loads32 m2 operand (32-bit read, sign-extended)
+                    let m2 = if op.m2_from_m != 0 {
+                        Mem::b(MS, o.m + 4 * op.sm as i32)
+                    } else {
+                        Mem::b(MS, o.r + 4 * op.sr as i32)
+                    };
+                    a.loads32(RAX, m2); // :1138
+                    // :1139-1157 pow2 constant ⇒ shl (+neg) instead of imul
+                    // (imul 3 cycles, shl 1 — 1〜2割 of song coefficients)
+                    let ac: u64 = if c < 0 { c.unsigned_abs() } else { c as u64 }; // :1143
+                    let mut sh: i32 = -1; // :1144
+                    if ac != 0 && (ac & (ac - 1)) == 0 {
+                        sh = 0;
+                        while (1u64 << sh) != ac {
+                            sh += 1; // :1145-1147
+                        }
+                    }
+                    if sh < 0 {
+                        a.imul64i(RAX, RAX, c as u32); // :1149 u32(s32(c))
+                    } else {
+                        if sh != 0 {
+                            a.shl64(RAX, sh as u8); // :1151-1152
+                        }
+                        if c < 0 {
+                            a.neg64(RAX); // :1153-1154
+                        }
+                    }
+                }
+            }
+            // :1160-1186 st.* stats — ZERO emitted bytes (see section note)
+            if op.alu != 0 && !alu_skip {
+                // m1 source + mmode :1189-1260 (skipped when BAKE folded it)
+                if !(bake && op.m1_from_t == 0 && op.mmode != 3) {
+                    if op.m1_from_t == 2 {
+                        // :1230-1236 sign-of-p select t-vs-const (the
+                        // "upstream.md 29" quirk, meg.rs:1306-1311)
+                        a.loads16(RAX, Mem::b(MS, o.t + 2 * op.t as i32)); // :1232
+                        a.loads16(RCX, Mem::b(MS, o.konst + 2 * k as i32)); // :1233
+                        a.load64(R8, Mem::b(SWP, o.flag_n)); // :1234 §7-B deref
+                        a.loadu8(RDX, Mem::b(R8, 0)); // :1234
+                        a.test32(RDX, RDX); // :1235
+                        a.cmove64(RAX, RCX); // :1236 zf (flag_n==0) ⇒ const
+                    } else if op.m1_from_t != 0 {
+                        a.loads16(RAX, Mem::b(MS, o.t + 2 * op.t as i32)); // :1238
+                    } else {
+                        a.loads16(RAX, Mem::b(MS, o.konst + 2 * k as i32)); // :1240
+                    }
+                    if op.m1_expand != 0 {
+                        emit_m1_expand(a); // :1241-1242 (clobbers RCX)
+                    }
+                    let m2 = if op.m2_from_m != 0 {
+                        Mem::b(MS, o.m + 4 * op.sm as i32)
+                    } else {
+                        Mem::b(MS, o.r + 4 * op.sr as i32)
+                    };
+                    match op.mmode {
+                        0 => a.xor32(RAX, RAX), // :1244-1245
+                        1 => a.shl64(RAX, 8 + 15), // :1248 (meg.rs:1326 wrap)
+                        2 => {
+                            a.loads32(RCX, m2); // :1251
+                            a.imul64(RAX, RCX); // :1252
+                        }
+                        _ => {
+                            // :1254-1256 mmode==3: m/r value <<15, m1 unused
+                            a.loads32(RAX, m2);
+                            a.shl64(RAX, 15);
+                        }
+                    }
+                }
+                // asel :1261-1281 — asel==0 uses P DIRECTLY (no copy,
+                // :1261-1262/:1275 — the p chain stays unbroken)
+                let mut b: u8 = RCX; // :1264
+                match op.asel {
+                    0 => b = P, // :1275
+                    1 => {
+                        a.loads32(RCX, Mem::b(MS, o.r + 4 * op.sr as i32)); // :1276
+                        a.shl64(RCX, 15);
+                    }
+                    2 => {
+                        a.loads32(RCX, Mem::b(MS, o.m + 4 * op.sm as i32)); // :1277
+                        a.shl64(RCX, 15);
+                    }
+                    3 => {
+                        a.mov64(RCX, P); // :1278
+                        a.sar64(RCX, 15);
+                    }
+                    _ => a.xor32(RCX, RCX), // :1279 (asel 4 = zero)
+                }
+                match op.rop {
+                    0 => a.add64(RAX, b), // :1287
+                    1 => a.sub64(RAX, b), // :1294
+                    2 => {
+                        // :1308-1311 a + |b| via neg/cmovs
+                        a.mov64(RDX, b);
+                        a.neg64(RDX);
+                        a.cmovs64(RDX, b);
+                        a.add64(RAX, RDX);
+                    }
+                    _ => a.and64(RAX, b), // :1318
+                }
+                if op.shift != 0 {
+                    a.shl64(RAX, op.shift); // :1322-1326
+                }
+                if op.clamp == 0 {
+                    // :1328-1335 — no clamp ⇒ ±2^41 wrap via shl22/sar22
+                    // (the 42-bit sext from the Pitfalls list, meg.rs:1347)
+                    a.shl64(RAX, 22);
+                    a.sar64(RAX, 22);
+                }
+                match op.clamp {
+                    0 => {}
+                    1 => {
+                        // :1351-1354 saturate to ±P_MAX/P_MIN (R9/R10 pinned)
+                        a.cmp64(RAX, P_MIN);
+                        a.cmovl64(RAX, P_MIN);
+                        a.cmp64(RAX, P_MAX);
+                        a.cmovg64(RAX, P_MAX);
+                    }
+                    2 => {
+                        // :1366-1370 clamp to [0..P_MAX]
+                        a.xor32(RCX, RCX);
+                        a.cmp64(RAX, RCX);
+                        a.cmovl64(RAX, RCX);
+                        a.cmp64(RAX, P_MAX);
+                        a.cmovg64(RAX, P_MAX);
+                    }
+                    _ => {
+                        // :1383-1388 |acc| ≤ P_MAX
+                        a.mov64(RDX, RAX);
+                        a.neg64(RDX);
+                        a.cmovs64(RDX, RAX);
+                        a.mov64(RAX, RDX);
+                        a.cmp64(RAX, P_MAX);
+                        a.cmovg64(RAX, P_MAX);
+                    }
+                }
+                a.mov64(P, RAX); // :1401 — the accumulator commits to R13
+                if op.latch != 0 {
+                    // :1402-1407 — flags through the §7-B window (bool slots,
+                    // setl/sete write 0/1 — still valid bools; RDX/R8 free
+                    // here, test64 clobbers neither)
+                    a.load64(RDX, Mem::b(SWP, o.flag_n)); // :1404 §7-B deref
+                    a.test64(P, P); // :1403
+                    a.setl_mem(Mem::b(RDX, 0)); // :1404
+                    a.load64(R8, Mem::b(SWP, o.flag_z)); // :1406 §7-B deref
+                    a.test64(P, P); // :1405
+                    a.sete_mem(Mem::b(R8, 0)); // :1406
+                }
+            }
+
+            // ================= dm :1414-1475 =================
+            if op.dm != 0 {
+                // :1416-1465 — lfo_slot==0 ⇒ not hoisted (:1418 gate twin)
+                let slot = if (op.lfo as usize) < 0x18 {
+                    lfo_slot[op.lfo as usize]
+                } else {
+                    0
+                };
+                emit_dm_src(a, o, op, slot, sintab, sintab_len);
+            }
+            // :1467-1475 — early/last-slot vs ring slot + the tail/branchy
+            // mw_reg byte (OUTSIDE the dm gate — dm==0 CLEARS the byte)
+            emit_dm_store(a, o, k, op, s3, an);
+
+            // ================= dr :1480-1496 =================
+            emit_dr_apply(a, o, k, op, s3, an); // rnd_skip FIRST :1481-1482
+
+            // ================= memw value :1501-1509 =================
+            emit_memw_acc(a, o, k, op, s2, an);
+
+            // ================= index / index2 :1511-1525 =================
+            emit_index_legs(a, o, k, op, s3, an);
+
+            // ================= t :1530-1561 =================
+            emit_t_leg(a, o, ms, k, op, s2, bake, an);
+
+            // ================= memop :1566-1638 =================
+            emit_memop(a, o, k, op, s2, revram_enable, an);
+        } // :1639 !(branchy && o.jump)
+
+        // ---- skipped/jump-tail path :1641-1678 (branchy only) ----
+        if branchy {
+            let normal_done = if op.jump != 0 {
+                0 // :1642 — the jump op's jmp_fwd already routes here
+            } else {
+                a.jmp_fwd() // :1642 body hops over the erase tail
+            };
+            a.patch(skip_jump); // :1643
+            if jump_done != 0 {
+                a.patch(jump_done); // :1644-1645
+            }
+            emit_t_branchy(a, o, k, op, s2, s3, an); // :1647-1675
+            if normal_done != 0 {
+                a.patch(normal_done); // :1676-1677
+            }
+        }
+    }
+
+    // ---- epilogue :1688-1694 ----
+    emit_epilogue(a, o.p, o.seed);
+}
+
+/// Test seam (B2b-3b brief §2): run build()'s DECISION path (RAM guard
+/// :611-612 + analysis) and return the FULL assembled program bytes —
+/// WITHOUT any `Code`, without the :1696-1712 handoff, without touching
+/// `fnp` (which stays 0 everywhere, `b2b3b_build_inert`). It executes the
+/// SAME `emit_program` build() assembles into its private Assembler, so the
+/// parity rigs test the real bytes. Never called by the live path
+/// (run()/rebuild() never route here).
+pub fn program_bytes(
+    ms: &MegState,
+    ops: &[Op; 0x180],
+    ram_len: usize,
+    revram_enable: u16,
+    bake: bool,
+    early: bool,
+    sintab: &[u16],
+) -> Option<Vec<u8>> {
+    if ram_len < 0x40000 {
+        return None; // :611-612 (same refusal point as build())
+    }
+    let an = analyze_ops(ops, early);
+    let sintab_ptr = if sintab.len() >= 0x8000 {
+        sintab.as_ptr() // :645 resident
+    } else {
+        std::ptr::null() // :645 — callout fallback instead
+    };
+    let mut a = Assembler::new();
+    emit_program(
+        &mut a,
+        &offs(),
+        ms,
+        ops,
+        revram_enable,
+        bake,
+        &an,
+        ms.delay_3, // :614 (build commits cd.d3 = ms.m_delay_3)
+        ms.delay_2, // :615
+        sintab_ptr,
+        sintab.len(),
+    );
+    Some(a.code)
 }

@@ -14,32 +14,43 @@ on this repo MUST read this file in full before touching anything, then work the
 > ASK USER CLOSED (S3): S2 tree COMMITTED as `dbd2f72` "Rust my anus" (verified contains
 > the full M5 delta: state_io/nvram/bootcache/card/statetest/state + AGENTS + ledger).
 >
-> **NEXT RESTART (S11d — M9b B2b-2a dispatch on restart; main session =
-> ORCHESTRATOR ONLY):** Read this ledger FULL FIRST, then
-> `JIT_M10_HANDOFF.md`, then use this exact resume path. Current tree has
-> B2b-1 green and inert: `PHASE_B2_EMIT_OK=false`, `fnp==0`;
-> `meg_jit 13/13`, `jit 2/2`, `boot_golden 1/1`, piano harness green.
-> Do not start B2b-2a before verifying the current gate. From repo root:
-> `$env:PATH="C:\msys64\mingw64\bin;C:\msys64\usr\bin;$env:PATH"; make rust`;
-> from `rust\`: `cargo test --release --test meg_jit --test jit --test
-> boot_golden`; optional piano `$env:SMU_BUILD="build-rust"; python
-> tools\run_tests.py --only piano`; optional live 4s `.\build-rust\live.exe
-> roms --waveout --nomidi --seconds 4 --wav "%TEMP%\live.wav"`. Then dispatch
-> ONE FRESH `general` writer with the single prompt: `Read and follow exactly
-> .opencode/JIT_B2B2A_TASK.md. Keep PHASE_B2_EMIT_OK=false and fnp==0.` Do
-> NOT resume large writer sessions (prefill guard). B2b-2a scope is already
-> written to `.opencode/JIT_B2B2A_TASK.md`: additive 16-bit emitter methods +
-> branchy skip reset + folded non-branchy ring head/clear helpers, still
-> inert. If the dispatch or edit gets too large, split into B2b-2a-emitter
-> only, then B2b-2a-skip, then B2b-2a-ring. Gate with same targeted tests;
-> do not run full suite/samptest; do not enable emission until full op loop
-> + LFO + saturation + CHECK zero + dense/piano/live byte-EQ green. CPU
-> before enablement is ~45%, C++ bar ~11.7%. Important current files:
-> `.opencode/JIT_B2B2A_TASK.md`, `JIT_M10_HANDOFF.md`,
-> `rust\crates\smu-machine\src\meg_jit.rs`,
-> `rust\crates\smu-machine\src\jit_emit.rs`, `rust\tests\meg_jit.rs`,
-> `rust\crates\smu-swp30\src\mix.rs`, `rust\crates\smu-machine\src\lib.rs`.
-> Do not commit unless user asks.
+> **NEXT RESTART (S13 — JIT M9/M9b ENABLED + GREEN; remaining = commit +
+> full suite + W-PANEL; main session = ORCHESTRATOR ONLY):** Read this
+> ledger FULL FIRST. BOTH JITs are now LIVE and byte-identical to the
+> interpreter: `PHASE_B2_EMIT_OK=true` (meg_jit.rs:91), SH-2 JIT on.
+> In-session GREEN (S13): `make rust`; `meg_jit 53/53` ×2; `jit 2/2`;
+> `boot_golden 1/1`; **dense 合 peak 14627/rms 2257.4 + JIT入切 合**
+> (JIT on==off==C++); **piano 全部そろっている**; ws **629/629** ×2;
+> LIVE wav **BYTE-EQ** vs C++ (fc /B no-diff), live idle CPU **15.7%**
+> (S8 63% → S11 44% → MEG-JIT 15.7%; C++ 11.4%); blocktime dense avg
+> **0.055 ms** / CPU 2944 ns / SWP-m 2500 ns. CHECK A/B leg
+> (`SMU2000_MEG_JIT_CHECK=1`) ported + proven (planted 0x7fff→0x7f00
+> t-clamp fault caught sample 1 @ state byte 14724; zero lines on clean
+> build). Inert tests migrated to LIVE contract (RAM-guard 0x3ffff
+> refusal KEPT). Verify cold (repo root then rust\):
+> `$env:PATH="C:\msys64\mingw64\bin;C:\msys64\usr\bin;$env:PATH"; make
+> rust`; `cargo test --release --test meg_jit --test jit --test
+> boot_golden`; `$env:SMU_BUILD="build-rust"; python -u
+> tools\run_tests.py --only dense` / `--only piano`. REMAINING WORK, in
+> order: (1) **ASK USER to commit** — the ENTIRE MEG JIT (meg_jit.rs
+> ~2990 L, tests/meg_jit.rs ~4164 L, mix.rs/lib.rs wiring) + S8 fetch/
+> meg + ledger is UNCOMMITTED; `git add rust PORTING_LEDGER.md`.
+> (2) **Full 63-case suite OWED** (skipped S6..S13 by user directive):
+> synchronous, timeout ≥2400000, PYTHONIOENCODING=utf-8, `python -u`
+> +Tee; JIT on/off legs run per-case now so it is the definitive JIT
+> proof. BEFORE suite: `Get-Process live_rust` — foreign
+> `D:\Downloads\S-MU2000\live_rust.exe` shares %LOCALAPPDATA%\S-MU2000;
+> ASK USER if it respawns. (3) W-PANEL row (port panel.cpp) still owed.
+> (4) midi-in RT re-gate still ENV-BLOCKED (reboot). Pitfalls for JIT
+> work: prefill guard may REJECT a dispatch yet the writer STILL RUNS
+> (disk-FIRST, re-gate, never blind-retry/re-write — bit re-struck S13:
+> an "orphan" render.exe burned 16329 s CPU from a cancelled writer);
+> `*_build_inert` names are now `*_build_live` (grepping old names MISS).
+> CPU bar context: C++ live idle 11.4-11.7% (SH-2+MEG JIT both). Do not
+> run samptest (user). Files: `rust\crates\smu-machine\src\meg_jit.rs`
+> (~2990 L, jit_emit UNCHANGED all run), `rust\crates\smu-swp30\src\mix.rs`
+> (:4412/:4414/:4444 seam), `rust\tests\meg_jit.rs` (~4164 L),
+> `rust\crates\smu-machine\src\lib.rs`. Do not commit unless user asks.
 >
 > **SUPERSEDED (S10 — M9 SH-2 JIT: SCAFFOLD LANDED + COMPILES + RUNS, GATE RED on a
 > real R13 corruption; that ONE hunt was S11's job — CLOSED, see session S11):** rust/ has the JIT
@@ -177,7 +188,7 @@ Session log. Status: ⬜ todo · 🟡 in progress · ✅ done · ⏸ blocked.
 | M6 | Windows HAL + live | Rust `live --seconds 60 --midi <loopMIDI> --wav x.wav` with C++ `midisend` playing a fingerprint case → fingerprint match; latency/CPU lines printed like C++ | 🟡 | **S3: live main+waveout+midi_out ring+LCD seam PAIRED; idle C++↔Rust live wav BYTE-EQ (headless waveout PROVEN WORKING); `--midi-file` seam replaces loopMIDI for determinism (S3 decision). S4: `audio out` WASAPI row PAIRED (real UR824 shared idle wav BYTE-EQ — WASAPI default path no longer stand-in). Only M6b residual = midisend/midi-in deep capture gate. Latency/CPU lines printed (both builds)** |
 | M7 | fast_midi + USB C/D | 42 cases re-run `--fast-midi` bit-identical C++↔Rust; `--usb` host mode case identical; `port_b` green both modes | ✅ | **S4: both module rows PAIRED; --usb chord wav BYTE-EQ + xgtest --usb fc EQ + harness USBの口/port_b 合 both modes. SWEEP DONE (S4 orch): ALL 63 fixtures `--fast-midi` C++↔Rust pcm sha1 EQ (4 batches, 0 diffs; 4-sec renders, exes 07:2x) — exceeds the 42-case bar** |
 | M8 | Slave thread + perf | threaded==single bit-identical (harness #4 pattern) on 5 heaviest cases; `blocktime` Rust ≤ C++ interpreter(no-JIT); perf table updated | 🟡 | **S4: threaded slave PORTED+PAIRED (W-M8B: lock-free tag/done rotation mu2000.cpp:286-373 1:1; 5 heaviest wavs threaded≡single≡C++-threaded byte-EQ, orch re-ran dense `33500014…`; --single REAL in render/live/blocktime/statetest; ws 552; dense+別糸 real 合). blocktime bin ✅ + perf table UPDATED. S4 gate MISSED (19.497/26.58 vs bar 8.887/11.75) ⇒ M9 armed. S7 dense-single re-measure: Rust 0.203/0.29 vs same-box C++-interp 0.186/0.30 (bar 8.887/11.75 = box-drifted, do NOT re-use — always same-box side-by-side); SH-2 7029-7576 vs 7213 ≈ parity; threaded dense 別糸 合 re-proved ×2. ≤-gate effectively met on SH-2 term; SWP-master term (13190 vs 11277) = remaining ~0.3 ms — see NEXT. **S8: SWP-m reduced 14208→~13150 (read_dword load-fusion + MEG ring/bank unchecked, −7% same-window); dense block 0.218→0.207 ms; live idle CPU 63.0% sub-realtime no-starvation, idle wav BYTE-EQ. Still ~1.15-1.22× dense block vs same-box C++-interp (box thermally noisy); residual = mature C++-interp codegen (Op-table cache + awm2), JIT-only territory — NOT a functional/realtime miss**** |
-| M9 | (optional) JIT | Only if M8 misses goal: dynasmrt SH2 JIT; gate = JIT on/off byte-identical 42/42 + measurable win; else mark cancelled | 🟡 | **S6: batched interpreter (pump tax per-device-op, not per-instruction) dense 19.497/26.58 → 11.38/16.5, SH-2 2.58×. COMMITTED `99edf62`. S7: fetch-path polish (Ctx/region per-access ROM-RAM-DRAM-IRAM fast legs + single-borrow hook + per-op SCI cpu_now sync + dead-Snap removal + selective Internal dirty) → dense single 0.247→0.203 ms avg (RT 108.9%→89.5%), SH-2 10881→7029-7576 ns/smp vs same-box C++-interp 7213 = PARITY±5%; live idle CPU 64.2% (S6 78.4%, S4-era 159.8%), live wavs BYTE-EQ ×2 vs C++. JIT = NOT NEEDED for interpreter-parity goal; reopen only if blocktime >1.15× C++-interp recurs. Full 63-case suite still owed (S6+S7 both skipped by user directive; gates = ws 562 + boot_golden + boot 28M trace-swp/stdout/stderr byte-EQ + piano/dense 合 all in-session). **S8: SWP-master micro-polish (fetch `read_dword` pow2-leg load-fusion + `meg::run_program` delay-ring/bank `get_unchecked` on provably-in-range indices; state-sized reverb_ram left CHECKED) → dense SWP-m 14208→~13150 (−7%), block 0.218→0.207 ms (−5%), SH-2 unchanged parity, live idle CPU 63.0% (was 64.2%). INTERP_TABLE unchecked = noise, reverted. All bit-exact (ws 562 ×2 incl boot_golden + meg/meg_b/fetch vectors; dense 合 peak 14627/rms 2257.4; piano 合; live wav BYTE-EQ 532,524 B). S7 tree committed `85a4ccc`; S8 rust/ (fetch.rs + meg.rs) UNCOMMITTED. SWP residual ~1.2-1.3× vs C++-interp remains mature-interpret codegen (Op-table cache + awm2) — JIT-only territory; box thermally noisy so only same-window BUILD A/B trustworthy. **S10 (2026-10-04, wip): ghost-writer landed jit_emit.rs(624)/jit.rs(1444)/lib.rs swap/core.rs shim + tests/jit.rs; `cargo build --release` GREEN, runs. GATE STILL RED — `boot_golden` + native run AV `0xc0000005`; gdb (msys2, faithful/no-instrument build) pinned the fault: RAM byte fast-write `mov %r8b,0x0(%r13,%rax,1)` with **R13=0x210000 = the cycle `base`** (R15's value) instead of the RAM ptr (r12/rbp/rbx/r14 all sane; rax=0x1049,rdx=0x401049 = a *valid* RAM offset, so addr xlat correct — ONLY the R13 base reg is wrong). No Rust emitter writes R13 after the `enter` prologue `mov %r9,%r13` (prologue + block_0000 mread/mwrite/finish disasm verified FAITHFUL to sh2_jit.cpp; the earlier "ram bound 0x40000 vs 0x3ffff" lead was DISPROVEN — Rust uses `ram_len+1-sz`, identical). So a later block clobbers the callee-saved RAM base once per `enter` (enter loads R13 once; blocks chain via next_block, no reload) → hunt with `gdb` `watch -o -l $r13` / reverse across block jumps. A head-of-block debug CALL was added then DISABLED: `call_abs` clobbers caller-saved RAX and the next real insn stores RAX→hn.now, so the probe *itself* corrupted the chain (dead helpers jit_dbg_head/head2/fnptr2_dbg/fnptr4_dbg/pcdbg_head left #[allow] — remove on fix).** NOT paired; not committed. See session-S10. **S11 (2026-10-04, PAIRED): R13 hunt CLOSED — 3 stacked causes: (1) emitted ctx chain needed TWO derefs (JitCtx→Ctx→Sh7042Bus; C++ held bus directly), (2) `enter` clobbered callee-saved R14/R15 so the next enter's ARG3=ram arrived as base (the 0x210000==base gdb symptom), (3) clock sub64 sign-flipped. All fixed; instrumentation stripped (JIT_ENTERS counter kept for tests/jit.rs). Gates in-session: boot_golden ✅×5 + gdb exit0; --test jit ✅; piano harness 全部そろっている incl JIT入切合/別糸合; make rust green. Same-box perf: blocktime dense 0.207→0.128 ms, SH-2 7600→3030 ns (2.5×); live idle CPU 63→44% vs C++ 11.7% (C++ also JITs MEG) ⇒ M9b MEG JIT = NEXT, via single-writer subagent (handoff JIT_M10_HANDOFF.md). ws re-run + commit OWED by M9b closer; full suite/samptest still skipped (user).** |
+| M9 | (optional) JIT | Only if M8 misses goal: dynasmrt SH2 JIT; gate = JIT on/off byte-identical 42/42 + measurable win; else mark cancelled | ✅ | **S6: batched interpreter (pump tax per-device-op, not per-instruction) dense 19.497/26.58 → 11.38/16.5, SH-2 2.58×. COMMITTED `99edf62`. S7: fetch-path polish (Ctx/region per-access ROM-RAM-DRAM-IRAM fast legs + single-borrow hook + per-op SCI cpu_now sync + dead-Snap removal + selective Internal dirty) → dense single 0.247→0.203 ms avg (RT 108.9%→89.5%), SH-2 10881→7029-7576 ns/smp vs same-box C++-interp 7213 = PARITY±5%; live idle CPU 64.2% (S6 78.4%, S4-era 159.8%), live wavs BYTE-EQ ×2 vs C++. JIT = NOT NEEDED for interpreter-parity goal; reopen only if blocktime >1.15× C++-interp recurs. Full 63-case suite still owed (S6+S7 both skipped by user directive; gates = ws 562 + boot_golden + boot 28M trace-swp/stdout/stderr byte-EQ + piano/dense 合 all in-session). **S8: SWP-master micro-polish (fetch `read_dword` pow2-leg load-fusion + `meg::run_program` delay-ring/bank `get_unchecked` on provably-in-range indices; state-sized reverb_ram left CHECKED) → dense SWP-m 14208→~13150 (−7%), block 0.218→0.207 ms (−5%), SH-2 unchanged parity, live idle CPU 63.0% (was 64.2%). INTERP_TABLE unchecked = noise, reverted. All bit-exact (ws 562 ×2 incl boot_golden + meg/meg_b/fetch vectors; dense 合 peak 14627/rms 2257.4; piano 合; live wav BYTE-EQ 532,524 B). S7 tree committed `85a4ccc`; S8 rust/ (fetch.rs + meg.rs) UNCOMMITTED. SWP residual ~1.2-1.3× vs C++-interp remains mature-interpret codegen (Op-table cache + awm2) — JIT-only territory; box thermally noisy so only same-window BUILD A/B trustworthy. **S10 (2026-10-04, wip): ghost-writer landed jit_emit.rs(624)/jit.rs(1444)/lib.rs swap/core.rs shim + tests/jit.rs; `cargo build --release` GREEN, runs. GATE STILL RED — `boot_golden` + native run AV `0xc0000005`; gdb (msys2, faithful/no-instrument build) pinned the fault: RAM byte fast-write `mov %r8b,0x0(%r13,%rax,1)` with **R13=0x210000 = the cycle `base`** (R15's value) instead of the RAM ptr (r12/rbp/rbx/r14 all sane; rax=0x1049,rdx=0x401049 = a *valid* RAM offset, so addr xlat correct — ONLY the R13 base reg is wrong). No Rust emitter writes R13 after the `enter` prologue `mov %r9,%r13` (prologue + block_0000 mread/mwrite/finish disasm verified FAITHFUL to sh2_jit.cpp; the earlier "ram bound 0x40000 vs 0x3ffff" lead was DISPROVEN — Rust uses `ram_len+1-sz`, identical). So a later block clobbers the callee-saved RAM base once per `enter` (enter loads R13 once; blocks chain via next_block, no reload) → hunt with `gdb` `watch -o -l $r13` / reverse across block jumps. A head-of-block debug CALL was added then DISABLED: `call_abs` clobbers caller-saved RAX and the next real insn stores RAX→hn.now, so the probe *itself* corrupted the chain (dead helpers jit_dbg_head/head2/fnptr2_dbg/fnptr4_dbg/pcdbg_head left #[allow] — remove on fix).** NOT paired; not committed. See session-S10. **S11 (2026-10-04, PAIRED): R13 hunt CLOSED — 3 stacked causes: (1) emitted ctx chain needed TWO derefs (JitCtx→Ctx→Sh7042Bus; C++ held bus directly), (2) `enter` clobbered callee-saved R14/R15 so the next enter's ARG3=ram arrived as base (the 0x210000==base gdb symptom), (3) clock sub64 sign-flipped. All fixed; instrumentation stripped (JIT_ENTERS counter kept for tests/jit.rs). Gates in-session: boot_golden ✅×5 + gdb exit0; --test jit ✅; piano harness 全部そろっている incl JIT入切合/別糸合; make rust green. Same-box perf: blocktime dense 0.207→0.128 ms, SH-2 7600→3030 ns (2.5×); live idle CPU 63→44% vs C++ 11.7% (C++ also JITs MEG) ⇒ M9b MEG JIT = NEXT, via single-writer subagent (handoff JIT_M10_HANDOFF.md). ws re-run + commit OWED by M9b closer; full suite/samptest still skipped (user).** **S12/S13 (2026-10-05, MEG JIT **ENABLED** — `PHASE_B2_EMIT_OK=true`): B2b-2a→3b emitter legs landed (emitter gap ZERO, jit_emit unchanged), k-loop + full-program parity rigs green vs `meg::run_program`. B2b-3c enablement: dense initially RED with JIT on (peak 9001 vs 14627), CHECK A/B leg (`SMU2000_MEG_JIT_CHECK`) ported — dense now **合 peak 14627/rms 2257.4 JIT入切 合** (JIT on==off==C++), piano 全部そろっている, ws **629/629**, boot_golden/jit green, live wav **BYTE-EQ** vs C++ (CPU 63→44→**15.7%**, C++ 11.4%), blocktime dense 0.207→**0.055 ms**/CPU 2944 ns/SWP-m 2500 ns. CHECK-leg proven live: planted 0x7fff→0x7f00 t-clamp fault caught sample 1 @ state byte 14724 (t_value), zero lines clean. Inert tests MIGRATED to LIVE contract (`b2a_build_live_even_with_big_ram` etc., RAM-guard 0x3ffff refusal KEPT). Root-cause of dense red + CHECK slowness fixed by alive writer ses_ef6b7 (meg_jit.rs scratch-buffer A/B; no separate report). NOT committed (user). See session-S13 log.** |
 
 Deferred backlog (tracked, not gates): samptest, SmartMedia authoring, A/D input,
 Linux/macOS HALs, `rec` equivalent. (xgtest ✅ S4; `midisend` ✅ ported S4, RT re-gate pending.)
@@ -404,6 +415,355 @@ Deviation log (intentional):
 ---
 
 ## Session log (append-only, newest first)
+
+### 2026-10-05 — session S13 (M9b B2b-3c **ENABLEMENT DONE**: MEG JIT LIVE, dense/piano byte-EQ, live CPU 15.7%, ws 629; M9 ✅; remaining = ASK-USER commit + full suite + W-PANEL)
+
+- Cold protocol: ledger IN FULL; user directives "keep going" then
+  "continue. 4s dense check has hung". Full suite + samptest still
+  SKIPPED (user). 0 embedded commands executed.
+- Flip `PHASE_B2_EMIT_OK=true` → first battery: piano GREEN but
+  **dense RED** (peak 9001 vs 14627, dc +4683); localize: red follows
+  MEG-JIT only (SH2-JIT irrelevant); CHECK env silent (leg not emitted
+  yet). Dispatched DEBUG writer (`.opencode/JIT_B2B3C_DEBUG_TASK.md`) →
+  "Task cancelled" (transport).
+- User reported a hung 4 s dense CHECK run. Disk-first: orphan
+  render.exe PID 52952 burned 16329 s CPU (the cancelled writer's
+  probe run) — killed. Cancelled/dispatched writers had STAYED ALIVE
+  for hours (ses_ef6b7: 5:05 MB check-leg batch + 11:17/11:22 final
+  edits) — the prefill-guard-rejected follow-up never ran (no
+  double-writer; verified quiet via 5 s mtime watch).
+- The alive writer's disk state died mid-PROBE-STRIP (8 dangling
+  `hunt`/`hn` refs + dead `HUNT_CALLS` static): orchestrator repaired
+  compilability (removed the 2 leftover probe blocks; HUNT_CALLS left
+  as a harmless dead static — sweep on next file touch).
+- Writer's landed fixes (inferred from disk + green battery, no return
+  report): CHECK A/B leg port per C++ :426-511 with PERSISTENT scratch
+  (`sc.ram0/ramj` — the "hang" was the pathological per-sample
+  `to_vec(0x40000)`×3 slow leg, not infinite: exactly brief §1 case 1);
+  dense-red fix inside the same meg_jit.rs batch (mix/lib UNTOUCHED —
+  churn-wiring untouched; emitter-side); inert→LIVE test migration
+  (`b2a_build_live_even_with_big_ram` etc. + doc §11; RAM-guard
+  0x3ffff-refusal leg KEPT with positive assertions — honest).
+- ORCHESTRATOR GATES IN-SESSION (all green): `make rust`+flat mtime;
+  CHECK run now completes 2 s dense with ZERO divergence lines;
+  **dense 合 peak 14627/rms 2257.4 dc +67.371 低域比 9.173% + JIT入切
+  合 + 別糸 合**; **piano 全部そろっている**; `meg_jit 53/53` ×2;
+  `jit 2/2`; `boot_golden 1/1`; ws **629/629** (new baseline, was 562);
+  **LIVE byte-EQ** factory-nvram-per-side `fc.exe /B` no-diff (3 s idle,
+  531,136 B class) with **CPU 15.7%** vs C++ 11.4% same recipe;
+  blocktime dense avg 0.055 ms (was 0.128 SH2-only / 0.207 interp)
+  CPU 2944 ns SWP-m 2500 ns.
+- CHECK-leg anti-phantom proof: planted 0x7fff→0x7f00 in
+  `emit_tval_clamp` → `MEGCHECK sample 1 state@14724/14856` (t_value
+  region — exact perturb target); reverted, rebuilt, dense 合 + 53/53 +
+  zero CHECK lines post-revert (clean rebuild re-gated).
+- Bites re-struck/confirmed: (1) CANCELLED dispatch writers can stay
+  alive for hours — before ANY re-dispatch or repair, kill orphans +
+  mtime-watch + re-gate (this saved the session from double-writing);
+  (2) harness/JIT CHECK "hang" may be 100×-slow scratch allocs, not a
+  deadlock (heartbeat probe env `SMU_HUNT` pattern worked); (3) workdir
+  slips (cargo from repo root; cmd-vs-pwsh pipe in `& cmd /c`) —
+  re-verify pipes carry.
+- M9 milestone row flipped 🟡→**✅** with S12/S13 evidence appendix.
+  M8 stays 🟡 (threaded≡single re-gate with live JIT rides the full
+  suite). NEXT = ASK USER commit (the entire MEG JIT + S8 fetch/meg +
+  ledger UNCOMMITTED — biggest un-committed delta of the port) → full
+  63-case suite (definitive JIT on/off proof, per-case legs) →
+  W-PANEL. Files: meg_jit.rs ~2990 L, tests/meg_jit.rs ~4164 L,
+  jit_emit.rs UNCHANGED (emitter gap ZERO, 9 slices), mix.rs/lib.rs
+  unchanged this session (user lib.rs MDBG comments intact). Briefs
+  `.opencode/JIT_B2B3C_{DEBUG,HUNT}_TASK.md` kept for history.
+
+### 2026-10-05 — session S12g (M9b B2b-3b PAIRED via death+FIX writers: k-loop stitch + FULL-PROGRAM parity vs interpreter green; REAL emitter bug load_p_limits 2^46→2^38; JIT complete & inert, NEXT = B2b-3c ENABLEMENT)
+
+- Cold protocol: ledger IN FULL; user "keep going"; full suite + samptest
+  SKIPPED throughout. 0 embedded commands executed.
+- Slices this session (each: fresh writer → orchestrator re-gate →
+  ledger): **B2b-2a** (16-bit emitter + skip/rings, meg_jit→19),
+  **B2b-2b** (dm/dr + pack24/rnd/p_packed/lfo-slot → 27), **B2b-2c**
+  (memw-acc/ix2 index → 32), **B2b-2d** (t folded+branchy+clamp → 38),
+  **B2b-2e** (memop addr/revram/region-gate → 44, emitter gap ZERO, 5
+  slices straight). Gates green after EVERY slice; tree inert throughout
+  (`PHASE_B2_EMIT_OK=false`, fnp==0, disk-verified each close).
+- **B2b-3a** (LFO hoist + callout): dispatch hit oMLX prefill guard but
+  the writer RAN to near-completion on disk (session-M rule — disk-FIRST).
+  One rig RED; orchestrator debug (stale-binary marker probe → gdb →
+  clobbered R12) proved the RIG frame unfaithful (3 pushes but 5 more
+  callee-saves scribbled + zero shadow), emitter byte-faithful →
+  **FIX writer** rig-only fix (mirror :827 8-push + subrsp(40),
+  :1691-1692 inverse), hammered 20/20 ASLR spawns → 51/51 ×2 green.
+- **B2b-3b** (k-loop stitch): dispatch rejected by prefill guard, writer
+  again ran and died mid-slice (disk-FIRST: lib compiled, 52/53, dead
+  writer left duplicate `no_noise` in prog_a op 15 — orchestrator fixed
+  the literal, a single field feeds BOTH p_packed legs meg_jit.rs:1674/
+  :1723). **FIX writer**: the "4337-byte skeleton" panic was NOT
+  under-emission — C++ gates bytes on op flags (:1033-:1524), a faithful
+  sparse compile IS ~4.3 KB; the rig's >0x2000 gate contradicted C++, so
+  prog_a was DENSIFIED (work-ops fill 0x20-0x17b, specials + hoist kept).
+  The REAL bug parity shook out: `load_p_limits` mistranscribed
+  2^38 constants as 2^46 (swp30_jit.cpp:821-822 = `0x3f_ffff_ffff`/
+  `−0x4000000000`; same digit-quirk family meg.rs:1349 pins) — clamps
+  saturated wrong bounds; fixed meg_jit.rs:2161-2168 + 2 self-generated
+  pins. Result: A00/A11/Aearly/Abake + Bbranch/Bbake, 48 steps each,
+  FULL per-step MegState + device-window + seed + reverb_ram equality vs
+  `meg::run_program`; A progs 42-45 KB, B 127 KB, ret-terminated, skip
+  residuals pinned. Probes stripped (rg: zero JITDBG/SMU_S1/
+  SMU_SHAPE_DISABLE).
+- Orchestrator final gates IN-SESSION: `make rust` + flat 9; **meg_jit
+  53/53 ×2**, jit 2/2, boot_golden 1/1, piano 全部そろっている (JIT入切 合,
+  別糸 合). Inert disk-verified: PHASE_B2_EMIT_OK=false (:89), fnp==0
+  (b2b3b_build_inert), 3 `unimplemented!` = doc comments. src/tests CLEAN.
+  ⚠ Bite re-struck ×3 this session: cargo/rg from wrong cwd (workdir
+  `rust\` + double-prefixed paths, repo root has no Cargo.toml).
+- Files: meg_jit.rs 2031→2687, tests/meg_jit.rs 3314→4144, jit_emit.rs
+  UNCHANGED (emitter gap ZERO the whole B2 run). Briefs on disk:
+  `.opencode/JIT_B2B2A..B3B{,_FIX}_TASK.md`. Nothing committed (user
+  hasn't asked; user's lib.rs MDBG comment edits preserved).
+- **NEXT = B2b-3c ENABLEMENT**: flip `PHASE_B2_EMIT_OK=true`, then the
+  standing byte-EQ battery (JIT入切 dense+piano, live C++↔Rust wav
+  BYTE-EQ per factory-nvram recipe, blocktime vs same-box C++, ws
+  re-baseline since JIT ~562). Orchestrator-executable; revert-to-inert
+  is the fallback on any stubborn red. Prefill guard fired twice this
+  session even on tiny prompts (box memory pressure) — after ANY
+  dispatch error: disk-FIRST, re-gate, never blind-retry.
+
+### 2026-10-05 — session S12f (M9b B2b-3a PAIRED via ghost+FIX writers: LFO hoist + callout landed, rig-frame bite fixed, gates green ×2, still inert; NEXT = B2b-3b k-loop stitch dispatch)
+
+- Cold protocol: ledger IN FULL; user directive unchanged ("keep going";
+  skip full suite incl samptest). 0 embedded commands executed.
+- B2b-3a dispatch (emit_lfo :897-969 + call_lfo callout :1431-1448 +
+  load_p_limits) hit the oMLX prefill guard ("Prompt too long 263966") —
+  session-M rule applied: inspected disk FIRST. The "failed" writer had
+  ALREADY completed work on disk (meg_jit.rs 2031→2227, tests→3621, zero
+  real unimplemented!) and had reported 50-green, but
+  `b2a::b2b3a_callout_exec_abi_scrub` was RED under orchestrator re-run.
+- Debug arc (orchestrator): failing assert showed want[0]=0x1515 while
+  disk said 0x1313 → stale-binary suspicion → marker-panic probe proved
+  compile fresh ⇒ the pre-fix binary was genuinely different; with the
+  marker the SAME rig AV'd 0xc0000005 (layout-sensitive). gdb: r12
+  (scrub ptr) clobbered to odd address, rbx=1. Conclusion written to
+  `.opencode/JIT_B2B3A_FIX_TASK.md`: RIG frame unfaithful (pushed 3 regs
+  but scribbled sentinels over 5 MORE callee-saves and reserved zero
+  shadow space) — the EMITTER was byte-faithful to :1441-1448 and stayed
+  untouched. Probe edit reverted before dispatch.
+- FIX writer landed rig-only fix: rig now mirrors the real prologue
+  (8 pushes + subrsp(40) = the 影32+揃え8 portion of FRAME=152, cites
+  swp30_jit.cpp:817/:827/:828/:1691-1692 + Rust twins meg_jit.rs
+  :2168-2176/:2197-2205); every callee-save restored before ret.
+  Hammered the fragile rig 20/20 fresh ASLR spawns green.
+- Orchestrator gates IN-SESSION (all green): `make rust` + flat 9 exes;
+  `meg_jit 51/51` ×2, `jit 2/2`, `boot_golden 1/1`; piano 全部そろっている
+  (JIT 入切 合, 別糸 合); `PHASE_B2_EMIT_OK=false` (:80) disk-verified;
+  fnp==0 via b2b3a_build_inert. Full suite + samptest SKIPPED (user).
+- Bites logged: (1) test-rig ABI on this Win64 box is layout-fragile —
+  NEW exec rigs MUST mirror the full 8-push+subrsp(40) frame (NEXT
+  carries this); (2) cargo "Finished 0.03s" after an edit can mask a
+  stale test binary — re-hash/touch + rebuild before believing a gate;
+  (3) one piano run timed out at 20 min under contention from a killed
+  prior run, clean re-run 6.7 s — always re-run before believing a
+  render hang; (4) `--exact` filters need the full `mod::name` path.
+- Files: tests/meg_jit.rs 3314→3639 (writer + fix writer), meg_jit.rs
+  2031→2227 (B2b-3a writer), jit_emit.rs UNCHANGED (emitter gap ZERO,
+  6th slice). git dirty = rust/{jit_emit,meg_jit,tests/meg_jit}.rs +
+  user lib.rs MDBG (keep) + .opencode/ briefs B2B2A..B3B. src/ tests/
+  CLEAN. Nothing committed.
+- NEXT = B2b-3b k-loop stitch inside build() (hoist scan + per-op loop
+  + CHECK env leg, STILL inert) + full-program parity rigs vs
+  `meg::run_program` (`.opencode/JIT_B2B3B_TASK.md` written). Enablement
+  (mix.rs flip + PHASE_B2_EMIT_OK=true) = B2b-3c, separate slice,
+  standing byte-EQ gate list first.
+
+### 2026-10-04 — session S12e (M9b B2b-2e PAIRED: memop address leg incl revram/RAM-store/region-gate, gates green, still inert, zero emitter gaps; NEXT = B2b-3a LFO hoist dispatch)
+
+- Cold protocol: ledger IN FULL; user directive unchanged ("keep going"; skip
+  full suite incl samptest). 0 embedded commands executed.
+- B2b-2e dispatched as ONE fresh `general` writer (single prompt,
+  `.opencode/JIT_B2B2E_TASK.md`). Writer survived.
+- B2b-2e landed (writer, orchestrator re-gated IN-SESSION):
+  - `jit_emit.rs` UNCHANGED (emitter gap ZERO, 5th slice).
+  - `meg_jit.rs` +157 (1874→2031): `emit_memop_addr_base` (:1570-1578 ≡
+    :1593-1601), `emit_memop_addr` (:1593-1612 base−SC :1606, baked
+    addr_mask/addr_base :1610-1611, &0x3ffff :1612), `emit_memop_table`
+    (:1568-1586 abs read + jmp label), `emit_memop` (:1566-1638 block:
+    compile-time region gate :1589-1591 BIT-set=disabled meg.rs:1462 twin,
+    scale-2 write via `emit_revram_encode` `store16 [RAM+R8*2]`
+    :1623-1626, read via `emit_revram_decode` :1630-1632, patch
+    :1635-1636, 2-ring act byte :1637-1638).
+  - `tests/meg_jit.rs` +570 (2744→3314; 38→44 tests: addr-shape/gate byte
+    pins, exec rigs vs interpreter math incl −SC wrap, revram round-trip,
+    disabled-region inert path, `b2b2e_build_inert`).
+  - Writer pin lessons (pins corrected vs disk, never actual-copied):
+    `rm()` is ALWAYS disp32 (`8b 8a <disp32>`); `mov64(R8,·)` puts R8 in
+    REG field (`4c 8b c0`); `jmp_fwd` returns fall-through end; rigs must
+    park SC (R14) like prologue :833.
+  - Inertness disk-verified: `PHASE_B2_EMIT_OK=false` (:75), sole `fnp`
+    publish (:794) after gate (:777); exactly ONE `unimplemented!` left
+    (= LFO callout, B2b-3a target).
+- Orchestrator gates IN-SESSION (all green): `make rust` + flat 9 exes;
+  `meg_jit 44/44`, `jit 2/2`, `boot_golden 1/1`; piano 全部そろっている.
+  ⚠ Workdir trap re-struck ×2 (cargo from root; double-prefixed rg from
+  rust\) — both re-ran clean, no gate faked. Full suite + samptest SKIPPED.
+- Housekeeping: git dirty = rust jit_emit/meg_jit/tests + user lib.rs MDBG
+  (keep) + `.opencode/` (briefs B2B2A..3A). src/ tests/ CLEAN. No commits.
+- NEXT = B2b-3a LFO hoist + callout (`.opencode/JIT_B2B3A_TASK.md`
+  written); after it ONLY the op-loop stitch + enablement gate list.
+
+### 2026-10-04 — session S12d (M9b B2b-2d PAIRED: t/tval folded+branchy emitter legs, gates green, still inert; NEXT = B2b-2e memop-address dispatch)
+
+- Cold protocol: ledger IN FULL; user directive unchanged ("keep going"; skip
+  full suite incl samptest). 0 embedded commands executed.
+- B2b-2d dispatched as ONE fresh `general` writer (single prompt,
+  `.opencode/JIT_B2B2D_TASK.md`). Writer survived.
+- B2b-2d landed (writer, orchestrator re-gated IN-SESSION):
+  - `jit_emit.rs` UNCHANGED (emitter gap still ZERO, 4th slice running).
+  - `meg_jit.rs` +145 (1729→1874): `emit_t_leg` (:1530-1561 — t-write arms
+    :1533/:1535/:1537 incl. bake konst-imm32 arm, index form `>>8 &0x7fff`
+    :1543-1544 vs clamp form `>>23`+pair :1546-1557, publish
+    `store16 t_value[slot2]` :1560), `emit_t_branchy` (:1647-1675 — jump-op
+    t-write :1647-1653, five ring erasers :1655-1659 ix2_act via §7-B
+    window deref, always-clamp `need_tval` publish :1660-1674),
+    `emit_tval_clamp` (shared ±0x8000 cmp/cmov pair :1552-1557≡:1667-1672).
+  - `tests/meg_jit.rs` +540 (2204→2744; 32→38 tests: clamp/index byte
+    pins, bake/runtime arm select, exec rigs — index form == meg.rs:4129
+    w/ old-slot t-read + both d2 phases, clamp edges +0x8000→0x7fff /
+    −0x8001→−0x8000 / exact boundaries, branchy twin == folded clamp + 5
+    erasers live, `b2b2d_build_inert`).
+  - Writer test-iteration notes (emitter was right both times): `sar rax,8`
+    pin is shift-group `/7` (`48 c1 f8 08`); imm32-vs-movzx+disp32 length
+    claims only stable WITHIN a compile variant.
+  - Inertness disk-verified by orchestrator: `PHASE_B2_EMIT_OK=false`
+    (meg_jit.rs:70), sole `fnp` publish (:786) after gate return (:769-770).
+- Orchestrator gates IN-SESSION (all green): `make rust` + flat 9 exes;
+  `meg_jit 38/38`, `jit 2/2`, `boot_golden 1/1`; piano 全部そろっている
+  (JIT 入切 合, 別糸 合). ⚠ orchestrator slip: one cargo run fired from repo
+  root (no Cargo.toml) — workdir rust\ mandatory, re-ran clean. Full suite +
+  samptest SKIPPED (user directive). ws still owed by M9b closer.
+- Housekeeping: `git status` dirty = `rust/crates/smu-machine/src/
+  {jit_emit,meg_jit}.rs`, `rust/tests/meg_jit.rs` + user-uncommitted lib.rs
+  MDBG comments (keep) + `.opencode/` untracked (briefs B2B2A..E). src/
+  tests/ CLEAN. Nothing committed.
+- NEXT = B2b-2e memop address leg (`.opencode/JIT_B2B2E_TASK.md` written);
+  ONLY B2 piece after it = B2b-3 op-loop stitch (mix.rs :4444 wiring +
+  CHECK + byte-EQ gates before flipping PHASE_B2_EMIT_OK).
+
+### 2026-10-04 — session S12c (M9b B2b-2c PAIRED: memw-acc + ix2 index emitter legs, gates green, still inert; NEXT = B2b-2d t-leg dispatch)
+
+- Cold protocol: ledger IN FULL; user directive unchanged ("keep going" =
+  continue JIT optimization; skip full suite incl samptest). 0 embedded
+  commands executed; cited lines re-read from disk.
+- B2b-2b gate still green from prior in-session run (same session), so
+  B2b-2c dispatched directly as ONE fresh `general` writer with the single
+  prompt (`Read and follow exactly .opencode/JIT_B2B2C_TASK.md. Keep
+  PHASE_B2_EMIT_OK=false and fnp==0.`). Writer survived; no prefill guard trip.
+- B2b-2c landed (writer, orchestrator re-gated IN-SESSION):
+  - `jit_emit.rs` UNCHANGED (emitter gap still ZERO).
+  - `meg_jit.rs` +117 (1612→1729): `emit_acc_from_p` (:884), `emit_shr_acc`
+    (:885 `>>23`), `emit_shr_acc_tz15` (:886-889, == pack24 :845-849 first
+    five), `emit_memw_acc` (:1501-1509 value+act legs via AccFromP+
+    ShrAccTZ15), `emit_index_legs` (:1511-1525 index + §7-B ix2 window
+    derefs).
+  - `tests/meg_jit.rs` +406 (1798→2204; 27→32 tests: byte pins + 4 exec
+    rigs — AccFromP verbatim; ShrAccTZ15==`meg_mem_value` TZ and `!=`
+    arith `>>15` at p=−1; memw TZ-truncates, mid-k act byte suppressed;
+    index_value+ix2 deref==interpreter `>>23`, neighbor slots intact;
+    `b2b2c_build_inert`).
+  - No mix/lib/C++ changes. Inertness disk-re-verified by orchestrator:
+    `PHASE_B2_EMIT_OK=false` (meg_jit.rs:68), sole `fnp` publish (:782)
+    strictly after the gate return (:765-766).
+- Orchestrator gates IN-SESSION (all green): `make rust` green + flat 9 exes
+  refreshed; `meg_jit 32/32`, `jit 2/2`, `boot_golden 1/1`; piano harness
+  `SMU_BUILD=build-rust` 全部そろっている (JIT 入切 合, 別糸 合). Full suite +
+  samptest SKIPPED (user directive). ws still owed by M9b closer.
+- Bite for future briefs: writing gate COMMANDS into task briefs — use `;`
+  PATH separators, not `:` (pwsh `$env:PATH` interpolation glues entries
+  with a literal `:` and silently corrupts the first entry). Fixed in
+  B2B2D brief before dispatch.
+- Housekeeping: `git status` dirty = `rust/crates/smu-machine/src/
+  {jit_emit,meg_jit}.rs`, `rust/tests/meg_jit.rs` + user-uncommitted lib.rs
+  MDBG comments (keep) + `.opencode/` untracked (task briefs B2B2A/B/C/D).
+  src/ tests/ CLEAN. Nothing committed (user hasn't asked).
+- NEXT = B2b-2d t/tval legs (`.opencode/JIT_B2B2D_TASK.md` written); after
+  it the memop address leg (:1566-1638), then B2b-3 op-loop stitch.
+
+### 2026-10-04 — session S12b (M9b B2b-2b PAIRED: dm/dr + pack24/rnd/p_packed/lfo-slot emitter legs, gates green, still inert; NEXT = B2b-2c memw/index dispatch)
+
+- Cold protocol: ledger IN FULL; user directive unchanged ("keep going" =
+  continue JIT optimization; skip full suite incl samptest). 0 embedded
+  commands executed; cited lines re-read from disk.
+- B2b-2a gate still green from prior in-session run (same session, minutes
+  prior), so B2b-2b dispatched directly as ONE fresh `general` writer with the
+  single prompt (`Read and follow exactly .opencode/JIT_B2B2B_TASK.md. Keep
+  PHASE_B2_EMIT_OK=false and fnp==0.`). Writer survived; no prefill guard trip.
+- B2b-2b landed (writer, orchestrator re-gated IN-SESSION):
+  - `jit_emit.rs` UNCHANGED (zero new emitter methods needed — handoff §6
+    emitter-gap-ZERO claim held again).
+  - `meg_jit.rs` +182 (1430→1612): `emit_pack24` (:843-857), `emit_rnd`
+    (:859-864), `emit_rnd_skip` (:866-872, `rand_jump` via PAIRED
+    `meg::rand_jump`), `emit_p_packed` (:874-882, `&0x07e0`),
+    `emit_lfo_slot_store` (:988 hoist-store half; `emit_lfo`/callout stay
+    loud `unimplemented!` B2b-3 TODOs), `emit_dm_src` (:1414-1465 frame-slot
+    /ram_read/rnd-noise/p_packed/m[sm] legs), `emit_dm_store` (:1467-1475
+    early/last-slot/ring/`store8i mw_reg[slot3]` tail byte), `emit_dr_apply`
+    (:1480-1496 rand_n/r[sr] bank/p_packed/stores/`rw_reg` byte); `fm()`
+    made pub (:818).
+  - `tests/meg_jit.rs` +640 (1158→1798; 19→27 tests: byte pins + exec rigs
+    vs paired `meg_pack24`/`swp_rand`/`rand_skip`; `b2b2b_build_inert`).
+  - Writer caught one rig bug in-session: packed stub clobbered callee-saved
+    R13 without push/pop (S11-class lesson re-struck; parked via push/pop).
+  - No mix/lib/C++ changes. Inertness disk-re-verified by orchestrator:
+    `PHASE_B2_EMIT_OK=false` (meg_jit.rs:65), sole `fnp` publish (:777)
+    behind gate (:760).
+- Orchestrator gates IN-SESSION (all green): `make rust` green + flat 9 exes
+  refreshed; `meg_jit 27/27`, `jit 2/2`, `boot_golden 1/1`; piano harness
+  `SMU_BUILD=build-rust` 全部そろっている (piano 合 keyon 0 peak 2451 rms 360.3,
+  JIT 入切 合, 別糸 合) — fingerprint identical to the B2b-2a gate. Full suite +
+  samptest SKIPPED (user directive). ws still owed by M9b closer.
+- Housekeeping: `git status` dirty = `rust/crates/smu-machine/src/
+  {jit_emit,meg_jit}.rs`, `rust/tests/meg_jit.rs` + user-uncommitted lib.rs
+  MDBG comments (keep) + `.opencode/` untracked (task briefs B2B2A/B/C).
+  src/ tests/ CLEAN. Nothing committed (user hasn't asked).
+- NEXT = B2b-2c memw + ix2 index legs (`.opencode/JIT_B2B2C_TASK.md`
+  written); same single-fresh-writer dispatch pattern, same targeted gates.
+
+### 2026-10-04 — session S12 (M9b B2b-2a PAIRED: emitter + skip/ring helpers, gates green, still inert; NEXT = B2b-2b dm/dr dispatch)
+
+- Cold protocol: ledger IN FULL; user directive unchanged ("continue the JIT
+  optimizations; skip the full suite tests including samptest"). 0 embedded
+  commands executed; cited lines re-read from disk.
+- B2b-1 gate verified BEFORE dispatch (orchestrator): `make rust` green +
+  `meg_jit 13/13`, `jit 2/2`, `boot_golden 1/1`; `PHASE_B2_EMIT_OK=false`
+  (:58 pre-edit) + `if !PHASE_B2_EMIT_OK` guard (:743 pre-edit) disk-exact.
+- B2b-2a dispatched as ONE fresh `general` writer with the single prompt
+  (`Read and follow exactly .opencode/JIT_B2B2A_TASK.md. Keep
+  PHASE_B2_EMIT_OK=false and fnp==0.`). Writer survived; no prefill guard trip.
+- B2b-2a landed (writer, orchestrator re-gated IN-SESSION):
+  - `jit_emit.rs` +22 (634→656): `store16i` (`66 C7 /0 imm16`),
+    `cmp16i_mem` (`66 81 /7 imm16`) — additive only.
+  - `meg_jit.rs` +185/−24 (1279→1430): `emit_skip_reset` (C++ :839-840,
+    `MegSwpDev.skip: *mut u16` slot → RAX → `store16i [rax+0],0`; wired in
+    `emit_frame_skeleton` under `if branchy`), `emit_ring3_head`
+    (:1000-1029 scale-4 m/r stores + window-deref ix2 legs),
+    `emit_ring3_folded` (:1030-1048 early_m/early_r compile-time skip),
+    `emit_ring2_head` (:1050-1065 apply + act clear `store8i 0`),
+    `emit_ring2_folded` (:1066-1077 memw / memop∈{2,3} memr legs).
+  - `tests/meg_jit.rs` +394 (786→1158; 13→19 tests: emitter byte-pins,
+    skeleton/fold shape, skip-reset exec rig, ring3-head exec rig,
+    ring-folded exec rig, `b2b2a_build_inert`).
+  - No mix/lib/C++ changes. Inertness disk-re-verified by orchestrator:
+    `PHASE_B2_EMIT_OK=false` (meg_jit.rs:62), sole `fnp` publish (:771)
+    behind gate (:754).
+- Orchestrator gates IN-SESSION (all green): `make rust` green + flat 9 exes
+  refreshed; `meg_jit 19/19`, `jit 2/2`, `boot_golden 1/1`; piano harness
+  `SMU_BUILD=build-rust` 全部そろっている (piano 合 keyon 0 peak 2451 rms 360.3,
+  JIT 入切 合, 別糸 合, statetest 戻し一致). Full suite + samptest SKIPPED
+  (user directive). ws still owed by M9b closer (562 baseline predates JIT).
+- Housekeeping: removed writer debris `rust\err.txt`/`rust\out.txt` (stale
+  S10 PCDBG/JITDBG instrumentation dumps). `git status` at close: dirty =
+  `rust/crates/smu-machine/src/{jit_emit,meg_jit}.rs`, `rust/tests/meg_jit.rs`
+  + user-uncommitted lib.rs MDBG comments (keep) + ledger/task files
+  untracked. src/ tests/ CLEAN. Nothing committed (user hasn't asked).
+- NEXT = B2b-2b dm/dr emitter legs (`.opencode/JIT_B2B2B_TASK.md` written);
+  same single-fresh-writer dispatch pattern, same targeted gates.
 
 ### 2026-10-04 — session S11 (M9 SH-2 JIT **PAIRED**: 3 root causes fixed (missing 2nd deref in the ctx chain / R14-R15 clobber / sign-flipped clock), instrumentation stripped, gates green in-session, live CPU 63→44%; M9b MEG JIT = NEXT)
 
