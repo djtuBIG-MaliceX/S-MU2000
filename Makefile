@@ -244,7 +244,10 @@ rust:
 
 SRCS := \
 	src/compat/compat.cpp \
+	src/sampling.cpp \
 	src/smartmedia.cpp \
+	src/card_fs.cpp \
+	src/m2a.cpp \
 	src/mame/sound/swp30.cpp \
 	src/mame/sound/swp30_jit.cpp \
 	src/mame/video/hd44780.cpp \
@@ -347,6 +350,11 @@ $(BUILD)/samptest$(EXE): $(OBJS) $(BUILD)/src/mu2000.o $(BUILD)/src/samptest.o
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
 
+# smpre はサンプリングの管理情報を探す解析用の道具（all には入れない）
+$(BUILD)/smpre$(EXE): $(OBJS) $(BUILD)/src/mu2000.o $(BUILD)/src/smpre.o
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+
 # statetest は状態の保存と復元が正しいかを確かめる
 $(BUILD)/statetest$(EXE): $(OBJS) $(BUILD)/src/mu2000.o $(BUILD)/src/smf.o $(BUILD)/src/statetest.o
 	@mkdir -p $(dir $@)
@@ -381,7 +389,7 @@ IMGUI_FLAGS += -DIMGUI_IMPL_WIN32_DISABLE_GAMEPAD
 IMGUI_SRCS := $(IMGUI_CORE) \
               $(IMGUI_DIR)/backends/imgui_impl_win32.cpp \
               $(IMGUI_DIR)/backends/imgui_impl_dx11.cpp
-PC_SRCS    := src/ui/pc_editor.cpp src/ui/pc_window.cpp src/ui/xg_ui.cpp src/ui/overview.cpp src/ui/fx_editor.cpp src/ui/fx_help.cpp src/ui/part_shapes.cpp src/ui/master_editor.cpp src/ui/fx_icons.cpp
+PC_SRCS    := src/ui/pc_editor.cpp src/ui/pc_window.cpp src/ui/xg_ui.cpp src/ui/overview.cpp src/ui/fx_editor.cpp src/ui/fx_help.cpp src/ui/part_shapes.cpp src/ui/master_editor.cpp src/ui/sampling_editor.cpp src/ui/fx_icons.cpp
 PC_OBJS    := $(IMGUI_SRCS:%.cpp=$(BUILD)/imgui/%.o) $(PC_SRCS:%.cpp=$(BUILD)/imgui/%.o)
 
 # gui は実機のフロントパネル風の画面を出す
@@ -613,10 +621,13 @@ $(BUILD)/imgui/%.o: %.cpp
 
 IMGUI_OBJS := $(IMGUI_CORE:%.cpp=$(BUILD)/imgui/%.o)
 
-# Dear ImGui SDL3 backends for the PC editor windows.
+# Dear ImGui SDL3 backends: the platform one plus SDL_gpu as the renderer.
 # Vendored unmodified from the matching ImGui release, like the rest.
+# Upstream prefers SDL_gpu over SDL_Renderer where both exist
+# (docs/BACKENDS.md), which is also what keeps the LCD's per-frame texture
+# upload off the CPU blitter.
 IMGUI_SDL_BACKENDS := third_party/imgui/backends/imgui_impl_sdl3.cpp \
-                      third_party/imgui/backends/imgui_impl_sdlrenderer3.cpp
+                      third_party/imgui/backends/imgui_impl_sdlgpu3.cpp
 IMGUI_SDL_OBJS := $(IMGUI_SDL_BACKENDS:%.cpp=$(BUILD)/imgui/%.o)
 
 LINUX_GUI_SRCS := src/ui/panel.cpp src/ui/layout.cpp src/ui/svg.cpp \
@@ -628,7 +639,7 @@ LINUX_GUI_SRCS := src/ui/panel.cpp src/ui/layout.cpp src/ui/svg.cpp \
                   src/ui/app_linux.cpp \
                   src/ui/pc_window_linux.cpp \
                   src/ui/pc_editor.cpp src/ui/overview.cpp src/ui/fx_editor.cpp \
-                  src/ui/part_shapes.cpp src/ui/master_editor.cpp
+                  src/ui/part_shapes.cpp src/ui/master_editor.cpp src/ui/sampling_editor.cpp
 LINUX_GUI_OBJS := $(LINUX_GUI_SRCS:%.cpp=$(BUILD)/guiobj/%.o)
 
 $(BUILD)/guiobj/%.o: %.cpp
@@ -804,7 +815,7 @@ MAC_IMGUI_SRCS := $(IMGUI_CORE) \
                   $(IMGUI_DIR)/backends/imgui_impl_metal.mm
 MAC_PC_SRCS    := src/ui/pc_editor.cpp src/ui/pc_window_mac.mm src/ui/xg_ui.cpp \
                   src/ui/overview.cpp src/ui/fx_editor.cpp src/ui/fx_help.cpp src/ui/part_shapes.cpp \
-                  src/ui/master_editor.cpp src/ui/fx_icons.cpp
+                  src/ui/master_editor.cpp src/ui/sampling_editor.cpp src/ui/fx_icons.cpp
 MAC_PC_OBJS    := $(MAC_IMGUI_SRCS) $(MAC_PC_SRCS)
 MAC_PC_OBJS    := $(MAC_PC_OBJS:%.cpp=$(BUILD)/imgui/%.o)
 MAC_PC_OBJS    := $(MAC_PC_OBJS:%.mm=$(BUILD)/imgui/%.o)

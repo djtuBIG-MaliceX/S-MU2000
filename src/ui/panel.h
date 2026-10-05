@@ -227,6 +227,7 @@ private:
 	void draw_wheel(ImDrawList *dl, int angle) const;
 	void draw_volume(ImDrawList *dl, double v) const;
 	void draw_adgain(ImDrawList *dl) const;
+	void draw_card(ImDrawList *dl) const;   // 差さっている SmartMedia の縁
 	void draw_tabs(ImDrawList *dl) const;
 	void draw_knob(ImDrawList *dl, const spot &sp) const;
 	void draw_list(ImDrawList *dl, const spot &sp) const;

@@ -2,9 +2,14 @@
 //
 // Write just the panel picture, with no window. Used to check the looks.
 //
-// Headless through the shared renderer plumbing (ui/imgui_shell.h): SDL3
-// software blits where SDL exists (Linux, macOS), a WARP device on
-// Windows. One copy keeps --shot identical on all three.
+// Headless through the shared renderer plumbing: a WARP device on Windows,
+// Metal on macOS, SDL_gpu on Linux. One copy keeps --shot the same picture
+// on all three.
+//
+// SDL_gpu has no SDL_RenderReadPixels, and a swapchain texture cannot be
+// read (it is write-only, and not ours to keep), so the Linux branch draws
+// into an offscreen colour texture it owns and reads that back with
+// SDL_DownloadFromGPUTexture -- see imshell::sdl_read_pixels.
 
 #ifndef S_MU2000_UI_SHOT_H
 #define S_MU2000_UI_SHOT_H
@@ -151,31 +156,43 @@ inline int write_shot(const std::string &path, int w, int h, bridge &br,
 #elif defined(__APPLE__)
 	drew = write_shot_metal(w, h, bgra, grid, lcd_only, layout_path, br) != 0;
 #else
-	imshell::sdl_state st{};
-	if (SDL_Init(SDL_INIT_VIDEO)) {
+	// Linux, through SDL_gpu. The picture is drawn into an offscreen colour
+	// texture and read back with SDL_DownloadFromGPUTexture -- see
+	// imshell::sdl_read_pixels, which is the stand-in for the
+	// SDL_RenderReadPixels this platform used to have.
+	if (SDL_Init(SDL_INIT_VIDEO) && imshell::gpu_device()) {
+		// A window is still needed: imgui_impl_sdl3 is a platform backend and
+		// wants one to take input and display size from. Hidden, and never
+		// shown -- everything after this is offscreen.
 		SDL_Window *win = SDL_CreateWindow("shot", w, h, SDL_WINDOW_HIDDEN);
-		SDL_Renderer *ren = win ? SDL_CreateRenderer(win, "software") : nullptr;
-		if (ren && imshell::sdl_start(st, win, ren)) {
-			// outlives Render(), which happens inside sdl_present
+		imshell::sdl_state st{};
+		std::vector<std::uint8_t> got;
+		if (win && imshell::sdl_start(st, win)) {
+			// outlives Render(), which happens inside sdl_read_pixels
 			shot_detail::rig rig;
 			imshell::sdl_begin(st);
 			shot_frame(rig, ImGui::GetBackgroundDrawList(), st.fonts, w, h,
 			           grid, lcd_only, layout_path, br);
-			imshell::sdl_present(ren);
-			if (SDL_Surface *got = SDL_RenderReadPixels(ren, nullptr)) {
-				if (got->w == w && got->h == h && got->pitch == w * 4) {
-					drew = bool(SDL_ConvertPixels(w, h, got->format, got->pixels,
-					                              got->pitch, SDL_PIXELFORMAT_ARGB8888,
-					                              bgra.data(), w * 4));
+			drew = imshell::sdl_read_pixels(st, w, h, got);
+			// The readback is in the swapchain's own format. write_png() wants
+			// BGRA, so a swapchain that hands back RGBA has to be swapped here
+			// (the WARP path above has to as well: a DIB is not BGRA either).
+			if (drew && st.color_format != SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM) {
+				for (size_t i = 0, n = got.size(); i < n; i += 4) {
+					const std::uint8_t r = got[i + 0];
+					got[i + 0] = got[i + 2];
+					got[i + 2] = r;
 				}
-				SDL_DestroySurface(got);
 			}
+			bgra = std::move(got);
+			if (!drew)
+				std::fprintf(stderr, "絵を GPU から読めない: %s\n", SDL_GetError());
 			imshell::sdl_stop(st);
 		} else {
 			std::fprintf(stderr, "画面を作れない: %s\n", SDL_GetError());
 		}
-		if (ren) SDL_DestroyRenderer(ren);
 		if (win) SDL_DestroyWindow(win);
+		imshell::gpu_device_release();
 		SDL_Quit();
 	} else {
 		std::fprintf(stderr, "画面を作れない: %s\n", SDL_GetError());

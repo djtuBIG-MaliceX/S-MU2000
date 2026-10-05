@@ -144,6 +144,7 @@ bool audio_out::start(int latency_ms, fill_fn fill, std::string &err, bool exclu
 	m_slack_min.store(~u64(0));
 	m_queue_sum.store(0); m_queue_n.store(0); m_queue_worst.store(0);
 	m_inflight_sum.store(0); m_inflight_n.store(0); m_inflight_worst.store(0);
+	m_cpu_meter.reset();
 
 	m_want_dev = device;
 	m_start_state.store(0);
@@ -669,6 +670,8 @@ void audio_out::run(int latency_ms, bool want_exclusive)
 
 			const u64 took = u64(t1.QuadPart - t0.QuadPart);
 			m_busy_ticks.fetch_add(took);
+			m_cpu_meter.add(double(took) / double(m_qpc_freq),
+			                double(want) / double(dev_rate));
 			if (took > m_worst_ticks.load())
 				m_worst_ticks.store(took);
 			m_produced.fetch_add(want);

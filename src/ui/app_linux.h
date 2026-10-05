@@ -48,8 +48,11 @@ public:
 	// ---- the SDL window the pump in gui_linux.cpp maintains
 
 	SDL_Window   *win = nullptr;      // for dialogs, message boxes and popups
-	SDL_Renderer *ren = nullptr;
 	int           ww = 0, wh = 0;
+	// No renderer member: the window draws through SDL_gpu, and the state
+	// that needs (device, swapchain) lives with the window pump in
+	// window_sdl.cpp. This class only ever handed `ren` to the popup menu,
+	// which now presents through imshell::sdl_present().
 	// Live ImGui state for the main window, set by run_window.
 	// run_list's menu draws through the same frame.
 	ImGuiContext *imgui_ctx = nullptr;

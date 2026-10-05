@@ -32,6 +32,7 @@
 #pragma once
 
 #include "compat/mamecompat.h"
+#include "cpu_meter.h"
 
 #include <atomic>
 #include <functional>
@@ -116,7 +117,10 @@ public:
 	// The CoreAudio render callback already runs at real-time priority, so this
 	// is the counterpart of registering with MMCSS on Windows
 	bool mmcss() const;
+	// Average since start (for the closing summary) and the recent load (for the
+	// display, one cpu_meter window at a time; issue #80)
 	double cpu_percent() const;
+	double cpu_recent() const;
 	double worst_ms() const;
 
 private:
@@ -168,7 +172,9 @@ public:
 	bool mmcss() const        { return m_mmcss.load(); }
 	bool running() const      { return m_running.load(); }
 	std::string error() const { return m_err; }
+	// 起動してからの平均（終わりの集計用）と、直近の重さ（画面の表示用。cpu_meter の窓ごと、issue #80）
 	double cpu_percent() const;
+	double cpu_recent() const { return m_cpu_meter.value(); }
 	double worst_ms() const;
 
 	// デバイスが言ってきた形式。開いた後に読む
@@ -219,6 +225,7 @@ private:
 	std::atomic<u64> m_produced{0}, m_late{0};
 	std::atomic<u64> m_slack_min{~u64(0)};
 	std::atomic<u64> m_busy_ticks{0}, m_worst_ticks{0};
+	cpu_meter        m_cpu_meter;   // 直近の重さ（音の時間で窓を切る）
 	std::atomic<bool> m_mmcss{false};
 	// 立ち上がりの首尾。**メンバに置くこと。** スレッドは run() を抜けた後に
 	// ここへ書くので、start() のローカルに置くと宙ぶらりんの参照になる

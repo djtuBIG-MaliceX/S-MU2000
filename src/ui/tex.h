@@ -8,10 +8,10 @@
 // The ownership dance is ImGui 1.92's, not ours: an ImTextureData is created
 // here, filled, and registered with the current context, and the renderer
 // backend uploads it during the next Render(). So nothing in this header
-// knows about DX11, Metal or SDL_Renderer, which is what lets svg.cpp stay
+// knows about DX11, Metal or SDL_gpu, which is what lets svg.cpp stay
 // platform free.
 //
-// **α はかけていない値**（straight alpha）が要る。DX11 / Metal / SDLRenderer
+// **α はかけていない値**（straight alpha）が要る。DX11 / Metal / SDL_gpu
 // の三つとも SRC_ALPHA 合成で、パネルの絵は半透明の縁を持つので、α を
 // かけたまま渡すと縁が濃く出る。
 //

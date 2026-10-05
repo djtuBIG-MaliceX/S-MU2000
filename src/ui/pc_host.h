@@ -41,7 +41,7 @@ namespace ui {
 // the editors keep theirs to themselves.
 template <typename Window, typename Open>
 inline void pc_frame_all(Window &list, Window &editor, Window &fx, Window &shapes, Window &master,
-                         xg::model &m, const xg_snapshot &ram, bridge &br, Open open)
+                         Window &sampling, xg::model &m, const xg_snapshot &ram, bridge &br, Open open)
 {
 	ImGuiContext *const panel_ctx = ImGui::GetCurrentContext();
 	list.frame(m, ram, br);
@@ -49,6 +49,7 @@ inline void pc_frame_all(Window &list, Window &editor, Window &fx, Window &shape
 	fx.frame(m, ram, br);
 	shapes.frame(m, ram, br);
 	master.frame(m, ram, br);
+	sampling.frame(m, ram, br);
 	// A double-click on an insertion row in the overview asks for the
 	// settings window; on a VIB/FILTER/EG/EQ cell for the part voice window;
 	// on the MASTER name or MASTER EQ cell for the master window
@@ -65,7 +66,7 @@ inline void pc_frame_all(Window &list, Window &editor, Window &fx, Window &shape
 // the editor releases held buttons, and so on)
 template <typename Window>
 inline void pc_shutdown_all(Window &list, Window &editor, Window &fx, Window &shapes, Window &master,
-                            bridge &br)
+                            Window &sampling, bridge &br)
 {
 	// Same reason as pc_frame_all: destroy() switches the context on its way
 	// out, and the panel's frame is open around this on the way down too
@@ -75,6 +76,7 @@ inline void pc_shutdown_all(Window &list, Window &editor, Window &fx, Window &sh
 	fx.shutdown(br);
 	shapes.shutdown(br);
 	master.shutdown(br);
+	sampling.shutdown(br);
 	ImGui::SetCurrentContext(panel_ctx);
 }
 

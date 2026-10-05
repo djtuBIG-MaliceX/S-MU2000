@@ -19,6 +19,7 @@
 #include <SDL3/SDL.h>
 
 #include "ui/draw_imgui.h"
+#include "ui/imgui_shell_sdl.h"     // imshell::sdl_state, the SDL_gpu window
 
 #include "imgui.h"
 
@@ -44,7 +45,7 @@ struct item {
 // via sub_chosen, or -1. behind() paints the live panel into the current
 // frame's background list; this draws the dim + box + rows on top and
 // presents. quit is set when the window closes underneath.
-int run(SDL_Window *win, SDL_Renderer *ren, ImGuiContext *ctx,
+int run(SDL_Window *win, imshell::sdl_state &st, ImGuiContext *ctx,
         const im::fonts &fonts, int ww, int wh,
         std::function<void(ImDrawList *)> behind, std::atomic<bool> &quit,
         const std::vector<item> &items, int x, int y, int &sub_chosen);

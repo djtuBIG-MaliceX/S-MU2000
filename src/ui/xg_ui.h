@@ -172,9 +172,17 @@ void set_file_dialogs(bool on);
 bool file_dialogs();
 void ask_save_file(std::vector<u8> bytes);          // 書き出す中身を渡して、名前を聞いてもらう
 void ask_open_file();                               // 読み込むファイルを聞いてもらう
+void ask_open_wav();                                // 同じく WAV（サンプリングの窓）
+bool file_ask_is_wav();                             // 持ち主が、今の頼みが WAV かを見る（take_file_ask の前に）
 file_ask take_file_ask(std::vector<u8> &bytes);     // 持ち主が取る（save のときは中身も）
 void give_opened_file(std::vector<u8> bytes);       // 持ち主が、読んだ中身を返す
 bool take_opened_file(std::vector<u8> &bytes);      // 頼んだ側が受け取る（1 回だけ）
+bool take_opened_wav(std::vector<u8> &bytes);       // WAV を頼んだ側が受け取る
+// SmartMedia の画像（サンプリングの窓の「カード」）。中身は読まず、選ばれた場所（UTF-8）だけを返す
+void ask_open_card();
+bool file_ask_is_card();                            // 持ち主が、今の頼みがカードかを見る（take_file_ask の前に）
+void give_opened_card(const std::string &path);     // 持ち主が、選ばれた場所を返す
+bool take_opened_card(std::string &path);           // 頼んだ側が受け取る（1 回だけ）
 void set_file_note(std::string text);               // 結果のひとこと（「書き出した」など）
 const std::string &file_note();
 

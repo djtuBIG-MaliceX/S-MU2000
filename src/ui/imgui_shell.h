@@ -64,7 +64,7 @@ inline im::fonts panel_fonts()
 {
 	im::fonts f{};
 	const float em = cjk_face_em(false);
-	f.label = f.small = f.tiny = add_cjk_font(ImGui::GetIO().Fonts, 16.0f * em);
+	f.label = f.small = f.tiny = add_cjk_ui_font(ImGui::GetIO().Fonts, 16.0f * em);
 	f.label_px = 13.0f * em;
 	f.small_px = 8.5f * em;
 	f.tiny_px = 6.5f * em;

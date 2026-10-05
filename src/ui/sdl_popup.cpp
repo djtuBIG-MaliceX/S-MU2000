@@ -3,6 +3,8 @@
 #include "sdl_popup.h"
 
 #include "ui/imgui_shell_sdl.h"
+#include "ui/rom_locate.h"
+#include "ui/texts.h"
 
 #include <algorithm>
 #include <memory>
@@ -96,13 +98,13 @@ int message_box(SDL_Window *win, const char *title, const char *text,
 
 // The menu through an ImDrawList. Same geometry, colors, hit-testing,
 // keyboard and cancel semantics on every platform.
-int run(SDL_Window *win, SDL_Renderer *ren, ImGuiContext *ctx,
+int run(SDL_Window *win, imshell::sdl_state &st, ImGuiContext *ctx,
               const im::fonts &fonts, int ww, int wh,
               std::function<void(ImDrawList *)> behind, std::atomic<bool> &quit,
               const std::vector<item> &items, int x, int y, int &sub_chosen)
 {
 	sub_chosen = -1;
-	if (!ctx || !ren)
+	if (!ctx || !st.ctx)
 		return -1;
 	ImGui::SetCurrentContext(ctx);
 
@@ -181,7 +183,7 @@ int run(SDL_Window *win, SDL_Renderer *ren, ImGuiContext *ctx,
 				    ImVec2(float(x + PAD_X + 2), float(ry + ROW_H / 2 - 4)),
 				    ImVec2(float(x + PAD_X + 10), float(ry + ROW_H / 2 + 4)), col_check);
 		}
-		imshell::sdl_present(ren);
+		imshell::sdl_present(st, win);
 	};
 	auto at = [&](int mx, int my) {
 		if (mx < x || mx >= x + mw || my < y)
@@ -297,4 +299,31 @@ bool confirm(SDL_Window *win, const char *title, const std::string &text,
 }
 
 } // namespace sdl_popup
+
+// ROM の場所なしで起動したとき（ui/rom_locate.h）。窓はまだ無いので、SDL の映像だけ起こして
+// 案内のメッセージと、フォルダを選ぶ窓（xdg-desktop-portal か zenity。無ければ選べない）を出す
+bool ask_roms_folder(const std::string &message, std::string &picked)
+{
+	if (!SDL_Init(SDL_INIT_VIDEO))
+		return false;
+	const SDL_MessageBoxButtonData buttons[] = {
+		{ SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 0, UI_TEXT(dlg_roms_quit, "Quit") },
+		{ SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 1, UI_TEXT(dlg_roms_pick, "Select ROM folder...") },
+	};
+	if (sdl_popup::message_box(nullptr, "S-MU2000", message.c_str(), SDL_MESSAGEBOX_INFORMATION,
+	                           { buttons[0], buttons[1] }) != 1)
+		return false;
+	auto *held = new std::shared_ptr<sdl_popup::dialog_state>(std::make_shared<sdl_popup::dialog_state>());
+	std::shared_ptr<sdl_popup::dialog_state> st = *held;
+	SDL_ShowOpenFolderDialog(sdl_popup::dialog_done, held, nullptr, nullptr, false);
+	while (!st->done.load()) {
+		SDL_Event ev;
+		if (SDL_WaitEventTimeout(&ev, 50) && ev.type == SDL_EVENT_QUIT)
+			return false;
+	}
+	std::lock_guard<std::mutex> hold(st->mutex);
+	picked = st->path;
+	return !picked.empty();
+}
+
 } // namespace ui

@@ -18,6 +18,7 @@
 
 #include "ui/fx_editor.h"
 #include "ui/master_editor.h"
+#include "ui/sampling_editor.h"
 #include "ui/keymap.h"
 #include "ui/keymap_win.h"
 #include "ui/menu.h"
@@ -109,7 +110,7 @@ public:
 	void pc_frame(::xg::model &m, const ::ui::xg_snapshot &ram, ::ui::bridge &br) override;
 	void open_pc_window(int kind) override
 	{
-		open_pc(*pc_window_for_kind(kind, m_list, m_editor, m_fx, m_shapes, m_master));
+		open_pc(*pc_window_for_kind(kind, m_list, m_editor, m_fx, m_shapes, m_master, m_sampling));
 	}
 
 private:
@@ -134,6 +135,7 @@ private:
 	ui::pc_window m_fx{ std::make_unique<ui::fx_editor>() };
 	ui::pc_window m_shapes{ std::make_unique<ui::part_shapes>() };
 	ui::pc_window m_master{ std::make_unique<ui::master_editor>() };
+	ui::pc_window m_sampling{ std::make_unique<ui::sampling_editor>() };
 };
 
 bool win_window::attach(void *parent, int w, int h)
@@ -282,7 +284,7 @@ void win_window::open_pc(ui::pc_window &w)
 // パネルを描き直すのと同じ周期で呼ばれる。見えていない窓は何もしない
 void win_window::pc_frame(::xg::model &m, const ::ui::xg_snapshot &ram, ::ui::bridge &br)
 {
-	ui::pc_frame_all(m_list, m_editor, m_fx, m_shapes, m_master, m, ram, br,
+	ui::pc_frame_all(m_list, m_editor, m_fx, m_shapes, m_master, m_sampling, m, ram, br,
 	                 [this](ui::pc_window &w) { open_pc(w); });
 }
 

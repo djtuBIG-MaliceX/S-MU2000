@@ -45,7 +45,10 @@ plug_key plug_key_of_button(int button);
 class plug_view : public Steinberg::IPlugView
 {
 public:
-	explicit plug_view(engine &eng);
+	// owner は engine を持つプラグイン本体（VST3 の IEditController）。画面が生きている間は参照を
+	// 1 つ持って、本体（と engine）を先に消させない。ホストが画面より先に本体を手放しても、
+	// 画面のタイマーや removed() が消えた engine に触らないように（VST2 は自分で順番を守るので null）
+	explicit plug_view(engine &eng, Steinberg::FUnknown *owner = nullptr);
 	virtual ~plug_view();
 
 	// ---- FUnknown
@@ -113,6 +116,7 @@ private:
 	std::unique_ptr<impl> m_impl;
 
 	engine &m_engine;
+	Steinberg::FUnknown *m_owner = nullptr;   // 参照を持っているプラグイン本体
 	plug_window *m_window = nullptr;
 
 	// When the card was last written back, in milliseconds

@@ -90,6 +90,7 @@ enum : int {
 	ID_CARD_NEW16 = 5000, ID_CARD_NEW32, ID_CARD_NEW64, ID_CARD_NEW128,
 	ID_CARD_OPEN = 5010, ID_CARD_EJECT = 5011,
 	ID_PLAY_FILE = 5100, ID_STOP_FILE = 5101, ID_PORTS34_FOLD = 5102, ID_PORTS34_DROP = 5103,
+	ID_THIN_BENDS = 5104,    // the player lightens heavy MIDI (issue #82)
 	ID_FACTORY = 5200,
 	ID_NATIVE_FX = 5215,     // lightweight mode (C++ effects)
 	ID_NATIVE_ENGINE = 5216, // firmware を走らせない口（聞き比べ用）
@@ -113,7 +114,7 @@ static_assert([] {
 	                        ID_CARD_NEW128, ID_CARD_OPEN, ID_CARD_EJECT,
 	                        ID_PLAY_FILE, ID_STOP_FILE, ID_FACTORY, ID_NATIVE_FX,
 	                        ID_NATIVE_ENGINE,
-	                        ID_PORTS34_FOLD, ID_PORTS34_DROP, ID_PC_EDITOR, ID_OVERVIEW,
+	                        ID_PORTS34_FOLD, ID_PORTS34_DROP, ID_THIN_BENDS, ID_PC_EDITOR, ID_OVERVIEW,
 	                        ID_OUTPUT_DIGITAL, ID_OUTPUT_ANALOG, ID_AUDIO_DEFAULT };
 	for (int base : bases) {
 		for (int id : singles)
@@ -156,6 +157,7 @@ struct menu_state {
 	bool playing = false;
 	std::string play_name;
 	bool fold34 = true;      // ports 3+4 of a MIDI file fold onto A and B
+	bool thin_bends = false; // the player lightens heavy MIDI (bends, Roland display data)
 	bool ready = false;      // the firmware is up (factory reset is offered)
 	bool native_fx = false;  // lightweight C++ effects are on
 	bool native_engine = false;  // skip-firmware ports, toggled live for listening tests
@@ -335,6 +337,9 @@ inline std::vector<menu_group> menu_card(const menu_state &s)
 	g.items.push_back(separator());
 	g.items.push_back(text(UI_TEXT(menu_fold34, "Fold ports 3+4 onto A and B (DIN ports only)"), ID_PORTS34_FOLD, s.fold34, true));
 	g.items.push_back(text(UI_TEXT(menu_drop34, "Drop ports 3+4 (DIN ports only)"), ID_PORTS34_DROP, !s.fold34, true));
+	// Dense pitch bends (more than the firmware works through in real time)
+	g.items.push_back(separator());
+	g.items.push_back(text(UI_TEXT(menu_thin_bends, "Lighten heavy MIDI: thin pitch bends, drop Roland display data (unlike the real unit)"), ID_THIN_BENDS, s.thin_bends, true));
 	groups.push_back(g);
 	return groups;
 }

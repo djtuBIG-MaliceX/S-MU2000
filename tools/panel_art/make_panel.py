@@ -984,6 +984,9 @@ def panel_txt():
     L.append(f'dial   {LX(DIAL[0])} {LY(DIAL[1])} {LS(DIAL[2])} "dial.png"')
     L.append("")
     L.append(f"card   {LX(160)} {LY(598)} {LS(305)} {LS(72)}")
+    # the slot opening drawn in the channel above (rect 169, 642, 288 x 21);
+    # the panel draws the edge of an inserted card there
+    L.append(f"card.slot {LX(169)} {LY(642)} {LS(288)} {LS(21)}")
     L.append(f"adin   {LX(135)} {LY(150)} {LS(95)} {LS(230)}")
     L.append(f"phones {LX(400)} {LY(470)} {LS(70)} {LS(70)}")
     L.append("")

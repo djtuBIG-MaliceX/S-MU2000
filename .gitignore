@@ -21,3 +21,5 @@ snap/
 __pycache__/
 # MIDI files may come with incompatible licenses; keep them local
 *.mid
+# フォントの実体。fc_match_probe.sh の検証用なので追跡しない
+fonts/

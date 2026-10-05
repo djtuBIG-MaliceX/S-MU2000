@@ -2,7 +2,7 @@
 //
 // The panel drawing surface on Dear ImGui: the windows paint through the
 // same ImGui renderer the PC editor windows use on every platform
-// (DX11 on Windows, Metal on macOS, SDL_Renderer on Linux).
+// (DX11 on Windows, Metal on macOS, SDL_gpu on Linux).
 //
 // Panel palette first (the same names and packing panel.txt uses), then the
 // primitives one by one, painting into an ImDrawList. What this mapping

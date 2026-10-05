@@ -267,6 +267,7 @@ struct audio_out::impl
 	std::atomic<u32>  buffer_frames{0};
 	std::atomic<u64>  produced{0}, starved{0};
 	std::atomic<u64>  busy_ticks{0}, worst_ticks{0};
+	cpu_meter         meter;        // recent load for the display (issue #80)
 	std::atomic<bool> realtime{false};
 	double            tps = 1.0;
 
@@ -321,6 +322,7 @@ struct audio_out::impl
 
 		const u64 took = mach_absolute_time() - t0;
 		busy_ticks.fetch_add(took, std::memory_order_relaxed);
+		meter.add(double(took) / tps, double(frames) / AUDIO_RATE);
 		u64 worst = worst_ticks.load(std::memory_order_relaxed);
 		while (took > worst &&
 		       !worst_ticks.compare_exchange_weak(worst, took, std::memory_order_relaxed)) {
@@ -570,6 +572,11 @@ double audio_out::cpu_percent() const
 	const double audio = double(done) / AUDIO_RATE;
 	const double busy  = double(m_impl->busy_ticks.load()) / m_impl->tps;
 	return 100.0 * busy / audio;
+}
+
+double audio_out::cpu_recent() const
+{
+	return m_impl ? m_impl->meter.value() : 0.0;
 }
 
 double audio_out::worst_ms() const

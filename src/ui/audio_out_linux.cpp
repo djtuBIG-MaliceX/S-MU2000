@@ -144,6 +144,7 @@ struct audio_out::impl
 	std::atomic<u32>  buffer_frames{0};
 	std::atomic<u64>  produced{0}, starved{0};
 	std::atomic<double> busy_sec{0.0}, worst_sec{0.0};
+	cpu_meter         meter;        // 画面に出す直近の重さ（issue #80）
 	std::atomic<bool> realtime{false};
 
 	std::vector<s16> block;        // 1 回ぶんの作り置き（スレッドだけが触る）
@@ -166,6 +167,7 @@ struct audio_out::impl
 				cap->insert(cap->end(), block.begin(), block.begin() + size_t(period) * 2);
 			const double took = now_sec() - t0;
 			busy_sec.store(busy_sec.load() + took);
+			meter.add(took, double(period) / AUDIO_RATE);
 			if (took > worst_sec.load())
 				worst_sec.store(took);
 
@@ -371,6 +373,11 @@ double audio_out::cpu_percent() const
 		return 0.0;
 	const double audio = double(done) / AUDIO_RATE;
 	return 100.0 * m_impl->busy_sec.load() / audio;
+}
+
+double audio_out::cpu_recent() const
+{
+	return m_impl ? m_impl->meter.value() : 0.0;
 }
 
 double audio_out::worst_ms() const

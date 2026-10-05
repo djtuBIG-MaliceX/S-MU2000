@@ -14,8 +14,11 @@
 
 #include "imgui.h"
 
+#include "ui/lang.h"      // get_lang(), so an English UI skips the merge below
+
 #include <cstddef>
 #include <cstdio>
+#include <cstring>
 #include <functional>
 #include <string>
 #include <vector>
@@ -383,23 +386,116 @@ inline void cjk_offers(bool bold, std::vector<face_offer> &out)
 
 #include <fontconfig/fontconfig.h>
 
-// One match for one family name: a single multi-valued query would rank the
-// families against each other and return one winner, losing the chance to skip
-// a missing family and try the next.
+#include <algorithm>
+
+// ---- picking the face -------------------------------------------------------
 //
-// Noto splits weights across files, so a bold weight lands on a different one;
-// a family with no bold matches its regular file, and the panel draws that at
-// the bold slots.
+// cjk_families is a preference order, not a test: a distro can have a perfectly
+// good Japanese face under a name that is not on the list. So the question is
+// asked in languages rather than in names -- lang=ja for Japanese, lang=ja,en
+// for Japanese and Latin together. fontconfig intersects the tags, so naming
+// both asks for a face that covers both.
+//
+// That intersection is what keeps a CJK-only fallback out of the slot that
+// draws the whole UI. A fallback such as Droid Sans Fallback covers kana and
+// kanji and expects another font to supply the Latin, so putting it in the
+// program's one font draws the English labels as nothing at all -- not as tofu
+// boxes, because the glyphs it lacks are drawn from nowhere. It is the one case
+// the merge in add_cjk_ui_font() exists to mend, and the merge source is a
+// lang=ja query, which is happy to take a CJK-only face.
+//
+// A query has to be able to fail, which is why this is FcFontList and not
+// FcFontMatch. A match never fails: FcDefaultSubstitute fills a missing family
+// in with the closest thing the system has, so asking for a macOS face on Linux
+// answers with DejaVu, and every fullwidth bracket and kanji outside 0x00FF
+// comes out as a tofu box. An empty list is the honest answer.
+
+// The file for one family name, or nothing when the machine has no such family.
+// One family per call, so the walk takes the first that answers. The set comes
+// back ranked, so asking for the wanted weight and taking the first face is
+// enough; a family that keeps its weights in separate files resolves each to
+// its own, and one that does not answers the same face for both.
 static std::string cjk_fontconfig_match(const char *family, bool bold)
+{
+	// A font's own family list holds its regional and weight names too, so
+	// "Noto Sans CJK" finds the "Noto Sans CJK JP" face without any prefix
+	// handling here: one family with regional files, not several families.
+	//
+	// Weight is an exact test, not a threshold, so a family with no bold comes
+	// back empty on the first pass and is taken as it is on the second.
+	std::string path;
+	for (int pass = 0; pass < 2 && path.empty(); pass++) {
+		FcPattern *pat = FcPatternCreate();
+		if (!pat)
+			return {};
+		FcPatternAddString(pat, FC_FAMILY,
+		                   reinterpret_cast<const FcChar8 *>(family));
+		if (!pass)
+			FcPatternAddInteger(pat, FC_WEIGHT,
+			                    bold ? FC_WEIGHT_BOLD : FC_WEIGHT_REGULAR);
+		FcFontSet *set = FcFontList(nullptr, pat, nullptr);
+		if (set) {
+			for (int i = 0; i < set->nfont && path.empty(); i++) {
+				FcChar8 *file = nullptr;
+				if (FcPatternGetString(set->fonts[i], FC_FILE, 0, &file)
+				    == FcResultMatch && file)
+					path = reinterpret_cast<const char *>(file);
+			}
+			FcFontSetDestroy(set);
+		}
+		FcPatternDestroy(pat);
+	}
+	return path;
+}
+
+// The file for the first face fontconfig offers for these languages, or nothing
+// when it offers none.
+static std::string cjk_fontconfig_scan(std::initializer_list<const char *> langs)
+{
+	FcPattern *pat = FcPatternCreate();
+	if (!pat)
+		return {};
+	FcLangSet *set = FcLangSetCreate();
+	for (const char *tag : langs)
+		FcLangSetAdd(set, reinterpret_cast<const FcChar8 *>(tag));
+	FcPatternAddLangSet(pat, FC_LANG, set);
+	FcLangSetDestroy(set);
+	FcFontSet *faces = FcFontList(nullptr, pat, nullptr);
+	FcPatternDestroy(pat);
+	if (!faces)
+		return {};
+	std::string found;
+	for (int i = 0; i < faces->nfont && found.empty(); i++) {
+		FcChar8 *file = nullptr;
+		if (FcPatternGetString(faces->fonts[i], FC_FILE, 0, &file) == FcResultMatch
+		    && file)
+			found = reinterpret_cast<const char *>(file);
+	}
+	FcFontSetDestroy(faces);
+	return found;
+}
+
+// The program's one font, so it wants Latin as well as Japanese.
+static std::string cjk_fontconfig_any()
+{
+	return cjk_fontconfig_scan({ "ja", "en" });
+}
+
+// Japanese alone, for the merge source, so a CJK-only face will do.
+static std::string cjk_fontconfig_japanese()
+{
+	return cjk_fontconfig_scan({ "ja" });
+}
+
+// The system's own sans, for a machine with no Japanese face installed.
+static std::string cjk_fontconfig_sans()
 {
 	FcPattern *pat = FcPatternCreate();
 	if (!pat)
 		return {};
 	FcPatternAddString(pat, FC_FAMILY,
-	                   reinterpret_cast<const FcChar8 *>(family));
+	                   reinterpret_cast<const FcChar8 *>("sans-serif"));
 	FcPatternAddDouble(pat, FC_SIZE, 16.0);
-	if (bold)
-		FcPatternAddInteger(pat, FC_WEIGHT, FC_WEIGHT_BOLD);
 	FcConfigSubstitute(nullptr, pat, FcMatchPattern);
 	FcDefaultSubstitute(pat);
 	FcResult res = FcResultNoMatch;
@@ -414,15 +510,45 @@ static std::string cjk_fontconfig_match(const char *family, bool bold)
 	return path;
 }
 
+// Whether the face the walk settles on draws Japanese. Every named family is a
+// CJK face by construction and the lang query asks for it, so only the
+// last-ditch sans fallback is Latin-only.
+//
+// inline, not static: the panel and the editor windows are separate translation
+// units, and a static in a header gives each one its own copy. The panel's walk
+// then set its copy and left the editors' untouched, so the merge was skipped
+// and the Japanese text never arrived.
+#if !defined(_WIN32) && !defined(__APPLE__)
+inline bool cjk_primary_covers_japanese = true;
+#endif
+
 inline void cjk_offers(bool bold, std::vector<face_offer> &out)
 {
 	// No dedupe: repeats cost nothing, the walk stops at the first face.
+#if !defined(_WIN32) && !defined(__APPLE__)
+	cjk_primary_covers_japanese = true;
+#endif
 	for (const char *family : cjk_families)
 		if (std::string path = cjk_fontconfig_match(family, bold); !path.empty())
 			out.push_back({ std::move(path), {} });
+	// Nothing from the list: this machine simply has none of those families.
+	// A face that draws Japanese is still the right answer, so look for one by
+	// what it can render.
+	if (out.empty())
+		if (std::string path = cjk_fontconfig_any(); !path.empty())
+			out.push_back({ std::move(path), {} });
+	// And if it has no Japanese at all, a real Latin font beats the embedded
+	// default. Japanese text will be tofu either way, but the rest of the UI
+	// stops looking like a 1996 demo.
+	if (out.empty())
+		if (std::string path = cjk_fontconfig_sans(); !path.empty()) {
+			cjk_primary_covers_japanese = false;
+			out.push_back({ std::move(path), {} });
+		}
 }
 
 #endif
+
 
 // ---- taking the first face that comes back ---------------------------------
 
@@ -450,10 +576,8 @@ static bool cjk_offer_bytes(const face_offer &offer, face_bytes &out)
 
 // The first face the walk turns up, read once and kept to process exit: the
 // atlas reads from disk on every call without a cache, and the panel
-// re-rasterizes six sizes per resize, so that would be megabytes per resize.
-// The buffer outlives every atlas (FontDataOwnedByAtlas = false), which the
-// lazy bakes need; an empty walk is remembered, so a fontless machine does not
-// re-enumerate on every call.
+// re-rasterizes six sizes per resize. The buffer outlives every atlas
+// (FontDataOwnedByAtlas = false), which the lazy bakes need.
 inline const void *cjk_face_data(bool bold, size_t &bytes, int &face, float &em)
 {
 	static bool walked[2] = { false, false };
@@ -501,12 +625,36 @@ inline float cjk_face_em(bool bold)
 	return em;
 }
 
+#if !defined(_WIN32) && !defined(__APPLE__)
+// A face that draws Japanese, whether or not it draws Latin -- the partner for
+// MergeMode below, which needs the Japanese glyphs without the Latin ones.
+inline const void *cjk_japanese_only_data(size_t &bytes, int &face, float &em)
+{
+	static bool walked = false;
+	static face_bytes kept;
+	if (!walked) {
+		walked = true;
+		if (std::string path = cjk_fontconfig_japanese(); !path.empty()) {
+			face_offer o;
+			o.path = path;
+			face_bytes got;
+			if (cjk_offer_bytes(o, got))
+				kept = std::move(got);
+		}
+	}
+	bytes = kept.data.size();
+	face = kept.face;
+	em = kept.em;
+	return kept.data.empty() ? nullptr : kept.data.data();
+}
+#endif
+
 // Put one CJK face into an atlas at a given size, or ImGui's built-in when the
 // machine has no Japanese font. The buffer stays ours (FontDataOwnedByAtlas =
 // false); `bold` without a bold face draws the regular one.
 //
-// **One font setup for the whole program**: the panel's six sizes, the window's
-// own pieces and the five PC editor windows. One list of names, in one place.
+// One font setup for the whole program: the panel's six sizes, the window's own
+// pieces and the five PC editor windows.
 inline ImFont *add_cjk_font(ImFontAtlas *atlas, float px = 16.0f, bool bold = false)
 {
 	size_t bytes = 0;
@@ -527,6 +675,47 @@ inline ImFont *add_cjk_font(ImFontAtlas *atlas, float px = 16.0f, bool bold = fa
 			return font;
 	}
 	return atlas->AddFontDefault();
+}
+
+// The font for text the *user* reads -- the window's button strip and the
+// editor windows -- as opposed to the panel's own lettering, which comes from
+// panel.txt and is English on every platform.
+//
+// Same face as add_cjk_font(), except that a machine whose only Japanese-capable
+// font is a fallback (Droid Sans Fallback: kana and kanji, no Latin) gets that
+// one's glyphs merged into the Latin face. Without the merge the walk has to
+// choose, and either choice loses: the CJK-only face draws the English labels
+// as nothing, and a Latin face leaves （） and the kanji as tofu.
+//
+// Which glyphs to bring across. MergeMode rasterises every glyph in the range
+// it is handed, so English asks for much less: overview.cpp formats its
+// parameter captions with fullwidth parentheses whatever the language, and
+// Halfwidth and Fullwidth Forms covers those. Japanese mode gets the standard
+// Japanese range, for the kana and kanji.
+inline ImFont *add_cjk_ui_font(ImFontAtlas *atlas, float px = 16.0f, bool bold = false)
+{
+	ImFont *primary = add_cjk_font(atlas, px, bold);
+	if (!primary)
+		return primary;
+#if !defined(_WIN32) && !defined(__APPLE__)
+	if (cjk_primary_covers_japanese)
+		return primary;              // the face already has both scripts
+	size_t bytes = 0;
+	int face = 0;
+	float em = 1.0f;
+	const void *extra = cjk_japanese_only_data(bytes, face, em);
+	if (!extra)
+		return primary;
+	static ImWchar fullwidth[] = { 0xFF00, 0xFFEF, 0 };
+	ImFontConfig cfg;
+	cfg.FontDataOwnedByAtlas = false;
+	cfg.FontNo = face;
+	cfg.MergeMode = true;            // into the font added just above
+	cfg.GlyphRanges = ui::show_english() ? fullwidth
+	                                    : atlas->GetGlyphRangesJapanese();
+	atlas->AddFontFromMemoryTTF(const_cast<void *>(extra), int(bytes), px, &cfg);
+#endif
+	return primary;
 }
 
 #endif // S_MU2000_UI_FONT_FILE_H

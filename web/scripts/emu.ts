@@ -8,7 +8,10 @@ import path from "node:path";
 
 export const SOURCES = [
     "src/compat/compat.cpp",
+    "src/sampling.cpp",
     "src/smartmedia.cpp",
+    "src/card_fs.cpp",
+    "src/m2a.cpp",
     "src/mame/sound/swp30.cpp",
     "src/mame/sound/swp30_jit.cpp",
     "src/mame/video/hd44780.cpp",

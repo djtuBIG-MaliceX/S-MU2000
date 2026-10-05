@@ -143,7 +143,7 @@ bool pc_editor::knob(const xg::param &p, int part, int &v, bool known, float wid
 
 	// 数を打つ
 	if (ImGui::BeginPopup("##type")) {
-		ImGui::TextDisabled("%s（%d-%d）", p.label, p.min, p.max);
+		ImGui::TextDisabled(UI_TEXT(cap_range1_fmt, "%s (%d-%d)"), p.label, p.min, p.max);
 		const ImGuiID typed_id = ImGui::GetID("typed");
 		ImGuiStorage *st = ImGui::GetStateStorage();
 		int typed = st->GetInt(typed_id, v);

@@ -618,7 +618,7 @@ bool pc_window::create(std::string &err)
 	// The one shared font setup: ui/font_file.h asks CoreText for a face by
 	// family name (never a hard-coded path into /System), checks it can draw
 	// what the panel writes, and reads it once.
-	add_cjk_font(io.Fonts);
+	add_cjk_ui_font(io.Fonts);
 
 	ImGui_ImplMetal_Init(h->dev);
 	h->view->_ctx = m_imgui;

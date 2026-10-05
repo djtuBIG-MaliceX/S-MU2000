@@ -42,6 +42,7 @@ enum bar_window {
 	BAR_FX = 2,     // インサーションの設定
 	BAR_SHAPES = 3, // パートの音色
 	BAR_MASTER = 4, // マスター
+	BAR_SAMPLING = 5, // サンプリング
 };
 
 // The strip every window shows, in the same order with the same ids.
@@ -53,7 +54,8 @@ inline std::vector<tool_item> window_bar_items()
 	         { UI_TEXT(bar_editor, "Editor"), BAR_EDITOR },
 	         { UI_TEXT(bar_shapes, "Voices"), BAR_SHAPES },
 	         { UI_TEXT(bar_fx, "Effects"), BAR_FX },
-	         { UI_TEXT(bar_master, "Master"), BAR_MASTER } };
+	         { UI_TEXT(bar_master, "Master"), BAR_MASTER },
+	         { UI_TEXT(bar_sampling, "Sampling"), BAR_SAMPLING } };
 }
 
 class pc_window;   // ui/pc_window.h (one class, two hosts)
@@ -61,13 +63,15 @@ class pc_window;   // ui/pc_window.h (one class, two hosts)
 // Which PC window a toolbar id names. One place so no front end maps one
 // button to a different window
 inline pc_window *window_for_kind(int kind, pc_window &list, pc_window &editor,
-                                  pc_window &fx, pc_window &shapes, pc_window &master)
+                                  pc_window &fx, pc_window &shapes, pc_window &master,
+                                  pc_window &sampling)
 {
 	switch (kind) {
 	case BAR_EDITOR: return &editor;
 	case BAR_FX:     return &fx;
 	case BAR_SHAPES: return &shapes;
 	case BAR_MASTER: return &master;
+	case BAR_SAMPLING: return &sampling;
 	default:         return &list;
 	}
 }

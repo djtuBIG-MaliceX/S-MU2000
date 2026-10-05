@@ -21,6 +21,7 @@
 #include "ui/fx_editor.h"
 #include "ui/keymap.h"
 #include "ui/master_editor.h"
+#include "ui/sampling_editor.h"
 #include "ui/menu.h"
 #include "ui/overview.h"
 #include "ui/part_shapes.h"
@@ -446,7 +447,7 @@ public:
 	void open_pc(ui::pc_window &w);
 	void open_pc_window(int kind) override
 	{
-		open_pc(*pc_window_for_kind(kind, m_list, m_editor, m_fx, m_shapes, m_master));
+		open_pc(*pc_window_for_kind(kind, m_list, m_editor, m_fx, m_shapes, m_master, m_sampling));
 	}
 
 private:
@@ -459,6 +460,7 @@ private:
 	ui::pc_window m_fx{ std::make_unique<ui::fx_editor>() };
 	ui::pc_window m_shapes{ std::make_unique<ui::part_shapes>() };
 	ui::pc_window m_master{ std::make_unique<ui::master_editor>() };
+	ui::pc_window m_sampling{ std::make_unique<ui::sampling_editor>() };
 };
 
 // Objective-C lives at global scope (see the note on SMUPlugView above);
@@ -640,6 +642,7 @@ void mac_window::detach()
 	m_fx.hide();
 	m_shapes.hide();
 	m_master.hide();
+	m_sampling.hide();
 	if (m_view) {
 		[[NSNotificationCenter defaultCenter] removeObserver:m_view];
 		[m_view stopImgui];
@@ -665,7 +668,7 @@ void mac_window::open_pc(ui::pc_window &w)
 // Driven at the panel's repaint rate. Hidden windows cost nothing
 void mac_window::pc_frame(::xg::model &m, const ::ui::xg_snapshot &ram, ::ui::bridge &br)
 {
-	ui::pc_frame_all(m_list, m_editor, m_fx, m_shapes, m_master, m, ram, br,
+	ui::pc_frame_all(m_list, m_editor, m_fx, m_shapes, m_master, m_sampling, m, ram, br,
 	                 [this](ui::pc_window &w) { open_pc(w); });
 }
 

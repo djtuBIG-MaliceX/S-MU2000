@@ -21,7 +21,10 @@ endif()
 # ---- Emulator core (same sources as SRCS in the Makefile) -------------------
 add_library(smu2000_core STATIC
   src/compat/compat.cpp
+  src/sampling.cpp
   src/smartmedia.cpp
+  src/card_fs.cpp
+  src/m2a.cpp
   src/mame/sound/swp30.cpp
   src/mame/sound/swp30_jit.cpp
   src/mame/video/hd44780.cpp
@@ -152,7 +155,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
       src/ui/app_linux.cpp
       src/ui/pc_window_linux.cpp
       src/ui/pc_editor.cpp src/ui/overview.cpp src/ui/fx_editor.cpp
-      src/ui/part_shapes.cpp src/ui/master_editor.cpp
+      src/ui/part_shapes.cpp src/ui/master_editor.cpp src/ui/sampling_editor.cpp
       ${IMGUI_CORE}
       third_party/imgui/backends/imgui_impl_sdl3.cpp
       third_party/imgui/backends/imgui_impl_sdlrenderer3.cpp

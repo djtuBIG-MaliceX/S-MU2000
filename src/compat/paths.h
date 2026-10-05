@@ -98,15 +98,41 @@ inline std::string exe_dir()
 #endif
 }
 
+// An environment variable, or "" if it is not set.
+//
+// On Windows this reads the process environment through Win32 rather than the
+// C runtime: a plug-in built against one runtime (MSVCRT) inside a host built
+// against another (UCRT) does not see variables the host set through its own
+// runtime, because each runtime keeps a private copy (PR #92). The value stays
+// in the ANSI code page on purpose: most files here are opened with plain
+// std::fopen, which expects exactly that
+inline std::string env(const char *name)
+{
+#if defined(_WIN32)
+	const DWORD n = GetEnvironmentVariableA(name, nullptr, 0);
+	if (n <= 1)
+		return {};
+	std::string v(n, '\0');
+	const DWORD got = GetEnvironmentVariableA(name, v.data(), n);
+	if (got == 0 || got >= n)
+		return {};
+	v.resize(got);
+	return v;
+#else
+	const char *v = std::getenv(name);
+	return (v && *v) ? std::string(v) : std::string();
+#endif
+}
+
 // The per-user settings directory, with a trailing separator. Nothing is
 // created by asking
 inline std::string config_dir()
 {
 #if defined(_WIN32)
-	const char *base = std::getenv("LOCALAPPDATA");
-	if (!base || !*base)
+	const std::string base = env("LOCALAPPDATA");
+	if (base.empty())
 		return {};
-	return std::string(base) + "\\S-MU2000\\";
+	return base + "\\S-MU2000\\";
 #elif !defined(__APPLE__)
 	// Linux: where the desktop specification (XDG) puts a program's own data
 	const char *data = std::getenv("XDG_DATA_HOME");
@@ -147,10 +173,10 @@ inline std::string config_dir()
 inline std::string shared_config_dir()
 {
 #if defined(_WIN32)
-	const char *base = std::getenv("ProgramData");
-	if (!base || !*base)
+	const std::string base = env("ProgramData");
+	if (base.empty())
 		return {};
-	return std::string(base) + "\\S-MU2000\\";
+	return base + "\\S-MU2000\\";
 #elif !defined(__APPLE__)
 	return "/usr/local/share/S-MU2000/";
 #else
@@ -177,13 +203,6 @@ inline std::string join(const std::string &dir, const std::string &rel)
 	for (char c : rel)
 		out += (c == '/') ? sep : c;
 	return out;
-}
-
-// An environment variable, or "" if it is not set
-inline std::string env(const char *name)
-{
-	const char *v = std::getenv(name);
-	return (v && *v) ? std::string(v) : std::string();
 }
 
 // The user's home directory, or "" if the platform will not say

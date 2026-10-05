@@ -1220,6 +1220,34 @@ void panel::draw_button(ImDrawList *dl, const spot &sp, bool down) const
 }
 
 // 大きなダイヤル。回した角度で窪みが回る
+// 差さっている SmartMedia。正面から見ると、差し込み口の中にカードの縁が見え、少し手前に出ている。
+// 実機の写真の青いカードに合わせ、縁の上を明るく、下を暗くして厚みを出す
+void panel::draw_card(ImDrawList *dl) const
+{
+	double sx = m_lay.card_slot[0], sy = m_lay.card_slot[1], sw = m_lay.card_slot[2], sh = m_lay.card_slot[3];
+	if (sw <= 0) {
+		sx = m_lay.card[0] + 6;
+		sy = m_lay.card[1] + m_lay.card[3] + 2;
+		sw = m_lay.card[2] - 12;
+		sh = 7;
+	}
+	// 差し込み口の幅より少し細く、上に暗い隙間を残す。下は口の縁をわずかに越えて手前に出る
+	const RECT r = scale(sx + sw * 0.03, sy + sh * 0.32, sw * 0.94, sh * 0.80);
+	const float x0 = float(r.left), y0 = float(r.top), x1 = float(r.right), y1 = float(r.bottom);
+	const float rr = std::max(1.0f, float(1.2 * m_scale));
+	const float hl = std::max(1.0f, float(1.2 * m_scale));
+	// 縁の影（口の中へ落ちる）
+	dl->AddRectFilled(ImVec2(x0 + hl, y0 + hl), ImVec2(x1 + hl, y1 + hl), IM_COL32(0, 0, 0, 120), rr);
+	dl->AddRectFilledMultiColor(ImVec2(x0, y0), ImVec2(x1, y1), IM_COL32(52, 118, 206, 255), IM_COL32(52, 118, 206, 255),
+	                            IM_COL32(24, 66, 140, 255), IM_COL32(24, 66, 140, 255));
+	// 手前に出た所の天面は明るく
+	dl->AddRectFilled(ImVec2(x0 + rr, y0), ImVec2(x1 - rr, y0 + hl), IM_COL32(150, 192, 240, 255));
+	dl->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), IM_COL32(14, 34, 76, 255), rr, 0, std::max(1.0f, float(0.6 * m_scale)));
+	// 左寄りの指をかける小さな凹み
+	const float nx = x0 + (x1 - x0) * 0.1f, nw = std::max(3.0f, float(8 * m_scale));
+	dl->AddRectFilled(ImVec2(nx, y1 - hl * 1.8f), ImVec2(nx + nw, y1), IM_COL32(20, 52, 112, 255), rr * 0.5f);
+}
+
 void panel::draw_wheel(ImDrawList *dl, int angle) const
 {
 	const POINT c = at(m_lay.dial[0], m_lay.dial[1]);
@@ -1508,6 +1536,8 @@ void panel::paint_front(ImDrawList *dl, const snapshot &s, u64 pressed, double v
 			             m_fonts.small, m_fonts.small_px, true);
 	}
 
+	if (s.card)
+		draw_card(dl);
 	draw_wheel(dl, m_wheel_angle);
 	draw_volume(dl, volume);
 	draw_adgain(dl);

@@ -2,6 +2,7 @@
 //
 // MU2000 一台ぶんの組み立て。配置は MAME の ymmu2000.cpp と同じ。
 
+#include "compat/cli_text.h"
 #include "mu2000.h"
 #include "lcdfont.h"
 #include "roms_dir.h"
@@ -378,7 +379,7 @@ bool mu2000::load_program(const std::string &path)
 {
 	std::vector<u8> raw;
 	if (!read_file(path, raw, 0x400000)) {
-		m_error = "プログラム ROM を読めない（4MB でないか、見つからない）: " + path;
+		m_error = CLI_T("Cannot read the program ROM (not 4MB, or not found): ", "プログラム ROM を読めない（4MB でないか、見つからない）: ") + path;
 		return false;
 	}
 	return load_program_data(raw.data(), raw.size());
@@ -387,7 +388,7 @@ bool mu2000::load_program(const std::string &path)
 bool mu2000::load_program_data(const u8 *data, size_t size)
 {
 	if (!data || size != 0x400000) {
-		m_error = "プログラム ROM の大きさが 4MB でない";
+		m_error = CLI_T("The program ROM is not 4MB", "プログラム ROM の大きさが 4MB でない");
 		return false;
 	}
 	set_program_rom(std::make_shared<std::vector<u8>>(data, data + size));
@@ -432,7 +433,7 @@ bool mu2000::load_wave(const std::string &dir)
 	for (int i = 0; i < 4; i++) {
 		const std::string path = dir + "/" + WAVE_ROM_NAMES[i];
 		if (!read_file(path, parts[i], 0x800000)) {
-			m_error = "波形 ROM を読めない（8MB でないか、見つからない）: " + path;
+			m_error = CLI_T("Cannot read the wave ROM (not 8MB, or not found): ", "波形 ROM を読めない（8MB でないか、見つからない）: ") + path;
 			return false;
 		}
 	}
@@ -449,7 +450,7 @@ bool mu2000::load_wave_data(const u8 *const part[4], const size_t size[4])
 	//   ic53 / ic54 -> 0x1000000 語目から同じ形で
 	for (int i = 0; i < 4; i++)
 		if (!part[i] || size[i] != 0x800000) {
-			m_error = std::string("波形 ROM の大きさが 8MB でない: ") + WAVE_ROM_NAMES[i];
+			m_error = std::string(CLI_T("The wave ROM is not 8MB: ", "波形 ROM の大きさが 8MB でない: ")) + WAVE_ROM_NAMES[i];
 			return false;
 		}
 	auto rom = std::make_shared<std::vector<u8>>(0x2000000, 0);   // 32MB
@@ -472,7 +473,7 @@ bool mu2000::load_sintab(const std::string &path)
 {
 	std::vector<u8> raw;
 	if (!read_file(path, raw, 0x10000)) {
-		m_error = "sin 表を読めない（64KB でないか、見つからない）: " + path;
+		m_error = CLI_T("Cannot read the sine table (not 64KB, or not found): ", "sin 表を読めない（64KB でないか、見つからない）: ") + path;
 		return false;
 	}
 	return load_sintab_data(raw.data(), raw.size());
@@ -481,7 +482,7 @@ bool mu2000::load_sintab(const std::string &path)
 bool mu2000::load_sintab_data(const u8 *data, size_t size)
 {
 	if (!data || size != 0x10000) {
-		m_error = "sin 表の大きさが 64KB でない";
+		m_error = CLI_T("The sine table is not 64KB", "sin 表の大きさが 64KB でない");
 		return false;
 	}
 	auto rom = std::make_shared<std::vector<u16>>(size / 2);
@@ -604,7 +605,7 @@ bool mu2000::load_lcd_font(const std::string &path)
 {
 	auto rom = std::make_shared<std::vector<u8>>();
 	if (!read_file(path, *rom, 0x1000)) {
-		m_error = "LCD の字を読めない（4KB でないか、見つからない）: " + path;
+		m_error = CLI_T("Cannot read the LCD font (not 4KB, or not found): ", "LCD の字を読めない（4KB でないか、見つからない）: ") + path;
 		return false;
 	}
 	set_lcd_font(std::move(rom));
@@ -1120,7 +1121,7 @@ void mu2000::reset()
 		//   PA18 (0x04) 忙しい（0 で準備ができている。firmware は 0 になるのを待つ）/ PA19 (0x08) 差し込まれている /
 		//   PA20 (0x10) 書き込みを禁じていない
 		// 読み書きはその場で済むので、忙しい印は立てない
-		if (m_card.inserted()) {
+		if (m_card.inserted() && m_sample_count >= m_card_back_at) {
 			v |= 1u << 19;
 			if (!m_card.write_protected)
 				v |= 1u << 20;
@@ -3224,6 +3225,24 @@ void mu2000::run_sample(s32 &left, s32 &right)
 	    !(++m_scope_tick & 0xff))
 		scope_refresh_owner();
 
+	// パートのミュート。消すパートの声を SWP30 に伝える（外したときは 1 度だけ空にする）
+	if (const u64 pm = m_part_mute.load(std::memory_order_relaxed); pm || m_mute_live) {
+		if (!pm || !(++m_mute_tick & 0x1f)) {
+			u64 vm[2] = { 0, 0 };
+			if (pm) {
+				scope_refresh_owner();
+				for (int v = 0; v < 128; v++) {
+					const int o = m_scope_owner[size_t(v)].load(std::memory_order_relaxed);
+					if (o >= 0 && ((pm >> o) & 1))
+						vm[v / 64] |= u64(1) << (v % 64);
+				}
+			}
+			m_swpm.m_voice_mute.store(vm[0], std::memory_order_relaxed);
+			m_swps.m_voice_mute.store(vm[1], std::memory_order_relaxed);
+			m_mute_live = pm != 0;
+		}
+	}
+
 	// 台数が変わっていたら別スレッドの使い方を見直す（8192 サンプルごと）
 	if (m_want_threaded && !(++m_thread_check & 0x1fff))
 		apply_threading();
@@ -3493,11 +3512,41 @@ void mu2000::run_sample(s32 &left, s32 &right)
 		const s32 a = std::min(std::abs(m_ad_in[i]), 32767);
 		m_ad_peak[i] = a >= m_ad_peak[i] ? a : m_ad_peak[i] - ((m_ad_peak[i] >> 12) + 1);
 	}
+	// 録音（パネルを通さない道。src/sampling.cpp の rec_start）
+	if (m_rec_state) {
+		using smu2000::sampling::source;
+		const s32 v = m_rec_src == source::ad1 ? m_ad_in[0]
+		            : m_rec_src == source::ad2 ? m_ad_in[1]
+		            : std::clamp(m_ad_in[0] + m_ad_in[1], -32768, 32767);
+		if (m_rec_state == 1 && std::abs(v) >= m_rec_trigger)
+			m_rec_state = 2;
+		if (m_rec_state == 2) {
+			if (m_rec_buf.size() < m_rec_max)
+				m_rec_buf.push_back(s16(std::clamp(v, -32768, 32767)));
+			else
+				m_rec_state = 0;
+		}
+	}
 
 	// スピーカーに出るのはマスタの DAC だけ。
 	// スレーブの DAC はどこにも繋がっていない
 	left  = lm;
 	right = rm;
+	// サンプリングの窓の試聴。サンプリング RAM の 16bit をそのまま DAC の目盛りで足す（src/sampling.cpp）
+	if (m_prev_on) {
+		const size_t at = size_t(m_prev_base + m_prev_pos) * 2;
+		const bool ext = !m_prev_ext.empty();
+		if (m_prev_pos < m_prev_end && (ext ? m_prev_pos < m_prev_ext.size() : at + 1 < m_sampram.size())) {
+			const s16 v = ext ? m_prev_ext[m_prev_pos] : s16(m_sampram[at] | m_sampram[at + 1] << 8);
+			const s32 o = s32(s64(v) * DAC_FULL_SCALE / 32768);
+			left += o;
+			right += o;
+			if (++m_prev_pos >= m_prev_end && m_prev_loop != ~0u)
+				m_prev_pos = m_prev_loop;
+		} else {
+			m_prev_on = false;
+		}
+	}
 	// 一覧のマスターのスペクトラム（最終の出力、左右の平均）
 	if (m_pscope_on.load(std::memory_order_relaxed)) {
 		const u32 w = m_oscope_w.load(std::memory_order_relaxed);
@@ -3639,11 +3688,11 @@ bool mu2000::load_state(const u8 *p, size_t n, std::string &err)
 	s.v(magic);
 	s.v(ver);
 	if (!s.ok() || magic != STATE_MAGIC) {
-		err = "これは S-MU2000 の状態ではない";
+		err = CLI_T("This is not an S-MU2000 state", "これは S-MU2000 の状態ではない");
 		return false;
 	}
 	if (ver < STATE_VERSION_OLDEST || ver > STATE_VERSION) {
-		err = "状態の形が違う（この版では読めない）";
+		err = CLI_T("The state has a different layout (this version cannot read it)", "状態の形が違う（この版では読めない）");
 		return false;
 	}
 	s.set_version(ver);

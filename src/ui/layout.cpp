@@ -181,7 +181,7 @@ layout::layout()
 	const double cd[4] = { 57, 336, 201, 21 };
 	const double ad[4] = { 8, 44, 60, 130 };
 	const double ph[4] = { 198, 238, 74, 82 };   // 丸と下の札。組み込みの絵（丸 228, 269）と art/mame の絵（丸 251, 257）の両方に当たる
-	for (int i = 0; i < 4; i++) { card[i] = cd[i]; adin[i] = ad[i]; phones[i] = ph[i]; }
+	for (int i = 0; i < 4; i++) { card[i] = cd[i]; adin[i] = ad[i]; phones[i] = ph[i]; card_slot[i] = 0; }
 
 	// ---- 飾り。実機の写真から採寸した
 	bool ok = false;
@@ -437,6 +437,7 @@ bool layout::load(const std::string &path, std::string &err)
 		else if (key == "lcd.frame") { if (need(2)) lcd_frame = num(t[1]) != 0; }
 		else if (key == "plg")    { if (need(4)) for (int i = 0; i < 3; i++) plg[i] = num(t[1 + i]); }
 		else if (key == "card")   { if (need(5)) for (int i = 0; i < 4; i++) card[i] = num(t[1 + i]); }
+		else if (key == "card.slot") { if (need(5)) for (int i = 0; i < 4; i++) card_slot[i] = num(t[1 + i]); }
 		else if (key == "adin")   { if (need(5)) for (int i = 0; i < 4; i++) adin[i] = num(t[1 + i]); }
 		else if (key == "phones") { if (need(5)) for (int i = 0; i < 4; i++) phones[i] = num(t[1 + i]); }
 		else if (key == "low.x")  { if (need(12)) for (int i = 0; i < 11; i++) low_x[i] = num(t[1 + i]); }
@@ -569,6 +570,9 @@ bool layout::save(const std::string &path) const
 	             plg[0], plg[1], plg[2]);
 	std::fprintf(f, "card %g %g %g %g   # カードの差し込み口。右クリックで MIDI ファイル\n",
 	             card[0], card[1], card[2], card[3]);
+	if (card_slot[2] > 0)
+		std::fprintf(f, "card.slot %g %g %g %g   # 差し込み口の開いた所。カードが差さっていると縁を描く\n",
+		             card_slot[0], card_slot[1], card_slot[2], card_slot[3]);
 	std::fprintf(f, "adin %g %g %g %g     # A/D INPUT のジャック\n",
 	             adin[0], adin[1], adin[2], adin[3]);
 	std::fprintf(f, "phones %g %g %g %g   # PHONES のジャック。押すと音の出口（デジタル / アナログ）の品書き\n",

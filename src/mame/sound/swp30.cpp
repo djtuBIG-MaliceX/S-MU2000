@@ -4642,6 +4642,11 @@ void swp30_device::sample_step()
 
 	std::array<s32, 0x40> samples_per_chan;
 	awm2_step(samples_per_chan);
+	// S-MU2000: ミュートした声は、画面にもミックスにも出さない
+	if(const u64 mute = m_voice_mute.load(std::memory_order_relaxed))
+		for(int i = 0; i < 0x40; i++)
+			if((mute >> i) & 1)
+				samples_per_chan[i] = 0;
 	// S-MU2000: 声ごとの出力を画面へ（パートの音のスペクトラム）
 	if(m_voice_tap)
 		m_voice_tap(m_voice_tap_ctx, samples_per_chan.data());

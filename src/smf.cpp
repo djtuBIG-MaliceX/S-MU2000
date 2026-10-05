@@ -2,12 +2,21 @@
 //
 // SMF の読み込み。smf.h の説明を参照。
 
+#include "compat/cli_text.h"
 #include "smf.h"
 
 #include <algorithm>
 #include <cstdio>
 #include <cctype>
 #include <cstring>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 
 namespace smf {
 
@@ -64,11 +73,11 @@ bool load_from_memory(const u8 *data, size_t size, std::vector<event> &out, std:
 	const size_t n = size;
 
 	if (n < 14 || std::memcmp(d, "MThd", 4)) {
-		err = "MThd がない。標準 MIDI ファイルではないらしい"; return false;
+		err = CLI_T("No MThd. This does not look like a standard MIDI file", "MThd がない。標準 MIDI ファイルではないらしい"); return false;
 	}
 	const u16 ntrk = be16(&d[10]);
 	const u16 div  = be16(&d[12]);
-	if (div & 0x8000) { err = "SMPTE 単位の MIDI には未対応"; return false; }
+	if (div & 0x8000) { err = CLI_T("MIDI files in SMPTE time are not supported", "SMPTE 単位の MIDI には未対応"); return false; }
 
 	// まずは全トラックを (tick, バイト列) で集める
 	struct raw { u64 tick; std::vector<u8> bytes; bool tempo; u32 usec; u8 port; };
@@ -177,13 +186,28 @@ bool load_from_memory(const u8 *data, size_t size, std::vector<event> &out, std:
 // ファイルから読んで load_from_memory に渡す（既存の呼び出し側用）
 bool load(const std::string &path, std::vector<event> &out, std::string &err)
 {
+#ifdef _WIN32
+	std::FILE *f = nullptr;
+	const int n = MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, nullptr, 0);
+	if (n > 0) {
+		std::wstring w(size_t(n), L'\0');
+		MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, w.data(), n);
+		f = _wfopen(w.c_str(), L"rb");
+	}
+	if (!f)
+#else
 	std::FILE *f = std::fopen(path.c_str(), "rb");
-	if (!f) { err = "MIDI ファイルを開けない: " + path; return false; }
+	if (!f)
+#endif
+	{
+		err = CLI_T("Cannot open the MIDI file: ", "MIDI ファイルを開けない: ") + path;
+		return false;
+	}
 	std::fseek(f, 0, SEEK_END);
 	std::vector<u8> d(size_t(std::ftell(f)));
 	std::fseek(f, 0, SEEK_SET);
 	if (std::fread(d.data(), 1, d.size(), f) != d.size()) {
-		std::fclose(f); err = "MIDI ファイルを読めない"; return false;
+		std::fclose(f); err = CLI_T("Cannot read the MIDI file", "MIDI ファイルを読めない"); return false;
 	}
 	std::fclose(f);
 	return load_from_memory(d.data(), d.size(), out, err);

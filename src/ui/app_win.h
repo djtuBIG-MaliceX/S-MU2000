@@ -34,6 +34,22 @@ public:
 	    : app(b, mi, tha, thb, muo) {}
 
 	HWND hwnd = nullptr;             // set at WM_CREATE, for message boxes
+	// 描画の外で行う仕事（app::defer_outside_paint）。WM_APP_DEFERRED を受けた wnd_proc が実行する
+	static constexpr UINT WM_APP_DEFERRED = WM_APP + 0x31;
+	std::vector<std::function<void()>> deferred_win;
+	void defer_outside_paint(std::function<void()> f) override
+	{
+		deferred_win.push_back(std::move(f));
+		if (hwnd)
+			PostMessageW(hwnd, WM_APP_DEFERRED, 0, 0);
+	}
+	void run_deferred_win()
+	{
+		std::vector<std::function<void()>> todo;
+		todo.swap(deferred_win);
+		for (auto &f : todo)
+			f();
+	}
 	// Choosing from a menu failed: shown at the end of the command
 	std::string last_error;
 

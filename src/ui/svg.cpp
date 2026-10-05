@@ -885,7 +885,7 @@ void svg_art::draw(ImDrawList *dl, const RECT &dst, double deg) const
 // GDI のときは出来上がりの 1 枚を DIB にして AlphaBlend で貼っていた。
 // ここでは同じ 1 枚を ImGui のテクスチャに置いてから AddImageQuad で置くだけ
 // （im::tex が contexts ごと TextureData を持ってくれるので、
-// DX11 / Metal / SDL_Renderer のどれでも同じ 3 行で済む）
+// DX11 / Metal / SDL_gpu のどれでも同じ 3 行で済む）
 
 namespace {
 
@@ -1087,16 +1087,16 @@ void svg_art::draw_image(ImDrawList *dl, const RECT &dst, double deg) const
 		return ImVec2(float(cx + dx * cs - dy * sn), float(cy + dx * sn + dy * cs));
 	};
 	// The picture goes out as a grid of quads, each at most this big. A single
-	// large textured quad does not survive the trip: through SDL_Renderer (the
-	// --shot path) only one of its two triangles reaches the screen, so the
-	// panel art showed up cut along the diagonal from the top-left to the
-	// bottom-right corner. The command data is right -- the indices, the four
-	// corners and the texture all check out when dumped from inside the
-	// backend -- and it is size-dependent, so it is a rasterizer limit rather
-	// than something the draw list got wrong: a 1335x514 quad loses a
-	// triangle, 1335x257 and 664x514 do not. Same code, same texture, same
-	// frame; only the quad is smaller. Tiles cost a handful of extra quads and
-	// they all share one texture, so they still go out in a single command.
+	// large textured quad does not survive the trip: through SDL_Renderer only
+	// one of its two triangles reached the screen, so the panel art showed up
+	// cut along the diagonal from the top-left to the bottom-right corner. The
+	// command data is right -- the indices, the four corners and the texture
+	// all check out when dumped from inside the backend -- and it is
+	// size-dependent, so it is a rasterizer limit rather than something the
+	// draw list got wrong: a 1335x514 quad loses a triangle, 1335x257 and
+	// 664x514 do not. Same code, same texture, same frame; only the quad is
+	// smaller. Tiles cost a handful of extra quads and they all share one
+	// texture, so they still go out in a single command.
 	static constexpr float TILE = 256.0f;
 	const int nx = std::max(1, int(std::ceil(pw / TILE)));
 	const int ny = std::max(1, int(std::ceil(ph / TILE)));
