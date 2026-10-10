@@ -57,6 +57,7 @@
 @class UIView;
 @class CAMetalLayer;
 @protocol CAMetalDrawable;
+@protocol MTLCommandQueue;
 #endif
 
 // rpcndr's legacy `#define small char` is re-live in TUs that reached the
@@ -65,7 +66,6 @@
 #if defined(_MSC_VER) && defined(small)
 #undef small
 #endif
-
 
 namespace ui {
 namespace imshell {
