@@ -6,7 +6,8 @@
 #
 # MSVC (Windows; the Win32 and x64 platforms are the "profiles", picked with
 # -A, and both compile here — x64 uses the x86-64 JITs in both cases, Win32
-# the ported x86-32 JIT paths; Release defaults to /O2 + /GL + LTCG):
+# the ported x86-32 JIT paths; Release defaults to /O2 + /GL + LTCG). It covers
+# the core, the tools, gui and live, and all three plug-ins:
 #
 #   cmake -S . -B build-x64   -A x64
 #   cmake -S . -B build-win32 -A Win32
@@ -16,7 +17,7 @@
 # The Makefile remains the primary build (it also covers Windows/macOS and the
 # Audio Unit). This file covers the portable core everywhere and the full
 # Linux set (live + VST3 + CLAP + probes) where ALSA is available.
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.16)
 if(POLICY CMP0091)
   # MSVC runtime picked through CMAKE_MSVC_RUNTIME_LIBRARY (default: /MD DLL,
   # like the MinGW builds) instead of hard-coded -MD flags.
@@ -239,22 +240,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
   # no gamepad support, so no XInput (Makefile: IMGUI_FLAGS)
   add_compile_definitions(IMGUI_IMPL_WIN32_DISABLE_GAMEPAD)
 
-  # wingdi.h disagrees with itself between SDK generations: old ones declare
-  # GetFontData's size out-param as LPDWORD, 26100 switched it to a plain
-  # DWORD. Probe the SDK this compiler actually uses and tell font_file.h
-  # which spelling compiles (runtime bug if guessed wrong, so ask the header).
-  if(MSVC)
-    include(CheckCXXSourceCompiles)
-    check_cxx_source_compiles("
-      #include <windows.h>
-      int main() { DWORD n = 0; return GetFontData(nullptr, 0, 0, nullptr, &n) == GDI_ERROR; }
-    " SMU_GETFONTDATA_TAKES_POINTER)
-    if(NOT SMU_GETFONTDATA_TAKES_POINTER)
-      add_compile_definitions(SMU_GETFONTDATA_DWORD_BY_VALUE)
-      message(STATUS "GetFontData: SDK takes the size by value (DWORD)")
-    endif()
-  endif()
-
   # VST3 bundle directory name by profile (Makefile's x86_64-win for x64).
   # MSVC sets CMAKE_SYSTEM_PROCESSOR=AMD64 even for -A Win32, so width decides
   # first and the ISA only separates ARM on the 64-bit path; native arm64(x)
@@ -356,4 +341,24 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
   add_executable(vstiprobe src/vsti/probe.cpp)
   target_include_directories(vstiprobe PRIVATE src src/compat)
   target_link_libraries(vstiprobe PRIVATE user32)
+
+  # ---- The two desktop apps (Makefile: gui / live in the windows branch) -----
+  # src/ui/audio_out.cpp, midi_in.cpp and friends are this platform's versions
+  # (the Linux branch picks the *_linux.cpp ones), so gui.exe and live.exe link
+  # WinMM/WASAPI audio + MIDI straight from them.
+
+  # live: real-time MIDI in -> engine -> audio out, no window
+  add_executable(live src/live.cpp src/ui/audio_out.cpp src/ui/midi_in.cpp)
+  target_include_directories(live PRIVATE src src/compat)
+  target_link_libraries(live PRIVATE smu2000_core winmm ole32 uuid avrt)
+
+  # gui: the front-panel window (Win32 + D3D11), plus the PC editor windows
+  set(GUI_WIN_UI_SRCS
+    src/ui/panel.cpp src/ui/editor.cpp src/ui/effects.cpp src/ui/png.cpp
+    src/ui/audio_out.cpp src/ui/audio_in.cpp src/ui/midi_in.cpp src/ui/midi_out.cpp
+    src/ui/layout.cpp src/ui/svg.cpp src/ui/player.cpp src/xg/model.cpp)
+  add_executable(gui src/gui.cpp ${GUI_WIN_UI_SRCS} ${PC_WIN_SRCS}
+    ${IMGUI_CORE} ${IMGUI_WIN_BACKENDS} src/ui/app_win.cpp src/ui/window_win.cpp)
+  target_include_directories(gui PRIVATE src src/compat third_party/imgui)
+  target_link_libraries(gui PRIVATE smu2000_core ${PLUGIN_WIN_LIBS})
 endif()
