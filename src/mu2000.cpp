@@ -25,6 +25,23 @@
 #include "compat/platform.h"
 #include "compat/realtime.h"
 
+#ifdef _MSC_VER
+// __builtin_popcountll は GCC/Clang 専用なので MSVC では受けて立つ
+// （a64asm.h の __builtin_popcount と同じ流儀）。x64 と SSE4.2 移行は
+// __popcnt64、x86-32 (Win32) は命令に依存しない portable 版で同じ結果にする。
+#include <intrin.h>
+#if defined(_M_X64) || (defined(__AVX2__) || defined(__SSE4_2__))
+inline int __builtin_popcountll(unsigned long long x) { return (int)__popcnt64((unsigned __int64)x); }
+#else
+inline int __builtin_popcountll(unsigned long long x)
+{
+	x -= (x >> 1) & 0x5555555555555555ull;
+	x = (x & 0x3333333333333333ull) + ((x >> 2) & 0x3333333333333333ull);
+	return (int)((((x + (x >> 4)) & 0x0f0f0f0f0f0f0f0full) * 0x0101010101010101ull) >> 56);
+}
+#endif
+#endif
+
 
 namespace {
 

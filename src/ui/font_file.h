@@ -208,12 +208,13 @@ static bool cjk_get_font_bytes(HDC dc, DWORD tag, std::vector<unsigned char> &da
 	if (!size || size == DWORD(GDI_ERROR))
 		return false;
 	data.resize(size);
-	// The two toolchains disagree here and getting it wrong is a
-	// runtime memory error rather than a compile error: the SDK says
-	// LPDWORD, MinGW's wingdi.h says DWORD. Each is therefore called
-	// the way its own header declares it, and the two must not be
-	// "tidied" into one.
-#if defined(__MINGW32__)
+// The two toolchains (and SDK generations) disagree here and getting it wrong
+// is a runtime memory error rather than a compile error: the old SDK says
+// LPDWORD, MinGW's wingdi.h and 26100's say DWORD. CMake probes the SDK in
+// use (SMU_GETFONTDATA_DWORD_BY_VALUE); every other case keeps the pointer.
+// Each form must stay as its own header's declaration spells it -- do not
+// "tidy" the call into one.
+#if defined(__MINGW32__) || (defined(_MSC_VER) && (defined(_M_IX86) || defined(SMU_GETFONTDATA_DWORD_BY_VALUE)))
 	const bool ok = GetFontData(dc, tag, 0, data.data(), DWORD(data.size())) != GDI_ERROR;
 #else
 	DWORD want = DWORD(data.size());
